@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =========================================================
 # n8n-manager.sh - Interactive backup/restore for n8n
-# v2.9.3 - Fixed Git commit detection and dated backup functionality
+# v2.9.4 - Fixed file inclusion in Git backups and dated backup functionality
 # =========================================================
 set -Eeuo pipefail
 IFS=$\'\n\t\'
@@ -10,7 +10,7 @@ IFS=$\'\n\t\'
 CONFIG_FILE_PATH="${XDG_CONFIG_HOME:-$HOME/.config}/n8n-manager/config"
 
 # --- Global variables ---
-VERSION="2.9.3" # Updated with Git commit fixes
+VERSION="2.9.4" # Updated with file inclusion fixes
 DEBUG_TRACE=${DEBUG_TRACE:-false} # Set to true for trace debugging
 SELECTED_ACTION=""
 SELECTED_CONTAINER_ID=""
@@ -780,9 +780,23 @@ backup() {
     # Force Git to commit by adding a timestamp file to make each backup unique
     log DEBUG "Creating timestamp file to ensure backup uniqueness"
     echo "Backup generated at: $backup_time" > "./backup_timestamp.txt"
-    git add ./backup_timestamp.txt || {
-        log ERROR "Failed to add timestamp file"
-    }
+    
+    # Explicitly add all n8n files AND the timestamp file
+    log DEBUG "Adding all n8n files to Git..."
+    if $use_dated_backup && [[ -n "$backup_timestamp" ]] && [[ -d "$backup_timestamp" ]]; then
+        log DEBUG "Adding dated backup directory: $backup_timestamp"
+        git add "$backup_timestamp" ./backup_timestamp.txt || {
+            log ERROR "Failed to add dated backup directory"
+            git status
+        }
+    else
+        # Add individual files explicitly to ensure nothing is missed
+        log DEBUG "Adding individual files to Git"
+        git add .env credentials.json workflows.json ./backup_timestamp.txt || {
+            log ERROR "Failed to add n8n files"
+            git status
+        }
+    fi
     
     # Skip Git's change detection and always commit
     log DEBUG "Committing backup with message: $commit_msg"
