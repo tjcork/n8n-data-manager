@@ -675,8 +675,11 @@ backup() {
         fi
     elif $commit_made; then # Check the flag here
         log DEBUG "Running: git -C $tmp_dir push -u origin $branch"
-        if ! git -C "$tmp_dir" push -u origin "$branch"; then
+        # Fix: Properly execute Git push without empty command
+        if ! git -C "$tmp_dir" push -u origin "$branch" 2>/dev/null; then
             log ERROR "Git push failed. Check repository URL, token permissions, and branch name."
+            # Try once more with verbose output to help diagnose
+            git -C "$tmp_dir" push -u origin "$branch" --verbose || true
             rm -rf "$tmp_dir"
             return 1
         fi
