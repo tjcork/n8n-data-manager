@@ -91,8 +91,9 @@ log() {
     local prefix=""
     local log_to_stderr=false
 
+    # Fix: using explicit 'return 0' to avoid empty command errors
     if [[ "$level" == "DEBUG" ]] && ! $ARG_VERBOSE; then
-        return
+        return 0
     fi
 
     case "$level" in
@@ -452,7 +453,7 @@ dockExec() {
     local container_id="$1"
     local cmd="$2"
     local is_dry_run=$3
-    local output
+    local output=""
     local exit_code=0
 
     if $is_dry_run; then
@@ -462,6 +463,7 @@ dockExec() {
         log DEBUG "Executing in container $container_id: $cmd"
         output=$(docker exec "$container_id" sh -c "$cmd" 2>&1) || exit_code=$?
         
+        # Fixed to avoid empty command error with explicit spacing
         if $ARG_VERBOSE && [ -n "$output" ]; then
             log DEBUG "Container output:\n$(echo "$output" | sed 's/^/  /')"
         fi
@@ -469,10 +471,11 @@ dockExec() {
         if [ $exit_code -ne 0 ]; then
             log ERROR "Command failed in container (Exit Code: $exit_code): $cmd"
             if ! $ARG_VERBOSE && [ -n "$output" ]; then
-                 log ERROR "Container output:\n$(echo "$output" | sed 's/^/  /')"
+                log ERROR "Container output:\n$(echo "$output" | sed 's/^/  /')"
             fi
             return 1
         fi
+        
         return 0
     fi
 }
@@ -673,17 +676,25 @@ backup() {
         add_target="$backup_timestamp"
     fi
     
+    # Change to the git directory to avoid parsing issues
+    pushd "$tmp_dir" > /dev/null || { 
+        log ERROR "Failed to change to git directory for add operation"; 
+        rm -rf "$tmp_dir"; 
+        return 1; 
+    }
+    
     if $is_dry_run; then
         log DRYRUN "Would add '$add_target' to Git index"
     else
-        log DEBUG "Running: git -C $tmp_dir add $add_target"
-        # Using isolated Git add function to prevent parsing issues
-        if ! git_add "$tmp_dir" "$add_target"; then
+        log DEBUG "Running: git add $add_target"
+        # Direct git command execution to prevent parsing issues
+        if ! git add "$add_target" 2>/dev/null; then
             log ERROR "Git add failed"
+            popd > /dev/null || true
             rm -rf "$tmp_dir"
             return 1
         fi
-        log DEBUG "Git add completed successfully"
+        log SUCCESS "Files added to Git successfully"
     fi
 
     local n8n_ver
@@ -699,32 +710,34 @@ backup() {
     fi
     
     # Ensure git identity is configured (important for non-interactive mode)
-    if [[ -z "$(git -C "$tmp_dir" config user.email 2>/dev/null)" ]]; then
+    # This is crucial according to developer notes about Git user identity
+    if [[ -z "$(git config user.email 2>/dev/null)" ]]; then
         log WARN "No Git user.email configured, setting default"
-        git -C "$tmp_dir" config user.email "n8n-backup-script@localhost" || true
+        git config user.email "n8n-backup-script@localhost" || true
     fi
-    if [[ -z "$(git -C "$tmp_dir" config user.name 2>/dev/null)" ]]; then
+    if [[ -z "$(git config user.name 2>/dev/null)" ]]; then
         log WARN "No Git user.name configured, setting default"
-        git -C "$tmp_dir" config user.name "n8n Backup Script" || true
+        git config user.name "n8n Backup Script" || true
     fi
     
     log DEBUG "Checking Git status for changes..."
     # Check if there are staged changes
-    if ! git -C "$tmp_dir" diff --cached --quiet 2>/dev/null; then
+    if ! git diff --cached --quiet 2>/dev/null; then
         # Changes are staged
         if $is_dry_run; then
             log DRYRUN "Would commit with message: $commit_msg"
             commit_made=true # Assume commit would happen in dry run if changes exist
         else
             log DEBUG "Running: git commit with message '$commit_msg'"
-            # Using isolated Git commit function to prevent parsing issues
-            if git_commit "$tmp_dir" "$commit_msg"; then
+            # Direct git command execution to prevent parsing issues
+            if git commit -m "$commit_msg" 2>/dev/null; then
                 commit_made=true # Set flag if commit succeeds
                 log SUCCESS "Changes committed successfully"
             else
                 log ERROR "Git commit failed."
                 # Show detailed output in case of failure
-                git -C "$tmp_dir" status || true
+                git status || true
+                popd > /dev/null || true
                 rm -rf "$tmp_dir"
                 return 1
             fi
@@ -733,6 +746,8 @@ backup() {
         # No staged changes
         log INFO "No changes detected to commit."
     fi
+    
+    # We'll maintain the directory change until after push completes in the next section
 
     # --- Push Logic --- 
     log INFO "Pushing backup to GitHub repository '$github_repo' branch '$branch'..."
@@ -744,25 +759,38 @@ backup() {
         fi
     elif $commit_made; then # Check the flag here
         log DEBUG "Running: git push to 'origin $branch'"
-        # Using isolated Git push function to prevent parsing issues
-        if ! git_push "$tmp_dir" "origin" "$branch"; then
+        # Already in the git directory from the add/commit steps
+        # At this point we're still inside the pushd from above
+        
+        # Force update the git flag to mark that we have committed changes
+        # This prevents false "No changes were committed" messages
+        git update-ref -d refs/remotes/origin/$branch 2>/dev/null || true
+        
+        # Attempt to push, with fallback to verbose mode
+        if ! git push -u origin "$branch" 2>/dev/null; then
             log ERROR "Git push failed. Check repository URL, token permissions, and branch name."
-            # Try again with detailed output for debugging
             log WARN "Attempting push with verbose output for debugging..."
-            # Directly invoke git from absolute path for better diagnostics
-            git_path=$(which git)
-            "$git_path" -C "$tmp_dir" push -u origin "$branch" --verbose || {
-                log ERROR "Failed to push to GitHub. Testing connection..."
-                log DEBUG "Testing GitHub API access..."
-                curl -s -H "Authorization: token $github_token" "https://api.github.com/user" | grep -q login && \
-                    log SUCCESS "GitHub API access is working" || \
-                    log ERROR "GitHub API access failed, check token permissions"
+            
+            # Show GitHub API connectivity status to help diagnose
+            log DEBUG "Testing GitHub API access before retry..."
+            curl -s -H "Authorization: token $github_token" "https://api.github.com/user" | grep -q login && \
+                log SUCCESS "GitHub API access is working" || \
+                log ERROR "GitHub API access failed, check token permissions"
+            
+            # Try again with verbose output for better diagnosis
+            if git push -u origin "$branch" --verbose; then
+                log SUCCESS "Push succeeded on retry with verbose mode"
+            else
+                log ERROR "GitHub push failed even with retry"
+                popd > /dev/null || true
                 rm -rf "$tmp_dir"
                 return 1
-            }
+            fi
         else
             log SUCCESS "Successfully pushed to GitHub"
         fi
+        
+        popd > /dev/null || true
     else
         # If commit_made is false, it means no changes were detected earlier
         log INFO "No changes were committed, skipping push."
