@@ -10,12 +10,13 @@ IFS=$\'\n\t\'
 CONFIG_FILE_PATH="${XDG_CONFIG_HOME:-$HOME/.config}/n8n-manager/config"
 
 # --- Global variables ---
-VERSION="2.7"
+VERSION="2.8" # Updated with debugging features
+DEBUG_TRACE=${DEBUG_TRACE:-false} # Set to true for trace debugging
 SELECTED_ACTION=""
 SELECTED_CONTAINER_ID=""
 GITHUB_TOKEN=""
 GITHUB_REPO=""
-GITHUB_BRANCH=""
+GITHUB_BRANCH="main"
 DEFAULT_CONTAINER=""
 SELECTED_RESTORE_TYPE="all"
 # Flags/Options
@@ -44,6 +45,44 @@ printf -v BOLD    '\033[1m'
 printf -v DIM     '\033[2m'
 
 # --- Logging Functions ---
+
+# --- Git Helper Functions ---
+# These functions isolate Git operations to avoid parse errors
+git_add() {
+    local repo_dir="$1"
+    local target="$2"
+    git -C "$repo_dir" add "$target"
+    return $?
+}
+
+git_commit() {
+    local repo_dir="$1"
+    local message="$2"
+    git -C "$repo_dir" commit -m "$message"
+    return $?
+}
+
+git_push() {
+    local repo_dir="$1"
+    local remote="$2"
+    local branch="$3"
+    git -C "$repo_dir" push -u "$remote" "$branch"
+    return $?
+}
+
+# --- Debug/Trace Function ---
+trace_cmd() {
+    if $DEBUG_TRACE; then
+        echo -e "\033[0;35m[TRACE] Running command: $*\033[0m" >&2
+        "$@"
+        local ret=$?
+        echo -e "\033[0;35m[TRACE] Command returned: $ret\033[0m" >&2
+        return $ret
+    else
+        "$@"
+        return $?
+    fi
+}
 
 log() {
     local level="$1"
@@ -638,12 +677,13 @@ backup() {
         log DRYRUN "Would add '$add_target' to Git index"
     else
         log DEBUG "Running: git -C $tmp_dir add $add_target"
-        # Fixed potential empty command issue
-        if ! git -C "$tmp_dir" add "$add_target"; then
+        # Using isolated Git add function to prevent parsing issues
+        if ! git_add "$tmp_dir" "$add_target"; then
             log ERROR "Git add failed"
             rm -rf "$tmp_dir"
             return 1
         fi
+        log DEBUG "Git add completed successfully"
     fi
 
     local n8n_ver
@@ -676,9 +716,9 @@ backup() {
             log DRYRUN "Would commit with message: $commit_msg"
             commit_made=true # Assume commit would happen in dry run if changes exist
         else
-            log DEBUG "Running: git -C $tmp_dir commit -m '$commit_msg'"
-            # Fixed potential empty command issue
-            if git -C "$tmp_dir" commit -m "$commit_msg" 2>/dev/null; then
+            log DEBUG "Running: git commit with message '$commit_msg'"
+            # Using isolated Git commit function to prevent parsing issues
+            if git_commit "$tmp_dir" "$commit_msg"; then
                 commit_made=true # Set flag if commit succeeds
                 log SUCCESS "Changes committed successfully"
             else
@@ -703,13 +743,13 @@ backup() {
              log DRYRUN "Would skip push (no changes to commit)."
         fi
     elif $commit_made; then # Check the flag here
-        log DEBUG "Running: git -C $tmp_dir push -u origin $branch"
-        # Fixed command execution with proper error handling
-        if ! git -C "$tmp_dir" push -u origin "$branch" 2>/dev/null; then
+        log DEBUG "Running: git push to 'origin $branch'"
+        # Using isolated Git push function to prevent parsing issues
+        if ! git_push "$tmp_dir" "origin" "$branch"; then
             log ERROR "Git push failed. Check repository URL, token permissions, and branch name."
             # Try again with detailed output for debugging
             log WARN "Attempting push with verbose output for debugging..."
-            # Using full path to git to avoid potential environment issues
+            # Directly invoke git from absolute path for better diagnostics
             git_path=$(which git)
             "$git_path" -C "$tmp_dir" push -u origin "$branch" --verbose || {
                 log ERROR "Failed to push to GitHub. Testing connection..."
@@ -970,6 +1010,7 @@ main() {
             --dry-run) ARG_DRY_RUN=true; shift 1 ;; 
             --verbose) ARG_VERBOSE=true; shift 1 ;; 
             --log-file) ARG_LOG_FILE="$2"; shift 2 ;; 
+            --trace) DEBUG_TRACE=true; shift 1;; 
             -h|--help) show_help; exit 0 ;; 
             *) echo -e "${RED}[ERROR]${NC} Invalid option: $1" >&2; show_help; exit 1 ;; 
         esac
