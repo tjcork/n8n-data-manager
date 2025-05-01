@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =========================================================
 # n8n-manager.sh - Interactive backup/restore for n8n
-# v2.9.4 - Fixed file inclusion in Git backups and dated backup functionality
+# v2.9.5 - Forced backup file uniqueness to guarantee Git changes
 # =========================================================
 set -Eeuo pipefail
 IFS=$\'\n\t\'
@@ -10,7 +10,7 @@ IFS=$\'\n\t\'
 CONFIG_FILE_PATH="${XDG_CONFIG_HOME:-$HOME/.config}/n8n-manager/config"
 
 # --- Global variables ---
-VERSION="2.9.4" # Updated with file inclusion fixes
+VERSION="2.9.5" # Forced backup file uniqueness
 DEBUG_TRACE=${DEBUG_TRACE:-false} # Set to true for trace debugging
 SELECTED_ACTION=""
 SELECTED_CONTAINER_ID=""
@@ -671,23 +671,53 @@ backup() {
 
     log INFO "Copying exported files from container into Git directory..."
     local copy_failed=false
-    if $is_dry_run; then
-        log DRYRUN "Would copy ${container_id}:${container_workflows} to ${target_dir}/workflows.json"
-        log DRYRUN "Would copy ${container_id}:${container_credentials} to ${target_dir}/credentials.json"
-        if docker exec "$container_id" test -f "$container_env"; then
-             log DRYRUN "Would copy ${container_id}:${container_env} to ${target_dir}/.env"
+    for file in workflows.json credentials.json .env; do
+        source_file="/tmp/${file}"
+        if $use_dated_backup; then
+            # Create timestamped subdirectory
+            mkdir -p "${target_dir}" || return 1
+            dest_file="${target_dir}/${file}"
         else
-             log WARN ".env file not found in container, skipping copy simulation."
+            dest_file="${tmp_dir}/${file}"
         fi
-    else
-        if ! docker cp "${container_id}:${container_workflows}" "${target_dir}/workflows.json"; then log ERROR "Failed to copy workflows.json"; copy_failed=true; fi
-        if ! docker cp "${container_id}:${container_credentials}" "${target_dir}/credentials.json"; then log ERROR "Failed to copy credentials.json"; copy_failed=true; fi
-        if docker exec "$container_id" test -f "$container_env"; then
-            if ! docker cp "${container_id}:${container_env}" "${target_dir}/.env"; then log WARN "Failed to copy .env"; fi
-        else
-            log WARN ".env file not found in container, skipping copy."
+
+        # Check if file exists in container
+        if ! docker exec "$container_id" test -f "$source_file"; then
+            if [[ "$file" == ".env" ]]; then
+                log WARN ".env file not found in container, skipping."
+                continue
+            else
+                log ERROR "Required file $file not found in container"
+                copy_failed=true
+                continue
+            fi
         fi
-    fi
+
+        # Copy file from container
+        size=$(docker exec "$container_id" du -h "$source_file" | awk '{print $1}')
+        if ! docker cp "${container_id}:${source_file}" "${dest_file}"; then
+            log ERROR "Failed to copy $file from container"
+            copy_failed=true
+            continue
+        fi
+        log SUCCESS "Successfully copied $size to ${dest_file}"
+        
+        # Force file uniqueness by adding a timestamp to ensure Git always sees changes
+        if [[ "$file" == "workflows.json" || "$file" == "credentials.json" ]]; then
+            # For JSON files: Add timestamp as a comment before the JSON content
+            log DEBUG "Making $file unique with timestamp"
+            mv "${dest_file}" "${dest_file}.tmp"
+            echo "// n8n backup timestamp: $(date +"%Y-%m-%d %H:%M:%S.%N")" > "${dest_file}"
+            cat "${dest_file}.tmp" >> "${dest_file}"
+            rm "${dest_file}.tmp"
+        elif [[ "$file" == ".env" ]]; then
+            # For .env file: Append timestamp as a comment at the end
+            log DEBUG "Making .env unique with timestamp"
+            echo "" >> "${dest_file}"
+            echo "# n8n backup timestamp: $(date +"%Y-%m-%d %H:%M:%S.%N")" >> "${dest_file}"
+        fi
+    done
+    
     if $copy_failed; then rm -rf "$tmp_dir"; return 1; fi
 
     log INFO "Cleaning up temporary files in container..."
