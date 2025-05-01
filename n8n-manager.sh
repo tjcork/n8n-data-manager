@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =========================================================
 # n8n-manager.sh - Interactive backup/restore for n8n
-# v2.9.5 - Forced backup file uniqueness to guarantee Git changes
+# v2.9.6 - Added dated backup restore functionality
 # =========================================================
 set -Eeuo pipefail
 IFS=$\'\n\t\'
@@ -10,7 +10,7 @@ IFS=$\'\n\t\'
 CONFIG_FILE_PATH="${XDG_CONFIG_HOME:-$HOME/.config}/n8n-manager/config"
 
 # --- Global variables ---
-VERSION="2.9.5" # Forced backup file uniqueness
+VERSION="2.9.6" # Added dated backup restore functionality
 DEBUG_TRACE=${DEBUG_TRACE:-false} # Set to true for trace debugging
 SELECTED_ACTION=""
 SELECTED_CONTAINER_ID=""
@@ -1004,22 +1004,95 @@ restore() {
         return 1
     fi
 
-    # TODO: Add logic here to select a dated backup if applicable
-    local downloaded_workflows="${download_dir}/workflows.json"
-    local downloaded_credentials="${download_dir}/credentials.json"
+    # Check if the restore should come from a dated backup directory
+    local dated_backup_found=false
+    local selected_backup=""
+    local backup_dirs=()
+    
+    # Look for dated backup directories
+    cd "$download_dir" || { 
+        log ERROR "Failed to change to download directory";
+        rm -rf "$download_dir";
+        if [ -n "$pre_restore_dir" ]; then log WARN "Pre-restore backup kept at: $pre_restore_dir"; fi;
+        return 1;
+    }
+    
+    # Find all backup_* directories and sort them by date (newest first)
+    readarray -t backup_dirs < <(find . -type d -name "backup_*" | sort -r)
+    
+    if [ ${#backup_dirs[@]} -gt 0 ]; then
+        log INFO "Found ${#backup_dirs[@]} dated backup(s):"
+        
+        # If non-interactive mode, automatically select the most recent backup
+        if ! [ -t 0 ]; then
+            selected_backup="${backup_dirs[0]}"
+            dated_backup_found=true
+            log INFO "Auto-selecting most recent backup in non-interactive mode: $selected_backup"
+        else
+            # Interactive mode - show menu with newest backups first
+            echo ""
+            echo "Select a backup to restore:"
+            echo "------------------------------------------------"
+            echo "0) Use files from repository root (not a dated backup)"
+            
+            for i in "${!backup_dirs[@]}"; do
+                # Extract the date part from backup_YYYY-MM-DD_HH-MM-SS format
+                local backup_date="${backup_dirs[$i]#./backup_}"
+                echo "$((i+1))) ${backup_date} (${backup_dirs[$i]})"
+            done
+            echo "------------------------------------------------"
+            
+            local valid_selection=false
+            while ! $valid_selection; do
+                echo -n "Select a backup number (0-${#backup_dirs[@]}): "
+                local selection
+                read -r selection
+                
+                if [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -le "${#backup_dirs[@]}" ]; then
+                    valid_selection=true
+                    
+                    if [ "$selection" -eq 0 ]; then
+                        log INFO "Using repository root files (not a dated backup)"
+                    else
+                        selected_backup="${backup_dirs[$((selection-1))]}"
+                        dated_backup_found=true
+                        log INFO "Selected backup: $selected_backup"
+                    fi
+                else
+                    echo "Invalid selection. Please enter a number between 0 and ${#backup_dirs[@]}."
+                fi
+            done
+        fi
+    fi
+    
+    # Set the paths to the downloaded files based on if we're using a dated backup or not
+    local downloaded_workflows=""
+    local downloaded_credentials=""
+    
+    if $dated_backup_found; then
+        downloaded_workflows="${download_dir}/${selected_backup#./}/workflows.json"
+        downloaded_credentials="${download_dir}/${selected_backup#./}/credentials.json"
+        log INFO "Using dated backup files from: ${selected_backup#./}"
+    else
+        downloaded_workflows="${download_dir}/workflows.json"
+        downloaded_credentials="${download_dir}/credentials.json"
+        log INFO "Using files from repository root (not a dated backup)"
+    fi
+    
+    # Verify that the files exist
     local files_found=true
-
+    
     if [[ "$restore_type" == "all" || "$restore_type" == "workflows" ]] && [ ! -f "$downloaded_workflows" ]; then
-        log ERROR "workflows.json not found in the root of the cloned repository branch."
+        log ERROR "workflows.json not found in selected backup location."
         files_found=false
     fi
     if [[ "$restore_type" == "all" || "$restore_type" == "credentials" ]] && [ ! -f "$downloaded_credentials" ]; then
-        log ERROR "credentials.json not found in the root of the cloned repository branch."
+        log ERROR "credentials.json not found in selected backup location."
         files_found=false
     fi
 
     if ! $files_found; then
-        log WARN "Restore from dated backups is not yet implemented."
+        log ERROR "Required backup files not found in the selected location."
         rm -rf "$download_dir"
         if [ -n "$pre_restore_dir" ]; then log WARN "Pre-restore backup kept at: $pre_restore_dir"; fi
         return 1
