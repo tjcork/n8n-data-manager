@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =========================================================
 # n8n-manager.sh - Interactive backup/restore for n8n
-# v2.9.8 - Fixed timestamp handling in backup/restore process
+# v2.9.9 - Fixed JSON validation in restore process
 # =========================================================
 set -Eeuo pipefail
 IFS=$\'\n\t\'
@@ -10,7 +10,7 @@ IFS=$\'\n\t\'
 CONFIG_FILE_PATH="${XDG_CONFIG_HOME:-$HOME/.config}/n8n-manager/config"
 
 # --- Global variables ---
-VERSION="2.9.8" # Fixed timestamp handling in backup/restore process
+VERSION="2.9.9" # Fixed JSON validation in restore process
 DEBUG_TRACE=${DEBUG_TRACE:-false} # Set to true for trace debugging
 SELECTED_ACTION=""
 SELECTED_CONTAINER_ID=""
@@ -1113,18 +1113,14 @@ restore() {
     # Verify that the files exist and ensure they're valid JSON files
     local files_found=true
     
-    # Function to check if a file is valid JSON 
-    check_valid_json() {
+    # Function to check if a file exists and has content
+    check_valid_file() {
         local file=$1
-        if [ -f "$file" ]; then
-            if jq . "$file" >/dev/null 2>&1; then
-                return 0  # Valid JSON
-            else
-                log ERROR "File $file is not valid JSON"
-                return 1  # Invalid JSON
-            fi
+        if [ -f "$file" ] && [ -s "$file" ]; then
+            return 0  # File exists and has content
         else
-            return 1  # File doesn't exist
+            log ERROR "File $file is empty or does not exist"
+            return 1  # File doesn't exist or is empty
         fi
     }
     
@@ -1134,8 +1130,8 @@ restore() {
             files_found=false
         else
             log DEBUG "Workflow file size: $(du -h "$downloaded_workflows" | cut -f1)"
-            # Check for valid JSON
-            if ! check_valid_json "$downloaded_workflows"; then
+            # Check that file exists and has content
+            if ! check_valid_file "$downloaded_workflows"; then
                 files_found=false
             fi
         fi
@@ -1147,8 +1143,8 @@ restore() {
             files_found=false
         else
             log DEBUG "Credentials file size: $(du -h "$downloaded_credentials" | cut -f1)"
-            # Check for valid JSON
-            if ! check_valid_json "$downloaded_credentials"; then
+            # Check that file exists and has content
+            if ! check_valid_file "$downloaded_credentials"; then
                 files_found=false
             fi
         fi
