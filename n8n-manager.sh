@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
 # =========================================================
 # n8n-manager.sh - Interactive backup/restore for n8n
-# v3.0.4 - Comprehensive fixes for backup and Alpine compatibility
 # =========================================================
 set -Eeuo pipefail
-IFS=$\'\n\t\'
+IFS=$'\n\t'
 
 # --- Configuration ---
 CONFIG_FILE_PATH="${XDG_CONFIG_HOME:-$HOME/.config}/n8n-manager/config"
 
 # --- Global variables ---
-VERSION="3.0.4" # Comprehensive fixes for backup and Alpine compatibility
+VERSION="3.0.5"
 DEBUG_TRACE=${DEBUG_TRACE:-false} # Set to true for trace debugging
 SELECTED_ACTION=""
 SELECTED_CONTAINER_ID=""
@@ -711,7 +710,12 @@ backup() {
         log DEBUG "Created timestamp file $ts_file to track backup uniqueness"
     done
     
-    if $copy_failed; then rm -rf "$tmp_dir"; return 1; fi
+    # Check if any copy operations failed
+    if [ "$copy_status" = "failed" ]; then 
+        log ERROR "Copy operations failed, aborting backup"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
 
     log INFO "Cleaning up temporary files in container..."
     dockExec "$container_id" "rm -f $container_workflows $container_credentials $container_env" "$is_dry_run" || log WARN "Could not clean up temporary files in container."
