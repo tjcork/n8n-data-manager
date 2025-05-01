@@ -10,7 +10,7 @@ IFS=$\'\n\t\'
 CONFIG_FILE_PATH="${XDG_CONFIG_HOME:-$HOME/.config}/n8n-manager/config"
 
 # --- Global variables ---
-VERSION="3.0.0" # Emergency fix for restore functionality
+VERSION="3.0.1" # Fixed file validation logic in restore
 DEBUG_TRACE=${DEBUG_TRACE:-false} # Set to true for trace debugging
 SELECTED_ACTION=""
 SELECTED_CONTAINER_ID=""
@@ -1111,97 +1111,121 @@ restore() {
     fi
     
     # Proceed directly to import phase
-    local import_ready=true
+    log INFO "Validating files for import..."
+    local file_validation_passed=true
     
-    # Determine if we have the files needed based on restore type
-    if [[ "$restore_type" == "all" || "$restore_type" == "workflows" ]] && [ -z "$repo_workflows" ]; then
-        log ERROR "workflows.json not found for $restore_type restore"
-        import_ready=false
+    # More robust file checking logic
+    if [[ "$restore_type" == "all" || "$restore_type" == "workflows" ]]; then
+        if [ ! -f "$repo_workflows" ] || [ ! -s "$repo_workflows" ]; then
+            log ERROR "Valid workflows.json not found for $restore_type restore"
+            file_validation_passed=false
+        else
+            log SUCCESS "Workflows file validated for import"
+        fi
     fi
     
-    if [[ "$restore_type" == "all" || "$restore_type" == "credentials" ]] && [ -z "$repo_credentials" ]; then
-        log ERROR "credentials.json not found for $restore_type restore"
-        import_ready=false
+    if [[ "$restore_type" == "all" || "$restore_type" == "credentials" ]]; then
+        if [ ! -f "$repo_credentials" ] || [ ! -s "$repo_credentials" ]; then
+            log ERROR "Valid credentials.json not found for $restore_type restore"
+            file_validation_passed=false
+        else
+            log SUCCESS "Credentials file validated for import"
+        fi
     fi
     
-    if ! $import_ready; then
-        log ERROR "Required files not found in repository. Cannot proceed with restore."
-        log DEBUG "Repository contents:"
-        find "$download_dir" -type f -not -path "*/\.*" | sort || true
+    # Always use explicit comparison for clarity and to avoid empty commands
+    if [ "$file_validation_passed" != "true" ]; then
+        log ERROR "File validation failed. Cannot proceed with restore."
+        log DEBUG "Repository contents (excluding .git):"
+        find "$download_dir" -type f -not -path "*/\.git/*" | sort || true
         rm -rf "$download_dir"
         if [ -n "$pre_restore_dir" ]; then log WARN "Pre-restore backup kept at: $pre_restore_dir"; fi
         return 1
     fi
+    
+    log SUCCESS "All required files validated successfully."
     
     # Skip temp directory completely and copy directly to container
     log INFO "Copying downloaded files directly to container..."
     
-    local copy_failed=false
+    local copy_status="success" # Use string instead of boolean to avoid empty command errors
+    
+    # Copy workflow file if needed
     if [[ "$restore_type" == "all" || "$restore_type" == "workflows" ]]; then
-        if $is_dry_run; then
+        if [ "$is_dry_run" = "true" ]; then
             log DRYRUN "Would copy $repo_workflows to ${container_id}:${container_import_workflows}"
-        elif ! docker cp "$repo_workflows" "${container_id}:${container_import_workflows}"; then
-            log ERROR "Failed to copy workflows.json to container."
-            copy_failed=true
         else
-            log SUCCESS "Successfully copied workflows.json to container"
+            log INFO "Copying workflows file to container..."
+            if docker cp "$repo_workflows" "${container_id}:${container_import_workflows}"; then
+                log SUCCESS "Successfully copied workflows.json to container"
+            else
+                log ERROR "Failed to copy workflows.json to container."
+                copy_status="failed"
+            fi
         fi
     fi
     
+    # Copy credentials file if needed
     if [[ "$restore_type" == "all" || "$restore_type" == "credentials" ]]; then
-        if $is_dry_run; then
+        if [ "$is_dry_run" = "true" ]; then
             log DRYRUN "Would copy $repo_credentials to ${container_id}:${container_import_credentials}"
-        elif ! docker cp "$repo_credentials" "${container_id}:${container_import_credentials}"; then
-            log ERROR "Failed to copy credentials.json to container."
-            copy_failed=true
         else
-            log SUCCESS "Successfully copied credentials.json to container"
+            log INFO "Copying credentials file to container..."
+            if docker cp "$repo_credentials" "${container_id}:${container_import_credentials}"; then
+                log SUCCESS "Successfully copied credentials.json to container"
+            else
+                log ERROR "Failed to copy credentials.json to container."
+                copy_status="failed"
+            fi
         fi
     fi
     
-    if $copy_failed; then
-        log ERROR "Failed to copy files to container"
+    # Check copy status with explicit string comparison
+    if [ "$copy_status" = "failed" ]; then
+        log ERROR "Failed to copy files to container - cannot proceed with restore"
         rm -rf "$download_dir"
         if [ -n "$pre_restore_dir" ]; then log WARN "Pre-restore backup kept at: $pre_restore_dir"; fi
         return 1
     fi
     
-    log SUCCESS "Files copied to container successfully"
+    log SUCCESS "All files copied to container successfully."
     
     # Handle import directly here to avoid another set of checks
     log INFO "Importing data into n8n..."
-    local import_failure=false
+    local import_status="success"
     
+    # Import workflows if needed
     if [[ "$restore_type" == "all" || "$restore_type" == "workflows" ]]; then
-        if $is_dry_run; then
+        if [ "$is_dry_run" = "true" ]; then
             log DRYRUN "Would run: n8n import:workflow --input=$container_import_workflows"
         else
             log INFO "Importing workflows..."
-            if ! dockExec "$container_id" "n8n import:workflow --input=$container_import_workflows" "$is_dry_run"; then
-                log ERROR "Failed to import workflows. Note this can sometimes happen if they already exist."
-                import_failure=true
-            else
+            if dockExec "$container_id" "n8n import:workflow --input=$container_import_workflows" "$is_dry_run"; then
                 log SUCCESS "Workflows imported successfully"
+            else
+                log ERROR "Failed to import workflows. Note this can sometimes happen if they already exist."
+                import_status="failed"
             fi
         fi
     fi
     
+    # Import credentials if needed
     if [[ "$restore_type" == "all" || "$restore_type" == "credentials" ]]; then
-        if $is_dry_run; then
+        if [ "$is_dry_run" = "true" ]; then
             log DRYRUN "Would run: n8n import:credentials --input=$container_import_credentials"
         else
             log INFO "Importing credentials..."
-            if ! dockExec "$container_id" "n8n import:credentials --input=$container_import_credentials" "$is_dry_run"; then
-                log ERROR "Failed to import credentials. Note this can sometimes happen if they already exist."
-                import_failure=true
-            else
+            if dockExec "$container_id" "n8n import:credentials --input=$container_import_credentials" "$is_dry_run"; then
                 log SUCCESS "Credentials imported successfully"
+            else
+                log ERROR "Failed to import credentials. Note this can sometimes happen if they already exist."
+                import_status="failed"
             fi
         fi
     fi
     
     # Clean up temporary files in container
-    if ! $is_dry_run; then
+    if [ "$is_dry_run" != "true" ]; then
         log INFO "Cleaning up temporary files in container..."
         dockExec "$container_id" "rm -f $container_import_workflows $container_import_credentials" "$is_dry_run" || log WARN "Could not clean up temporary files in container"
     fi
@@ -1209,17 +1233,20 @@ restore() {
     # Cleanup downloaded repository
     rm -rf "$download_dir"
     
-    if $import_failure; then
+    # Handle restore result based on import status
+    if [ "$import_status" = "failed" ]; then
         log WARN "Restore partially completed with some errors. Check logs for details."
-        if [ -n "$pre_restore_dir" ]; then log WARN "Pre-restore backup kept at: $pre_restore_dir"; fi
+        if [ -n "$pre_restore_dir" ]; then 
+            log WARN "Pre-restore backup kept at: $pre_restore_dir" 
+        fi
         return 1
     fi
     
-    # Success
-    log SUCCESS "Restore completed successfully."
+    # Success - restore completed successfully
+    log SUCCESS "Restore completed successfully!"
     
     # Clean up pre-restore backup if successful
-    if [ -n "$pre_restore_dir" ] && ! $is_dry_run; then
+    if [ -n "$pre_restore_dir" ] && [ "$is_dry_run" != "true" ]; then
         rm -rf "$pre_restore_dir"
         log INFO "Pre-restore backup cleaned up."
     fi
