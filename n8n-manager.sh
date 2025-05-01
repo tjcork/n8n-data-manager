@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =========================================================
 # n8n-manager.sh - Interactive backup/restore for n8n
-# v3.0.0 - Emergency fix for restore functionality
+# v3.0.1 - Emergency fix for restore functionality
 # =========================================================
 set -Eeuo pipefail
 IFS=$\'\n\t\'
