@@ -698,10 +698,11 @@ backup() {
     local add_target="."
     if $use_dated_backup; then
         add_target="$backup_timestamp"
+        log DEBUG "Using dated backup directory for git add: $add_target"
     fi
     
     # Change to the git directory to avoid parsing issues
-    pushd "$tmp_dir" > /dev/null || { 
+    cd "$tmp_dir" || { 
         log ERROR "Failed to change to git directory for add operation"; 
         rm -rf "$tmp_dir"; 
         return 1; 
@@ -712,13 +713,17 @@ backup() {
     else
         log DEBUG "Running: git add $add_target"
         # Direct git command execution to prevent parsing issues
-        if ! git add "$add_target" 2>/dev/null; then
+        if ! git add "$add_target"; then
             log ERROR "Git add failed"
-            popd > /dev/null || true
+            cd - > /dev/null || true
             rm -rf "$tmp_dir"
             return 1
         fi
         log SUCCESS "Files added to Git successfully"
+        
+        # Verify that files were staged correctly
+        log DEBUG "Staging status:"
+        git status --short || true
     fi
 
     local n8n_ver
