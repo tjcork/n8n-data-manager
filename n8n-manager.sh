@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =========================================================
 # n8n-manager.sh - Interactive backup/restore for n8n
-# v2.9.2 - Added debugging features and fixed multiple command execution issues
+# v2.9.3 - Fixed Git commit detection and dated backup functionality
 # =========================================================
 set -Eeuo pipefail
 IFS=$\'\n\t\'
@@ -10,7 +10,7 @@ IFS=$\'\n\t\'
 CONFIG_FILE_PATH="${XDG_CONFIG_HOME:-$HOME/.config}/n8n-manager/config"
 
 # --- Global variables ---
-VERSION="2.9.2" # Updated with debugging features
+VERSION="2.9.3" # Updated with Git commit fixes
 DEBUG_TRACE=${DEBUG_TRACE:-false} # Set to true for trace debugging
 SELECTED_ACTION=""
 SELECTED_CONTAINER_ID=""
@@ -758,7 +758,10 @@ backup() {
     # --- Commit Logic --- 
     local commit_made=false # Flag to track if a commit was actually made
     log INFO "Committing changes..."
-    local commit_msg="🛡️ n8n Backup (v$n8n_ver) - $(timestamp)"
+    
+    # Create a timestamp with seconds to ensure uniqueness
+    local backup_time=$(date +"%Y-%m-%d_%H-%M-%S")
+    local commit_msg="🛡️ n8n Backup (v$n8n_ver) - $backup_time"
     if $use_dated_backup; then
         commit_msg="$commit_msg [$backup_timestamp]"
     fi
@@ -774,31 +777,31 @@ backup() {
         git config user.name "n8n Backup Script" || true
     fi
     
-    log DEBUG "Checking Git status for changes..."
-    # Check if there are staged changes
-    if ! git diff --cached --quiet 2>/dev/null; then
-        # Changes are staged
-        if $is_dry_run; then
-            log DRYRUN "Would commit with message: $commit_msg"
-            commit_made=true # Assume commit would happen in dry run if changes exist
-        else
-            log DEBUG "Running: git commit with message '$commit_msg'"
-            # Direct git command execution to prevent parsing issues
-            if git commit -m "$commit_msg" 2>/dev/null; then
-                commit_made=true # Set flag if commit succeeds
-                log SUCCESS "Changes committed successfully"
-            else
-                log ERROR "Git commit failed."
-                # Show detailed output in case of failure
-                git status || true
-                popd > /dev/null || true
-                rm -rf "$tmp_dir"
-                return 1
-            fi
-        fi
+    # Force Git to commit by adding a timestamp file to make each backup unique
+    log DEBUG "Creating timestamp file to ensure backup uniqueness"
+    echo "Backup generated at: $backup_time" > "./backup_timestamp.txt"
+    git add ./backup_timestamp.txt || {
+        log ERROR "Failed to add timestamp file"
+    }
+    
+    # Skip Git's change detection and always commit
+    log DEBUG "Committing backup with message: $commit_msg"
+    if $is_dry_run; then
+        log DRYRUN "Would commit with message: $commit_msg"
+        commit_made=true # Assume commit would happen in dry run
     else
-        # No staged changes
-        log INFO "No changes detected to commit."
+        # Force the commit with --allow-empty to ensure it happens
+        if git commit --allow-empty -m "$commit_msg" 2>/dev/null; then
+            commit_made=true # Set flag to indicate commit success
+            log SUCCESS "Changes committed successfully"
+        else
+            log ERROR "Git commit failed"
+            # Show detailed output in case of failure
+            git status || true
+            cd - > /dev/null || true
+            rm -rf "$tmp_dir"
+            return 1
+        fi
     fi
     
     # We'll maintain the directory change until after push completes in the next section
