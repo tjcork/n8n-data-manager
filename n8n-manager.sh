@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =========================================================
 # n8n-manager.sh - Interactive backup/restore for n8n
-# v3.0.1 - Emergency fix for restore functionality
+# v3.0.4 - Comprehensive fixes for backup and Alpine compatibility
 # =========================================================
 set -Eeuo pipefail
 IFS=$\'\n\t\'
@@ -10,7 +10,7 @@ IFS=$\'\n\t\'
 CONFIG_FILE_PATH="${XDG_CONFIG_HOME:-$HOME/.config}/n8n-manager/config"
 
 # --- Global variables ---
-VERSION="3.0.3" # Alpine container compatibility fixes for file cleanup
+VERSION="3.0.4" # Comprehensive fixes for backup and Alpine compatibility
 DEBUG_TRACE=${DEBUG_TRACE:-false} # Set to true for trace debugging
 SELECTED_ACTION=""
 SELECTED_CONTAINER_ID=""
@@ -656,11 +656,11 @@ backup() {
     # --- Determine Target Directory and Copy --- 
     local target_dir="$tmp_dir"
     local backup_timestamp=""
-    if $use_dated_backup; then
+    if [ "$use_dated_backup" = "true" ]; then
         backup_timestamp="backup_$(timestamp)"
         target_dir="${tmp_dir}/${backup_timestamp}"
         log INFO "Using dated backup directory: $backup_timestamp"
-        if $is_dry_run; then
+        if [ "$is_dry_run" = "true" ]; then
             log DRYRUN "Would create directory: $target_dir"
         elif ! mkdir -p "$target_dir"; then
             log ERROR "Failed to create dated backup directory: $target_dir"
@@ -670,10 +670,10 @@ backup() {
     fi
 
     log INFO "Copying exported files from container into Git directory..."
-    local copy_failed=false
+    local copy_status="success" # Use string instead of boolean to avoid empty command errors
     for file in workflows.json credentials.json .env; do
         source_file="/tmp/${file}"
-        if $use_dated_backup; then
+        if [ "$use_dated_backup" = "true" ]; then
             # Create timestamped subdirectory
             mkdir -p "${target_dir}" || return 1
             dest_file="${target_dir}/${file}"
@@ -688,7 +688,7 @@ backup() {
                 continue
             else
                 log ERROR "Required file $file not found in container"
-                copy_failed=true
+                copy_status="failed"
                 continue
             fi
         fi
@@ -697,7 +697,7 @@ backup() {
         size=$(docker exec "$container_id" du -h "$source_file" | awk '{print $1}')
         if ! docker cp "${container_id}:${source_file}" "${dest_file}"; then
             log ERROR "Failed to copy $file from container"
-            copy_failed=true
+            copy_status="failed"
             continue
         fi
         log SUCCESS "Successfully copied $size to ${dest_file}"
@@ -733,7 +733,7 @@ backup() {
             return 1; 
         }
         
-        if $use_dated_backup; then
+        if [ "$use_dated_backup" = "true" ]; then
             # For dated backups, explicitly add the backup subdirectory
             if [ -d "$backup_timestamp" ]; then
                 log DEBUG "Adding dated backup directory: $backup_timestamp"
@@ -750,19 +750,18 @@ backup() {
                     return 1
                 fi
             else
-                log ERROR "Dated backup directory '$backup_timestamp' not found"
-                ls -la || true # Show directory contents for debugging
+                log ERROR "Backup directory not found: $backup_timestamp"
                 cd - > /dev/null || true
                 rm -rf "$tmp_dir"
                 return 1
             fi
         else
-            # For regular backups, add everything in the root
-            log DEBUG "Adding all files to Git"
-            if ! git add .; then
-                log ERROR "Git add failed"
+            # Standard repo-root backup
+            log DEBUG "Adding all files at repository root"
+            # Explicitly target the timestamp file and specific JSON files to avoid unnecessary files
+            if ! git add workflows.json credentials.json .env backup_timestamp.txt; then
+                log ERROR "Git add failed for repository root files"
                 cd - > /dev/null || true
-                rm -rf "$tmp_dir"
                 return 1
             fi
         fi
@@ -779,13 +778,13 @@ backup() {
     log DEBUG "Detected n8n version: $n8n_ver"
 
     # --- Commit Logic --- 
-    local commit_made=false # Flag to track if a commit was actually made
+    local commit_status="pending" # Use string instead of boolean to avoid empty command errors
     log INFO "Committing changes..."
     
     # Create a timestamp with seconds to ensure uniqueness
     local backup_time=$(date +"%Y-%m-%d_%H-%M-%S")
     local commit_msg="🛡️ n8n Backup (v$n8n_ver) - $backup_time"
-    if $use_dated_backup; then
+    if [ "$use_dated_backup" = "true" ]; then
         commit_msg="$commit_msg [$backup_timestamp]"
     fi
     
@@ -806,30 +805,34 @@ backup() {
     
     # Explicitly add all n8n files AND the timestamp file
     log DEBUG "Adding all n8n files to Git..."
-    if $use_dated_backup && [[ -n "$backup_timestamp" ]] && [[ -d "$backup_timestamp" ]]; then
+    if [ "$use_dated_backup" = "true" ] && [ -n "$backup_timestamp" ] && [ -d "$backup_timestamp" ]; then
         log DEBUG "Adding dated backup directory: $backup_timestamp"
-        git add "$backup_timestamp" ./backup_timestamp.txt || {
+        if ! git add "$backup_timestamp" ./backup_timestamp.txt; then
             log ERROR "Failed to add dated backup directory"
             git status
-        }
+            cd - > /dev/null || true
+            return 1
+        fi
     else
         # Add individual files explicitly to ensure nothing is missed
         log DEBUG "Adding individual files to Git"
-        git add .env credentials.json workflows.json ./backup_timestamp.txt || {
+        if ! git add ./backup_timestamp.txt workflows.json credentials.json .env 2>/dev/null; then
             log ERROR "Failed to add n8n files"
             git status
-        }
+            cd - > /dev/null || true
+            return 1
+        fi
     fi
     
     # Skip Git's change detection and always commit
     log DEBUG "Committing backup with message: $commit_msg"
-    if $is_dry_run; then
+    if [ "$is_dry_run" = "true" ]; then
         log DRYRUN "Would commit with message: $commit_msg"
-        commit_made=true # Assume commit would happen in dry run
+        commit_status="success" # Assume commit would happen in dry run
     else
         # Force the commit with --allow-empty to ensure it happens
         if git commit --allow-empty -m "$commit_msg" 2>/dev/null; then
-            commit_made=true # Set flag to indicate commit success
+            commit_status="success" # Set flag to indicate commit success
             log SUCCESS "Changes committed successfully"
         else
             log ERROR "Git commit failed"
@@ -846,7 +849,7 @@ backup() {
     # --- Push Logic --- 
     log INFO "Pushing backup to GitHub repository '$github_repo' branch '$branch'..."
     
-    if $is_dry_run; then
+    if [ "$is_dry_run" = "true" ]; then
         log DRYRUN "Would push branch '$branch' to origin"
         return 0
     fi
