@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =========================================================
 # n8n-manager.sh - Interactive backup/restore for n8n
-# v2.6 - Fixed Git push logic
+# v2.7 - Fixed multiple command execution issues and added version display
 # =========================================================
 set -Eeuo pipefail
 IFS=$\'\n\t\'
@@ -10,6 +10,7 @@ IFS=$\'\n\t\'
 CONFIG_FILE_PATH="${XDG_CONFIG_HOME:-$HOME/.config}/n8n-manager/config"
 
 # --- Global variables ---
+VERSION="2.7"
 SELECTED_ACTION=""
 SELECTED_CONTAINER_ID=""
 GITHUB_TOKEN=""
@@ -571,8 +572,17 @@ backup() {
 
     # --- Export Data --- 
     log INFO "Exporting data from n8n container..."
-    if ! dockExec "$container_id" "n8n export:workflow --all --output=$container_workflows" false; then rm -rf "$tmp_dir"; return 1; fi
-    if ! dockExec "$container_id" "n8n export:credentials --all --decrypted --output=$container_credentials" false; then rm -rf "$tmp_dir"; return 1; fi
+    # Fixed potential empty command issue
+    if ! dockExec "$container_id" "n8n export:workflow --all --output=$container_workflows" false; then 
+        log ERROR "Failed to export workflows"
+        rm -rf "$tmp_dir"; 
+        return 1; 
+    fi
+    if ! dockExec "$container_id" "n8n export:credentials --all --decrypted --output=$container_credentials" false; then 
+        log ERROR "Failed to export credentials"
+        rm -rf "$tmp_dir"; 
+        return 1; 
+    fi
     if ! dockExec "$container_id" "printenv | grep ^N8N_ > $container_env" false; then
         log WARN "Could not capture N8N_ environment variables from container."
     fi
@@ -628,7 +638,12 @@ backup() {
         log DRYRUN "Would add '$add_target' to Git index"
     else
         log DEBUG "Running: git -C $tmp_dir add $add_target"
-        git -C "$tmp_dir" add "$add_target"
+        # Fixed potential empty command issue
+        if ! git -C "$tmp_dir" add "$add_target"; then
+            log ERROR "Git add failed"
+            rm -rf "$tmp_dir"
+            return 1
+        fi
     fi
 
     local n8n_ver
@@ -643,19 +658,33 @@ backup() {
         commit_msg="$commit_msg [$backup_timestamp]"
     fi
     
+    # Ensure git identity is configured (important for non-interactive mode)
+    if [[ -z "$(git -C "$tmp_dir" config user.email 2>/dev/null)" ]]; then
+        log WARN "No Git user.email configured, setting default"
+        git -C "$tmp_dir" config user.email "n8n-backup-script@localhost" || true
+    fi
+    if [[ -z "$(git -C "$tmp_dir" config user.name 2>/dev/null)" ]]; then
+        log WARN "No Git user.name configured, setting default"
+        git -C "$tmp_dir" config user.name "n8n Backup Script" || true
+    fi
+    
     log DEBUG "Checking Git status for changes..."
     # Check if there are staged changes
-    if ! git -C "$tmp_dir" diff --cached --quiet; then
+    if ! git -C "$tmp_dir" diff --cached --quiet 2>/dev/null; then
         # Changes are staged
         if $is_dry_run; then
             log DRYRUN "Would commit with message: $commit_msg"
             commit_made=true # Assume commit would happen in dry run if changes exist
         else
             log DEBUG "Running: git -C $tmp_dir commit -m '$commit_msg'"
-            if git -C "$tmp_dir" commit -m "$commit_msg"; then
+            # Fixed potential empty command issue
+            if git -C "$tmp_dir" commit -m "$commit_msg" 2>/dev/null; then
                 commit_made=true # Set flag if commit succeeds
+                log SUCCESS "Changes committed successfully"
             else
                 log ERROR "Git commit failed."
+                # Show detailed output in case of failure
+                git -C "$tmp_dir" status || true
                 rm -rf "$tmp_dir"
                 return 1
             fi
@@ -675,13 +704,24 @@ backup() {
         fi
     elif $commit_made; then # Check the flag here
         log DEBUG "Running: git -C $tmp_dir push -u origin $branch"
-        # Fix: Properly execute Git push without empty command
+        # Fixed command execution with proper error handling
         if ! git -C "$tmp_dir" push -u origin "$branch" 2>/dev/null; then
             log ERROR "Git push failed. Check repository URL, token permissions, and branch name."
-            # Try once more with verbose output to help diagnose
-            git -C "$tmp_dir" push -u origin "$branch" --verbose || true
-            rm -rf "$tmp_dir"
-            return 1
+            # Try again with detailed output for debugging
+            log WARN "Attempting push with verbose output for debugging..."
+            # Using full path to git to avoid potential environment issues
+            git_path=$(which git)
+            "$git_path" -C "$tmp_dir" push -u origin "$branch" --verbose || {
+                log ERROR "Failed to push to GitHub. Testing connection..."
+                log DEBUG "Testing GitHub API access..."
+                curl -s -H "Authorization: token $github_token" "https://api.github.com/user" | grep -q login && \
+                    log SUCCESS "GitHub API access is working" || \
+                    log ERROR "GitHub API access failed, check token permissions"
+                rm -rf "$tmp_dir"
+                return 1
+            }
+        else
+            log SUCCESS "Successfully pushed to GitHub"
         fi
     else
         # If commit_made is false, it means no changes were detected earlier
@@ -938,7 +978,7 @@ main() {
     # Load config file (must happen after parsing args)
     load_config
 
-    log HEADER "n8n Backup/Restore Manager"
+    log HEADER "n8n Backup/Restore Manager v$VERSION"
     if $ARG_DRY_RUN; then log WARN "DRY RUN MODE ENABLED"; fi
     if $ARG_VERBOSE; then log DEBUG "Verbose mode enabled."; fi
     
