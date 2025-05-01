@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =========================================================
 # n8n-manager.sh - Interactive backup/restore for n8n
-# v2.9.9 - Fixed JSON validation in restore process
+# v3.0.0 - Emergency fix for restore functionality
 # =========================================================
 set -Eeuo pipefail
 IFS=$\'\n\t\'
@@ -10,7 +10,7 @@ IFS=$\'\n\t\'
 CONFIG_FILE_PATH="${XDG_CONFIG_HOME:-$HOME/.config}/n8n-manager/config"
 
 # --- Global variables ---
-VERSION="2.9.9" # Fixed JSON validation in restore process
+VERSION="3.0.0" # Emergency fix for restore functionality
 DEBUG_TRACE=${DEBUG_TRACE:-false} # Set to true for trace debugging
 SELECTED_ACTION=""
 SELECTED_CONTAINER_ID=""
@@ -1063,191 +1063,168 @@ restore() {
         fi
     fi
     
-    # Look for backup files in the repository using a simpler approach
-    log INFO "Searching for backup files in the repository..."
+    # EMERGENCY DIRECT APPROACH: Use the files from repository without complex validation
+    log INFO "Direct approach: Using files straight from repository..."
     
-    # Set up temp directory for processed files
-    local temp_dir="${download_dir}/temp"
-    mkdir -p "$temp_dir"
+    # Set up container import paths
+    local container_import_workflows="/tmp/import_workflows.json"
+    local container_import_credentials="/tmp/import_credentials.json"
     
-    # Set the paths to the downloaded files based on if we're using a dated backup
-    local downloaded_workflows=""
-    local downloaded_credentials=""
+    # Find the workflow and credentials files directly
+    local repo_workflows=""
+    local repo_credentials=""
     
-    # Choose which files to use based on dated backup selection
+    # First try dated backup if specified
     if $dated_backup_found; then
         local dated_path="${selected_backup#./}"
         log INFO "Looking for files in dated backup: $dated_path"
         
-        # Check if dated backup directory contains the files
         if [ -f "${download_dir}/${dated_path}/workflows.json" ]; then
-            downloaded_workflows="${temp_dir}/workflows.json"
-            cp "${download_dir}/${dated_path}/workflows.json" "$downloaded_workflows"
-            log INFO "Using workflow file from dated backup: ${dated_path}/workflows.json"
+            repo_workflows="${download_dir}/${dated_path}/workflows.json"
+            log SUCCESS "Found workflows.json in dated backup directory"
         fi
         
         if [ -f "${download_dir}/${dated_path}/credentials.json" ]; then
-            downloaded_credentials="${temp_dir}/credentials.json"
-            cp "${download_dir}/${dated_path}/credentials.json" "$downloaded_credentials"
-            log INFO "Using credentials file from dated backup: ${dated_path}/credentials.json"
-        fi
-    else
-        # Use files from the repository root
-        log INFO "Using files from repository root"
-        
-        if [ -f "${download_dir}/workflows.json" ]; then
-            downloaded_workflows="${temp_dir}/workflows.json"
-            cp "${download_dir}/workflows.json" "$downloaded_workflows"
-            log INFO "Using workflows.json from repository root"
-            log DEBUG "Workflow file size: $(du -h "${download_dir}/workflows.json" | cut -f1)"
-        fi
-        
-        if [ -f "${download_dir}/credentials.json" ]; then
-            downloaded_credentials="${temp_dir}/credentials.json"
-            cp "${download_dir}/credentials.json" "$downloaded_credentials"
-            log INFO "Using credentials.json from repository root"
-            log DEBUG "Credentials file size: $(du -h "${download_dir}/credentials.json" | cut -f1)"
+            repo_credentials="${download_dir}/${dated_path}/credentials.json"
+            log SUCCESS "Found credentials.json in dated backup directory"
         fi
     fi
     
-    # Verify that the files exist and ensure they're valid JSON files
-    local files_found=true
-    
-    # Function to check if a file exists and has content
-    check_valid_file() {
-        local file=$1
-        if [ -f "$file" ] && [ -s "$file" ]; then
-            return 0  # File exists and has content
-        else
-            log ERROR "File $file is empty or does not exist"
-            return 1  # File doesn't exist or is empty
-        fi
-    }
-    
-    if [[ "$restore_type" == "all" || "$restore_type" == "workflows" ]]; then
-        if [ ! -f "$downloaded_workflows" ]; then
-            log ERROR "workflows.json not found in selected backup location."
-            files_found=false
-        else
-            log DEBUG "Workflow file size: $(du -h "$downloaded_workflows" | cut -f1)"
-            # Check that file exists and has content
-            if ! check_valid_file "$downloaded_workflows"; then
-                files_found=false
-            fi
-        fi
+    # Fall back to repository root if files weren't found in dated backup
+    if [ -z "$repo_workflows" ] && [ -f "${download_dir}/workflows.json" ]; then
+        repo_workflows="${download_dir}/workflows.json"
+        log SUCCESS "Found workflows.json in repository root"
     fi
     
-    if [[ "$restore_type" == "all" || "$restore_type" == "credentials" ]]; then
-        if [ ! -f "$downloaded_credentials" ]; then
-            log ERROR "credentials.json not found in selected backup location."
-            files_found=false
-        else
-            log DEBUG "Credentials file size: $(du -h "$downloaded_credentials" | cut -f1)"
-            # Check that file exists and has content
-            if ! check_valid_file "$downloaded_credentials"; then
-                files_found=false
-            fi
-        fi
+    if [ -z "$repo_credentials" ] && [ -f "${download_dir}/credentials.json" ]; then
+        repo_credentials="${download_dir}/credentials.json"
+        log SUCCESS "Found credentials.json in repository root"
     fi
-
-    if ! $files_found; then
-        log ERROR "Required backup files not found or invalid in repository."
-        log DEBUG "Here are all the files in the repository:"
-        find "$download_dir" -type f | sort || true
+    
+    # Display file sizes for debug purposes
+    if [ -n "$repo_workflows" ]; then
+        log DEBUG "Workflow file size: $(du -h "$repo_workflows" | cut -f1)"
+    fi
+    
+    if [ -n "$repo_credentials" ]; then
+        log DEBUG "Credentials file size: $(du -h "$repo_credentials" | cut -f1)"
+    fi
+    
+    # Proceed directly to import phase
+    local import_ready=true
+    
+    # Determine if we have the files needed based on restore type
+    if [[ "$restore_type" == "all" || "$restore_type" == "workflows" ]] && [ -z "$repo_workflows" ]; then
+        log ERROR "workflows.json not found for $restore_type restore"
+        import_ready=false
+    fi
+    
+    if [[ "$restore_type" == "all" || "$restore_type" == "credentials" ]] && [ -z "$repo_credentials" ]; then
+        log ERROR "credentials.json not found for $restore_type restore"
+        import_ready=false
+    fi
+    
+    if ! $import_ready; then
+        log ERROR "Required files not found in repository. Cannot proceed with restore."
+        log DEBUG "Repository contents:"
+        find "$download_dir" -type f -not -path "*/\.*" | sort || true
         rm -rf "$download_dir"
         if [ -n "$pre_restore_dir" ]; then log WARN "Pre-restore backup kept at: $pre_restore_dir"; fi
         return 1
     fi
     
-    log SUCCESS "Found valid backup files successfully."
-    log SUCCESS "Backup files downloaded successfully from GitHub."
-
-    # --- 3. Import into Container --- 
-    log HEADER "Step 3: Importing Data into n8n Container"
-    local container_import_workflows="/tmp/import_workflows.json"
-    local container_import_credentials="/tmp/import_credentials.json"
-    local import_failed=false
-
-    log INFO "Copying downloaded files to container..."
+    # Skip temp directory completely and copy directly to container
+    log INFO "Copying downloaded files directly to container..."
+    
     local copy_failed=false
     if [[ "$restore_type" == "all" || "$restore_type" == "workflows" ]]; then
         if $is_dry_run; then
-            log DRYRUN "Would copy $downloaded_workflows to ${container_id}:${container_import_workflows}"
-        elif ! docker cp "$downloaded_workflows" "${container_id}:${container_import_workflows}"; then
+            log DRYRUN "Would copy $repo_workflows to ${container_id}:${container_import_workflows}"
+        elif ! docker cp "$repo_workflows" "${container_id}:${container_import_workflows}"; then
             log ERROR "Failed to copy workflows.json to container."
             copy_failed=true
+        else
+            log SUCCESS "Successfully copied workflows.json to container"
         fi
     fi
+    
     if [[ "$restore_type" == "all" || "$restore_type" == "credentials" ]]; then
         if $is_dry_run; then
-            log DRYRUN "Would copy $downloaded_credentials to ${container_id}:${container_import_credentials}"
-        elif ! docker cp "$downloaded_credentials" "${container_id}:${container_import_credentials}"; then
+            log DRYRUN "Would copy $repo_credentials to ${container_id}:${container_import_credentials}"
+        elif ! docker cp "$repo_credentials" "${container_id}:${container_import_credentials}"; then
             log ERROR "Failed to copy credentials.json to container."
             copy_failed=true
-        fi
-    fi
-    if $copy_failed; then
-        dockExec "$container_id" "rm -f $container_import_workflows $container_import_credentials" "$is_dry_run" || true
-        import_failed=true
-    fi
-
-    if ! $import_failed; then
-        log INFO "Importing data into n8n (this may take a moment)..."
-        if [[ "$restore_type" == "all" || "$restore_type" == "workflows" ]]; then
-            if ! dockExec "$container_id" "n8n import:workflow --separate --input=$container_import_workflows" "$is_dry_run"; then
-                log ERROR "Failed to import workflows."
-                import_failed=true
-            fi
-        fi
-        if [[ "$restore_type" == "all" || "$restore_type" == "credentials" ]]; then
-            if ! dockExec "$container_id" "n8n import:credentials --separate --input=$container_import_credentials" "$is_dry_run"; then
-                log ERROR "Failed to import credentials."
-                import_failed=true
-            fi
-        fi
-    fi
-
-    log INFO "Cleaning up import files in container..."
-    dockExec "$container_id" "rm -f $container_import_workflows $container_import_credentials" "$is_dry_run" || log WARN "Could not clean up import files in container."
-
-    # --- 4. Handle Results & Rollback --- 
-    log HEADER "Step 4: Finalizing Restore"
-    if $is_dry_run; then
-        log DRYRUN "Would remove download directory: $download_dir"
-    else
-        rm -rf "$download_dir"
-    fi
-
-    if $import_failed; then
-        log ERROR "Restore failed during import process."
-        if [ -n "$pre_restore_dir" ]; then
-            if ! rollback_restore "$container_id" "$pre_restore_dir" "$restore_type" "$is_dry_run"; then
-                return 1
-            else
-                if $is_dry_run; then
-                    log DRYRUN "Would remove pre-restore backup directory: $pre_restore_dir"
-                else
-                    rm -rf "$pre_restore_dir"
-                fi
-                return 1
-            fi
         else
-            log ERROR "No pre-restore backup was available. Cannot rollback."
-            return 1
+            log SUCCESS "Successfully copied credentials.json to container"
         fi
-    else
-        log SUCCESS "Restore completed successfully!"
-        if [ -n "$pre_restore_dir" ]; then
-            log INFO "Cleaning up pre-restore backup directory..."
-            if $is_dry_run; then
-                log DRYRUN "Would remove pre-restore backup directory: $pre_restore_dir"
+    fi
+    
+    if $copy_failed; then
+        log ERROR "Failed to copy files to container"
+        rm -rf "$download_dir"
+        if [ -n "$pre_restore_dir" ]; then log WARN "Pre-restore backup kept at: $pre_restore_dir"; fi
+        return 1
+    fi
+    
+    log SUCCESS "Files copied to container successfully"
+    
+    # Handle import directly here to avoid another set of checks
+    log INFO "Importing data into n8n..."
+    local import_failure=false
+    
+    if [[ "$restore_type" == "all" || "$restore_type" == "workflows" ]]; then
+        if $is_dry_run; then
+            log DRYRUN "Would run: n8n import:workflow --input=$container_import_workflows"
+        else
+            log INFO "Importing workflows..."
+            if ! dockExec "$container_id" "n8n import:workflow --input=$container_import_workflows" "$is_dry_run"; then
+                log ERROR "Failed to import workflows. Note this can sometimes happen if they already exist."
+                import_failure=true
             else
-                rm -rf "$pre_restore_dir"
+                log SUCCESS "Workflows imported successfully"
             fi
         fi
-        if $is_dry_run; then log WARN "(Dry run mode was active)"; fi
-        return 0
     fi
+    
+    if [[ "$restore_type" == "all" || "$restore_type" == "credentials" ]]; then
+        if $is_dry_run; then
+            log DRYRUN "Would run: n8n import:credentials --input=$container_import_credentials"
+        else
+            log INFO "Importing credentials..."
+            if ! dockExec "$container_id" "n8n import:credentials --input=$container_import_credentials" "$is_dry_run"; then
+                log ERROR "Failed to import credentials. Note this can sometimes happen if they already exist."
+                import_failure=true
+            else
+                log SUCCESS "Credentials imported successfully"
+            fi
+        fi
+    fi
+    
+    # Clean up temporary files in container
+    if ! $is_dry_run; then
+        log INFO "Cleaning up temporary files in container..."
+        dockExec "$container_id" "rm -f $container_import_workflows $container_import_credentials" "$is_dry_run" || log WARN "Could not clean up temporary files in container"
+    fi
+    
+    # Cleanup downloaded repository
+    rm -rf "$download_dir"
+    
+    if $import_failure; then
+        log WARN "Restore partially completed with some errors. Check logs for details."
+        if [ -n "$pre_restore_dir" ]; then log WARN "Pre-restore backup kept at: $pre_restore_dir"; fi
+        return 1
+    fi
+    
+    # Success
+    log SUCCESS "Restore completed successfully."
+    
+    # Clean up pre-restore backup if successful
+    if [ -n "$pre_restore_dir" ] && ! $is_dry_run; then
+        rm -rf "$pre_restore_dir"
+        log INFO "Pre-restore backup cleaned up."
+    fi
+    
+    return 0 # Explicitly return success
 }
 
 # --- Main Function --- 
