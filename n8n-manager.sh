@@ -10,7 +10,7 @@ IFS=$\'\n\t\'
 CONFIG_FILE_PATH="${XDG_CONFIG_HOME:-$HOME/.config}/n8n-manager/config"
 
 # --- Global variables ---
-VERSION="2.8" # Updated with debugging features
+VERSION="2.8.2" # Updated with debugging features
 DEBUG_TRACE=${DEBUG_TRACE:-false} # Set to true for trace debugging
 SELECTED_ACTION=""
 SELECTED_CONTAINER_ID=""
@@ -695,30 +695,55 @@ backup() {
 
     # --- Git Commit and Push --- 
     log INFO "Adding files to Git..."
-    local add_target="."
-    if $use_dated_backup; then
-        add_target="$backup_timestamp"
-        log DEBUG "Using dated backup directory for git add: $add_target"
-    fi
-    
-    # Change to the git directory to avoid parsing issues
-    cd "$tmp_dir" || { 
-        log ERROR "Failed to change to git directory for add operation"; 
-        rm -rf "$tmp_dir"; 
-        return 1; 
-    }
     
     if $is_dry_run; then
-        log DRYRUN "Would add '$add_target' to Git index"
-    else
-        log DEBUG "Running: git add $add_target"
-        # Direct git command execution to prevent parsing issues
-        if ! git add "$add_target"; then
-            log ERROR "Git add failed"
-            cd - > /dev/null || true
-            rm -rf "$tmp_dir"
-            return 1
+        if $use_dated_backup; then
+            log DRYRUN "Would add dated backup directory '$backup_timestamp' to Git index"
+        else
+            log DRYRUN "Would add all files to Git index"
         fi
+    else
+        # Change to the git directory to avoid parsing issues
+        cd "$tmp_dir" || { 
+            log ERROR "Failed to change to git directory for add operation"; 
+            rm -rf "$tmp_dir"; 
+            return 1; 
+        }
+        
+        if $use_dated_backup; then
+            # For dated backups, explicitly add the backup subdirectory
+            if [ -d "$backup_timestamp" ]; then
+                log DEBUG "Adding dated backup directory: $backup_timestamp"
+                
+                # First list what's in the directory (for debugging)
+                log DEBUG "Files in backup directory:"
+                ls -la "$backup_timestamp" || true
+                
+                # Add specific directory
+                if ! git add "$backup_timestamp"; then
+                    log ERROR "Git add failed for dated backup directory"
+                    cd - > /dev/null || true
+                    rm -rf "$tmp_dir"
+                    return 1
+                fi
+            else
+                log ERROR "Dated backup directory '$backup_timestamp' not found"
+                ls -la || true # Show directory contents for debugging
+                cd - > /dev/null || true
+                rm -rf "$tmp_dir"
+                return 1
+            fi
+        else
+            # For regular backups, add everything in the root
+            log DEBUG "Adding all files to Git"
+            if ! git add .; then
+                log ERROR "Git add failed"
+                cd - > /dev/null || true
+                rm -rf "$tmp_dir"
+                return 1
+            fi
+        fi
+        
         log SUCCESS "Files added to Git successfully"
         
         # Verify that files were staged correctly
