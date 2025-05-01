@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =========================================================
 # n8n-manager.sh - Interactive backup/restore for n8n
-# v2.8 - Added debugging features and fixed multiple command execution issues
+# v2.9.2 - Added debugging features and fixed multiple command execution issues
 # =========================================================
 set -Eeuo pipefail
 IFS=$\'\n\t\'
@@ -10,7 +10,7 @@ IFS=$\'\n\t\'
 CONFIG_FILE_PATH="${XDG_CONFIG_HOME:-$HOME/.config}/n8n-manager/config"
 
 # --- Global variables ---
-VERSION="2.8.2" # Updated with debugging features
+VERSION="2.9.2" # Updated with debugging features
 DEBUG_TRACE=${DEBUG_TRACE:-false} # Set to true for trace debugging
 SELECTED_ACTION=""
 SELECTED_CONTAINER_ID=""
