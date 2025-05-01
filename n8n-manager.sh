@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =========================================================
 # n8n-manager.sh - Interactive backup/restore for n8n
-# v2.7 - Fixed multiple command execution issues and added version display
+# v2.8 - Added debugging features and fixed multiple command execution issues
 # =========================================================
 set -Eeuo pipefail
 IFS=$\'\n\t\'
@@ -84,41 +84,65 @@ trace_cmd() {
     fi
 }
 
+# Simplified and sanitized log function to avoid command not found errors
 log() {
+    # Define parameters
     local level="$1"
     local message="$2"
-    local color="$NC"
+    
+    # Skip debug messages if verbose is not enabled
+    if [ "$level" = "DEBUG" ] && [ "$ARG_VERBOSE" != "true" ]; then 
+        return 0;
+    fi
+    
+    # Set color based on level
+    local color=""
     local prefix=""
-    local log_to_stderr=false
-
-    # Fix: using explicit 'return 0' to avoid empty command errors
-    if [[ "$level" == "DEBUG" ]] && ! $ARG_VERBOSE; then
-        return 0
-    fi
-
-    case "$level" in
-        DEBUG)   color="$DIM"; prefix="[DEBUG]" ;; 
-        INFO)    color="$BLUE"; prefix="==>" ;; 
-        WARN)    color="$YELLOW"; prefix="[WARNING]" ;; 
-        ERROR)   color="$RED"; prefix="[ERROR]"; log_to_stderr=true ;; 
-        SUCCESS) color="$GREEN"; prefix="[SUCCESS]" ;; 
-        HEADER)  color="$BLUE$BOLD"; message="\n$message\n" ;; 
-        DRYRUN)  color="$YELLOW"; prefix="[DRY RUN]" ;; 
-        *)       prefix="[$level]" ;; 
-    esac
-
-    local formatted_message="${color}${prefix} ${message}${NC}"
-    local plain_message="$(date +'%Y-%m-%d %H:%M:%S') ${prefix} ${message}"
-
-    if $log_to_stderr; then
-        echo -e "$formatted_message" >&2
+    local to_stderr=false
+    
+    if [ "$level" = "DEBUG" ]; then
+        color="$DIM"
+        prefix="[DEBUG]"
+    elif [ "$level" = "INFO" ]; then
+        color="$BLUE"
+        prefix="==>"
+    elif [ "$level" = "WARN" ]; then
+        color="$YELLOW"
+        prefix="[WARNING]"
+    elif [ "$level" = "ERROR" ]; then
+        color="$RED"
+        prefix="[ERROR]"
+        to_stderr=true
+    elif [ "$level" = "SUCCESS" ]; then
+        color="$GREEN"
+        prefix="[SUCCESS]"
+    elif [ "$level" = "HEADER" ]; then
+        color="$BLUE$BOLD"
+        message="\n$message\n"
+    elif [ "$level" = "DRYRUN" ]; then
+        color="$YELLOW"
+        prefix="[DRY RUN]"
     else
-        echo -e "$formatted_message"
+        prefix="[$level]"
     fi
-
+    
+    # Format message
+    local formatted="${color}${prefix} ${message}${NC}"
+    local plain="$(date +'%Y-%m-%d %H:%M:%S') ${prefix} ${message}"
+    
+    # Output
+    if [ "$to_stderr" = "true" ]; then
+        echo -e "$formatted" >&2
+    else
+        echo -e "$formatted"
+    fi
+    
+    # Log to file if specified
     if [ -n "$ARG_LOG_FILE" ]; then
-        echo "$plain_message" >> "$ARG_LOG_FILE"
+        echo "$plain" >> "$ARG_LOG_FILE"
     fi
+    
+    return 0
 }
 
 # --- Helper Functions (using new log function) ---
@@ -751,50 +775,48 @@ backup() {
 
     # --- Push Logic --- 
     log INFO "Pushing backup to GitHub repository '$github_repo' branch '$branch'..."
+    
     if $is_dry_run; then
-        if $commit_made; then # Only simulate push if commit would have happened
-             log DRYRUN "Would push branch '$branch' to origin"
-        else
-             log DRYRUN "Would skip push (no changes to commit)."
-        fi
-    elif $commit_made; then # Check the flag here
-        log DEBUG "Running: git push to 'origin $branch'"
-        # Already in the git directory from the add/commit steps
-        # At this point we're still inside the pushd from above
-        
-        # Force update the git flag to mark that we have committed changes
-        # This prevents false "No changes were committed" messages
-        git update-ref -d refs/remotes/origin/$branch 2>/dev/null || true
-        
-        # Attempt to push, with fallback to verbose mode
-        if ! git push -u origin "$branch" 2>/dev/null; then
-            log ERROR "Git push failed. Check repository URL, token permissions, and branch name."
-            log WARN "Attempting push with verbose output for debugging..."
-            
-            # Show GitHub API connectivity status to help diagnose
-            log DEBUG "Testing GitHub API access before retry..."
-            curl -s -H "Authorization: token $github_token" "https://api.github.com/user" | grep -q login && \
-                log SUCCESS "GitHub API access is working" || \
-                log ERROR "GitHub API access failed, check token permissions"
-            
-            # Try again with verbose output for better diagnosis
-            if git push -u origin "$branch" --verbose; then
-                log SUCCESS "Push succeeded on retry with verbose mode"
-            else
-                log ERROR "GitHub push failed even with retry"
-                popd > /dev/null || true
-                rm -rf "$tmp_dir"
-                return 1
-            fi
-        else
-            log SUCCESS "Successfully pushed to GitHub"
-        fi
-        
-        popd > /dev/null || true
-    else
-        # If commit_made is false, it means no changes were detected earlier
-        log INFO "No changes were committed, skipping push."
+        log DRYRUN "Would push branch '$branch' to origin"
+        return 0
     fi
+    
+    # Simple approach - we just committed changes successfully
+    # So we'll push those changes now
+    cd "$tmp_dir" || { log ERROR "Failed to change to $tmp_dir"; rm -rf "$tmp_dir"; return 1; }
+    
+    # Check if git log shows recent commits
+    last_commit=$(git log -1 --pretty=format:"%H" 2>/dev/null)
+    if [ -z "$last_commit" ]; then
+        log ERROR "No commits found to push"
+        cd - > /dev/null || true
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    
+    # Found a commit, so push it
+    log DEBUG "Pushing commit $last_commit to origin/$branch"
+    
+    # Use a direct git command with full output
+    if ! git push -u origin "$branch" --verbose; then
+        log ERROR "Failed to push to GitHub - connectivity issue or permissions problem"
+        
+        # Test GitHub connectivity
+        if ! curl -s -I "https://github.com" > /dev/null; then
+            log ERROR "Cannot reach GitHub - network connectivity issue"
+        elif ! curl -s -H "Authorization: token $github_token" "https://api.github.com/user" | grep -q login; then
+            log ERROR "GitHub API authentication failed - check token permissions"
+        else
+            log ERROR "Unknown error pushing to GitHub"
+        fi
+        
+        cd - > /dev/null || true
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    
+    log SUCCESS "Backup successfully pushed to GitHub repository"
+    cd - > /dev/null || true
 
     log INFO "Cleaning up host temporary directory..."
     if $is_dry_run; then
