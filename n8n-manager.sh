@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =========================================================
 # n8n-manager.sh - Interactive backup/restore for n8n
-# v2.5-dev - Added GitHub API Pre-checks
+# v2.6 - Fixed Git push logic
 # =========================================================
 set -Eeuo pipefail
 IFS=$\'\n\t\'
@@ -344,7 +344,6 @@ get_github_config() {
     GITHUB_BRANCH="$local_branch"
 }
 
-# New function for GitHub API checks
 check_github_access() {
     local token="$1"
     local repo="$2"
@@ -372,7 +371,6 @@ check_github_access() {
         return 1
     fi
 
-    # Check for 'repo' scope (or 'public_repo' if sufficient, though 'repo' is safer)
     if ! echo "$scopes" | grep -qE '(^|,) *repo(,|$)'; then
         log ERROR "GitHub token is missing the required 'repo' scope."
         log INFO "Please create a new token with the 'repo' scope selected."
@@ -553,7 +551,6 @@ backup() {
     if ! git -C "$tmp_dir" config user.name "n8n Backup Script"; then log ERROR "Failed to set Git user name."; rm -rf "$tmp_dir"; return 1; fi
 
     log INFO "Fetching remote branch '$branch'..."
-    # In dry run, we still need to know if the branch exists to simulate correctly
     local branch_exists=true
     if ! git -C "$tmp_dir" fetch --depth 1 origin "$branch" 2>/dev/null; then
         log WARN "Branch '$branch' not found on remote or repo is empty. Will create branch."
@@ -638,6 +635,8 @@ backup() {
     n8n_ver=$(docker exec "$container_id" n8n --version 2>/dev/null || echo "unknown")
     log DEBUG "Detected n8n version: $n8n_ver"
 
+    # --- Commit Logic --- 
+    local commit_made=false # Flag to track if a commit was actually made
     log INFO "Committing changes..."
     local commit_msg="🛡️ n8n Backup (v$n8n_ver) - $(timestamp)"
     if $use_dated_backup; then
@@ -645,32 +644,45 @@ backup() {
     fi
     
     log DEBUG "Checking Git status for changes..."
-    if ! git -C "$tmp_dir" status --porcelain | grep -qE '^[ AMDRCU?]'; then
-        log INFO "No changes detected to commit."
-    elif $is_dry_run; then
-        log DRYRUN "Would commit with message: $commit_msg"
-    else
-        log DEBUG "Running: git -C $tmp_dir commit -m '$commit_msg'"
-        if ! git -C "$tmp_dir" commit -m "$commit_msg"; then 
-            log ERROR "Git commit failed."
-            rm -rf "$tmp_dir"
-            return 1
+    # Check if there are staged changes
+    if ! git -C "$tmp_dir" diff --cached --quiet; then
+        # Changes are staged
+        if $is_dry_run; then
+            log DRYRUN "Would commit with message: $commit_msg"
+            commit_made=true # Assume commit would happen in dry run if changes exist
+        else
+            log DEBUG "Running: git -C $tmp_dir commit -m '$commit_msg'"
+            if git -C "$tmp_dir" commit -m "$commit_msg"; then
+                commit_made=true # Set flag if commit succeeds
+            else
+                log ERROR "Git commit failed."
+                rm -rf "$tmp_dir"
+                return 1
+            fi
         fi
+    else
+        # No staged changes
+        log INFO "No changes detected to commit."
     fi
 
+    # --- Push Logic --- 
     log INFO "Pushing backup to GitHub repository '$github_repo' branch '$branch'..."
     if $is_dry_run; then
-        log DRYRUN "Would push branch '$branch' to origin"
-    elif ! git -C "$tmp_dir" status --porcelain | grep -qE '^[ AMDRCU?]'; then
-        # If there were no changes, no need to push
-        log INFO "No changes were committed, skipping push."
-    else
+        if $commit_made; then # Only simulate push if commit would have happened
+             log DRYRUN "Would push branch '$branch' to origin"
+        else
+             log DRYRUN "Would skip push (no changes to commit)."
+        fi
+    elif $commit_made; then # Check the flag here
         log DEBUG "Running: git -C $tmp_dir push -u origin $branch"
         if ! git -C "$tmp_dir" push -u origin "$branch"; then
             log ERROR "Git push failed. Check repository URL, token permissions, and branch name."
             rm -rf "$tmp_dir"
             return 1
         fi
+    else
+        # If commit_made is false, it means no changes were detected earlier
+        log INFO "No changes were committed, skipping push."
     fi
 
     log INFO "Cleaning up host temporary directory..."
@@ -774,7 +786,6 @@ restore() {
     local git_repo_url="https://${github_token}@github.com/${github_repo}.git"
     log INFO "Cloning repository $github_repo branch $branch..."
     
-    # No need to simulate clone in dry run, it's read-only and needed for checks
     log DEBUG "Running: git clone --depth 1 --branch $branch $git_repo_url $download_dir"
     if ! git clone --depth 1 --branch "$branch" "$git_repo_url" "$download_dir"; then
         log ERROR "Failed to clone repository. Check URL, token, branch, and permissions."
