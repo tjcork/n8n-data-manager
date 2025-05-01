@@ -9,7 +9,7 @@ IFS=$'\n\t'
 CONFIG_FILE_PATH="${XDG_CONFIG_HOME:-$HOME/.config}/n8n-manager/config"
 
 # --- Global variables ---
-VERSION="3.0.6"
+VERSION="3.0.5"
 DEBUG_TRACE=${DEBUG_TRACE:-false} # Set to true for trace debugging
 SELECTED_ACTION=""
 SELECTED_CONTAINER_ID=""
@@ -30,7 +30,6 @@ ARG_RESTORE_TYPE="all"
 ARG_DRY_RUN=false
 ARG_VERBOSE=false
 ARG_LOG_FILE=""
-ARG_NON_INTERACTIVE=false
 CONF_DATED_BACKUPS=false
 CONF_VERBOSE=false
 CONF_LOG_FILE=""
@@ -236,10 +235,8 @@ Options:
                         Overrides CONF_RESTORE_TYPE in config file.
   --dry-run             Simulate the action without making any changes.
   --verbose             Enable detailed debug logging.
-  --trace               Enable in-depth script debugging with bash execution trace.
   --log-file <path>     Path to a file to append logs to.
   --config <path>       Path to a custom configuration file.
-  --non-interactive     Force non-interactive mode when all required parameters are provided.
   -h, --help            Show this help message and exit.
 
 Configuration File (${CONFIG_FILE_PATH}):
@@ -1301,7 +1298,6 @@ main() {
             --verbose) ARG_VERBOSE=true; shift 1 ;; 
             --log-file) ARG_LOG_FILE="$2"; shift 2 ;; 
             --trace) DEBUG_TRACE=true; shift 1;; 
-            --non-interactive) ARG_NON_INTERACTIVE=true; shift 1 ;;
             -h|--help) show_help; exit 0 ;; 
             *) echo -e "${RED}[ERROR]${NC} Invalid option: $1" >&2; show_help; exit 1 ;; 
         esac
@@ -1336,8 +1332,8 @@ main() {
     log DEBUG "Initial Verbose: $ARG_VERBOSE"
     log DEBUG "Initial Log File: $ARG_LOG_FILE"
 
-    # Check if running non-interactively (either via pipe, flag, or all required params present)
-    if ! [ -t 0 ] || [ "$ARG_NON_INTERACTIVE" = "true" ] || { [ -n "$action" ] && [ -n "$container_id" ] && [ -n "$github_token" ] && [ -n "$github_repo" ]; }; then
+    # Check if running non-interactively
+    if ! [ -t 0 ]; then
         log DEBUG "Running in non-interactive mode."
         if { [ -z "$action" ] || [ -z "$container_id" ] || [ -z "$github_token" ] || [ -z "$github_repo" ]; }; then
             log ERROR "Running in non-interactive mode but required parameters are missing."
