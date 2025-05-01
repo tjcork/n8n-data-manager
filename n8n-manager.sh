@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =========================================================
 # n8n-manager.sh - Interactive backup/restore for n8n
-# v2.9.6 - Added dated backup restore functionality
+# v2.9.7 - Fixed restore functionality and file handling
 # =========================================================
 set -Eeuo pipefail
 IFS=$\'\n\t\'
@@ -10,7 +10,7 @@ IFS=$\'\n\t\'
 CONFIG_FILE_PATH="${XDG_CONFIG_HOME:-$HOME/.config}/n8n-manager/config"
 
 # --- Global variables ---
-VERSION="2.9.6" # Added dated backup restore functionality
+VERSION="2.9.7" # Fixed restore functionality and file handling
 DEBUG_TRACE=${DEBUG_TRACE:-false} # Set to true for trace debugging
 SELECTED_ACTION=""
 SELECTED_CONTAINER_ID=""
@@ -1017,6 +1017,11 @@ restore() {
         return 1;
     }
     
+    # Debug - show what files exist in the repository
+    log DEBUG "Repository root contents:"
+    ls -la "$download_dir" || true
+    find "$download_dir" -type f -name "*.json" | sort || true
+    
     # Find all backup_* directories and sort them by date (newest first)
     readarray -t backup_dirs < <(find . -type d -name "backup_*" | sort -r)
     
@@ -1065,34 +1070,164 @@ restore() {
         fi
     fi
     
-    # Set the paths to the downloaded files based on if we're using a dated backup or not
+    # Look for backup files in the repository using a broader search
+    log INFO "Searching for backup files in the repository..."
+    
+    # Find all JSON files in the repository to identify potential backups
+    local workflow_files=()
+    local credential_files=()
+    
+    # First look in the repository root
+    if [ -f "${download_dir}/workflows.json" ]; then
+        workflow_files+=("${download_dir}/workflows.json")
+        log DEBUG "Found workflows.json in repository root"
+    fi
+    
+    if [ -f "${download_dir}/credentials.json" ]; then
+        credential_files+=("${download_dir}/credentials.json")
+        log DEBUG "Found credentials.json in repository root"
+    fi
+    
+    # Look for any JSON files that might be our backup files
+    while IFS= read -r file; do
+        if [[ "$file" =~ workflows\.json$ ]]; then
+            workflow_files+=("$file")
+            log DEBUG "Found workflow file: $file"
+        elif [[ "$file" =~ credentials\.json$ ]]; then
+            credential_files+=("$file")
+            log DEBUG "Found credentials file: $file"
+        fi
+    done < <(find "$download_dir" -type f -name "*.json" 2>/dev/null)
+    
+    # Remove timestamp comments from JSON files if present
+    local clean_files=false
+    if [ ${#workflow_files[@]} -gt 0 ] || [ ${#credential_files[@]} -gt 0 ]; then
+        log INFO "Cleaning timestamp comments from JSON files..."
+        clean_files=true
+        
+        # Function to clean a JSON file by removing timestamp comments
+        clean_json_file() {
+            local file=$1
+            local output_file=$2
+            log DEBUG "Cleaning file: $file -> $output_file"
+            
+            # If the file starts with a timestamp comment, remove it
+            if grep -q "^// n8n backup timestamp:" "$file"; then
+                tail -n +2 "$file" > "$output_file"
+                log DEBUG "Removed timestamp comment from $file"
+            else
+                # Just copy the file if no timestamp
+                cp "$file" "$output_file"
+            fi
+        }
+    fi
+    
+    # Set the paths to the downloaded files based on if we're using a dated backup
     local downloaded_workflows=""
     local downloaded_credentials=""
+    local temp_dir="${download_dir}/temp"
+    mkdir -p "$temp_dir"
     
+    # Choose which files to use based on dated backup selection
     if $dated_backup_found; then
-        downloaded_workflows="${download_dir}/${selected_backup#./}/workflows.json"
-        downloaded_credentials="${download_dir}/${selected_backup#./}/credentials.json"
-        log INFO "Using dated backup files from: ${selected_backup#./}"
+        local dated_path="${selected_backup#./}"
+        log INFO "Looking for files in dated backup: $dated_path"
+        
+        # Check if dated backup contains the files
+        for wf in "${workflow_files[@]}"; do
+            if [[ "$wf" == *"$dated_path/workflows.json" ]]; then
+                downloaded_workflows="${temp_dir}/workflows.json"
+                if $clean_files; then
+                    clean_json_file "$wf" "$downloaded_workflows"
+                else
+                    cp "$wf" "$downloaded_workflows"
+                fi
+                log INFO "Using workflow file from dated backup: $wf"
+                break
+            fi
+        done
+        
+        for cf in "${credential_files[@]}"; do
+            if [[ "$cf" == *"$dated_path/credentials.json" ]]; then
+                downloaded_credentials="${temp_dir}/credentials.json"
+                if $clean_files; then
+                    clean_json_file "$cf" "$downloaded_credentials"
+                else
+                    cp "$cf" "$downloaded_credentials"
+                fi
+                log INFO "Using credentials file from dated backup: $cf"
+                break
+            fi
+        done
     else
-        downloaded_workflows="${download_dir}/workflows.json"
-        downloaded_credentials="${download_dir}/credentials.json"
-        log INFO "Using files from repository root (not a dated backup)"
+        # Use files from the repository root if available
+        log INFO "Using files from repository root"
+        
+        # Try the repository root first
+        if [ -f "${download_dir}/workflows.json" ]; then
+            downloaded_workflows="${temp_dir}/workflows.json"
+            if $clean_files; then
+                clean_json_file "${download_dir}/workflows.json" "$downloaded_workflows"
+            else
+                cp "${download_dir}/workflows.json" "$downloaded_workflows"
+            fi
+            log INFO "Using workflows.json from repository root"
+        # If not in root, use the first workflow file found
+        elif [ ${#workflow_files[@]} -gt 0 ]; then
+            downloaded_workflows="${temp_dir}/workflows.json"
+            if $clean_files; then
+                clean_json_file "${workflow_files[0]}" "$downloaded_workflows"
+            else
+                cp "${workflow_files[0]}" "$downloaded_workflows"
+            fi
+            log INFO "Using workflow file: ${workflow_files[0]}"
+        fi
+        
+        if [ -f "${download_dir}/credentials.json" ]; then
+            downloaded_credentials="${temp_dir}/credentials.json"
+            if $clean_files; then
+                clean_json_file "${download_dir}/credentials.json" "$downloaded_credentials"
+            else
+                cp "${download_dir}/credentials.json" "$downloaded_credentials"
+            fi
+            log INFO "Using credentials.json from repository root"
+        # If not in root, use the first credentials file found
+        elif [ ${#credential_files[@]} -gt 0 ]; then
+            downloaded_credentials="${temp_dir}/credentials.json"
+            if $clean_files; then
+                clean_json_file "${credential_files[0]}" "$downloaded_credentials"
+            else
+                cp "${credential_files[0]}" "$downloaded_credentials"
+            fi
+            log INFO "Using credentials file: ${credential_files[0]}"
+        fi
     fi
     
     # Verify that the files exist
     local files_found=true
     
-    if [[ "$restore_type" == "all" || "$restore_type" == "workflows" ]] && [ ! -f "$downloaded_workflows" ]; then
-        log ERROR "workflows.json not found in selected backup location."
-        files_found=false
+    if [[ "$restore_type" == "all" || "$restore_type" == "workflows" ]]; then
+        if [ ! -f "$downloaded_workflows" ]; then
+            log ERROR "workflows.json not found in selected backup location."
+            files_found=false
+        else
+            log DEBUG "Workflow file size: $(du -h "$downloaded_workflows" | cut -f1)"
+        fi
     fi
-    if [[ "$restore_type" == "all" || "$restore_type" == "credentials" ]] && [ ! -f "$downloaded_credentials" ]; then
-        log ERROR "credentials.json not found in selected backup location."
-        files_found=false
+    
+    if [[ "$restore_type" == "all" || "$restore_type" == "credentials" ]]; then
+        if [ ! -f "$downloaded_credentials" ]; then
+            log ERROR "credentials.json not found in selected backup location."
+            files_found=false
+        else
+            log DEBUG "Credentials file size: $(du -h "$downloaded_credentials" | cut -f1)"
+        fi
     fi
 
     if ! $files_found; then
-        log ERROR "Required backup files not found in the selected location."
+        log ERROR "Required backup files not found in repository."
+        log DEBUG "Here are all the files in the repository:"
+        find "$download_dir" -type f | sort || true
         rm -rf "$download_dir"
         if [ -n "$pre_restore_dir" ]; then log WARN "Pre-restore backup kept at: $pre_restore_dir"; fi
         return 1
