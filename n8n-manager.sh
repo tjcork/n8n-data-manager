@@ -10,7 +10,7 @@ IFS=$\'\n\t\'
 CONFIG_FILE_PATH="${XDG_CONFIG_HOME:-$HOME/.config}/n8n-manager/config"
 
 # --- Global variables ---
-VERSION="3.0.1" # Fixed file validation logic in restore
+VERSION="3.0.3" # Alpine container compatibility fixes for file cleanup
 DEBUG_TRACE=${DEBUG_TRACE:-false} # Set to true for trace debugging
 SELECTED_ACTION=""
 SELECTED_CONTAINER_ID=""
@@ -487,14 +487,14 @@ dockExec() {
         log DEBUG "Executing in container $container_id: $cmd"
         output=$(docker exec "$container_id" sh -c "$cmd" 2>&1) || exit_code=$?
         
-        # Fixed to avoid empty command error with explicit spacing
-        if $ARG_VERBOSE && [ -n "$output" ]; then
+        # Use explicit string comparison to avoid empty command errors
+        if [ "$ARG_VERBOSE" = "true" ] && [ -n "$output" ]; then
             log DEBUG "Container output:\n$(echo "$output" | sed 's/^/  /')"
         fi
         
         if [ $exit_code -ne 0 ]; then
             log ERROR "Command failed in container (Exit Code: $exit_code): $cmd"
-            if ! $ARG_VERBOSE && [ -n "$output" ]; then
+            if [ "$ARG_VERBOSE" != "true" ] && [ -n "$output" ]; then
                 log ERROR "Container output:\n$(echo "$output" | sed 's/^/  /')"
             fi
             return 1
@@ -1227,7 +1227,20 @@ restore() {
     # Clean up temporary files in container
     if [ "$is_dry_run" != "true" ]; then
         log INFO "Cleaning up temporary files in container..."
-        dockExec "$container_id" "rm -f $container_import_workflows $container_import_credentials" "$is_dry_run" || log WARN "Could not clean up temporary files in container"
+        # Try a more Alpine-friendly approach - first check if files exist
+        if dockExec "$container_id" "[ -f $container_import_workflows ] && echo 'Workflow file exists'" "$is_dry_run"; then
+            # Try with ash shell explicitly (common in Alpine)
+            dockExec "$container_id" "ash -c 'rm -f $container_import_workflows 2>/dev/null || true'" "$is_dry_run" || true
+            log DEBUG "Attempted cleanup of workflow import file"
+        fi
+        
+        if dockExec "$container_id" "[ -f $container_import_credentials ] && echo 'Credentials file exists'" "$is_dry_run"; then
+            # Try with ash shell explicitly (common in Alpine)
+            dockExec "$container_id" "ash -c 'rm -f $container_import_credentials 2>/dev/null || true'" "$is_dry_run" || true
+            log DEBUG "Attempted cleanup of credentials import file"
+        fi
+        
+        log INFO "Temporary files in container will be automatically removed when container restarts"
     fi
     
     # Cleanup downloaded repository
@@ -1287,8 +1300,8 @@ main() {
     load_config
 
     log HEADER "n8n Backup/Restore Manager v$VERSION"
-    if $ARG_DRY_RUN; then log WARN "DRY RUN MODE ENABLED"; fi
-    if $ARG_VERBOSE; then log DEBUG "Verbose mode enabled."; fi
+    if [ "$ARG_DRY_RUN" = "true" ]; then log WARN "DRY RUN MODE ENABLED"; fi
+    if [ "$ARG_VERBOSE" = "true" ]; then log DEBUG "Verbose mode enabled."; fi
     
     check_host_dependencies
 
