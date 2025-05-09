@@ -9,7 +9,7 @@ IFS=$'\n\t'
 CONFIG_FILE_PATH="${XDG_CONFIG_HOME:-$HOME/.config}/n8n-manager/config"
 
 # --- Global variables ---
-VERSION="3.0.7"
+VERSION="3.0.8"
 DEBUG_TRACE=${DEBUG_TRACE:-false} # Set to true for trace debugging
 SELECTED_ACTION=""
 SELECTED_CONTAINER_ID=""
@@ -979,28 +979,45 @@ restore() {
     local backup_failed=false
     local no_existing_data=false
     log INFO "Exporting current n8n data for backup..."
+    
+    # Function to check if output indicates no data
+    check_no_data() {
+        local output="$1"
+        if echo "$output" | grep -q "No workflows found" || echo "$output" | grep -q "No credentials found"; then
+            return 0
+        fi
+        return 1
+    }
+
     if [[ "$restore_type" == "all" || "$restore_type" == "workflows" ]]; then
-        if ! dockExec "$container_id" "n8n export:workflow --all --output=$container_pre_workflows" false; then 
-            # Check if the error is due to no workflows existing
-            if docker exec "$container_id" n8n list workflows 2>&1 | grep -q "No workflows found"; then
+        local workflow_output
+        workflow_output=$(docker exec "$container_id" n8n export:workflow --all --output=$container_pre_workflows 2>&1) || {
+            if check_no_data "$workflow_output"; then
                 log INFO "No existing workflows found - this is a clean installation"
                 no_existing_data=true
+                # Create empty workflows file
+                echo "[]" | docker exec -i "$container_id" sh -c "cat > $container_pre_workflows"
             else
+                log ERROR "Failed to export workflows: $workflow_output"
                 backup_failed=true
             fi
-        fi
+        }
     fi
+
     if [[ "$restore_type" == "all" || "$restore_type" == "credentials" ]]; then
         if ! $backup_failed; then
-            if ! dockExec "$container_id" "n8n export:credentials --all --decrypted --output=$container_pre_credentials" false; then 
-                # Check if the error is due to no credentials existing
-                if docker exec "$container_id" n8n list credentials 2>&1 | grep -q "No credentials found"; then
+            local cred_output
+            cred_output=$(docker exec "$container_id" n8n export:credentials --all --decrypted --output=$container_pre_credentials 2>&1) || {
+                if check_no_data "$cred_output"; then
                     log INFO "No existing credentials found - this is a clean installation"
                     no_existing_data=true
+                    # Create empty credentials file
+                    echo "[]" | docker exec -i "$container_id" sh -c "cat > $container_pre_credentials"
                 else
+                    log ERROR "Failed to export credentials: $cred_output"
                     backup_failed=true
                 fi
-            fi
+            }
         fi
     fi
 
@@ -1015,9 +1032,14 @@ restore() {
         fi
     elif $no_existing_data; then
         log INFO "No existing data found - proceeding with restore without pre-restore backup"
+        # Copy the empty files we created to the backup directory
+        if [[ "$restore_type" == "all" || "$restore_type" == "workflows" ]]; then
+            docker cp "${container_id}:${container_pre_workflows}" "$pre_workflows" || true
+        fi
+        if [[ "$restore_type" == "all" || "$restore_type" == "credentials" ]]; then
+            docker cp "${container_id}:${container_pre_credentials}" "$pre_credentials" || true
+        fi
         dockExec "$container_id" "rm -f $container_pre_workflows $container_pre_credentials" false || true
-        rm -rf "$pre_restore_dir"
-        pre_restore_dir=""
     else
         log INFO "Copying current data to host backup directory..."
         local copy_failed=false
