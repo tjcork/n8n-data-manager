@@ -637,19 +637,53 @@ backup() {
 
     # --- Export Data --- 
     log INFO "Exporting data from n8n container..."
-    # Fixed potential empty command issue
+    local export_failed=false
+    local no_data_found=false
+
+    # Export workflows
     if ! dockExec "$container_id" "n8n export:workflow --all --output=$container_workflows" false; then 
-        log ERROR "Failed to export workflows"
-        rm -rf "$tmp_dir"; 
-        return 1; 
+        # Check if the error is due to no workflows existing
+        if docker exec "$container_id" n8n list workflows 2>&1 | grep -q "No workflows found"; then
+            log INFO "No workflows found to backup - this is a clean installation"
+            no_data_found=true
+        else
+            log ERROR "Failed to export workflows"
+            export_failed=true
+        fi
     fi
+
+    # Export credentials
     if ! dockExec "$container_id" "n8n export:credentials --all --decrypted --output=$container_credentials" false; then 
-        log ERROR "Failed to export credentials"
-        rm -rf "$tmp_dir"; 
-        return 1; 
+        # Check if the error is due to no credentials existing
+        if docker exec "$container_id" n8n list credentials 2>&1 | grep -q "No credentials found"; then
+            log INFO "No credentials found to backup - this is a clean installation"
+            no_data_found=true
+        else
+            log ERROR "Failed to export credentials"
+            export_failed=true
+        fi
     fi
+
+    if $export_failed; then
+        log ERROR "Failed to export data from n8n"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    # Handle environment variables
     if ! dockExec "$container_id" "printenv | grep ^N8N_ > $container_env" false; then
         log WARN "Could not capture N8N_ environment variables from container."
+    fi
+
+    # If no data was found, create empty files to maintain backup structure
+    if $no_data_found; then
+        log INFO "Creating empty backup files for clean installation..."
+        if ! docker exec "$container_id" test -f "$container_workflows"; then
+            echo "[]" | docker exec -i "$container_id" sh -c "cat > $container_workflows"
+        fi
+        if ! docker exec "$container_id" test -f "$container_credentials"; then
+            echo "[]" | docker exec -i "$container_id" sh -c "cat > $container_credentials"
+        fi
     fi
 
     # --- Determine Target Directory and Copy --- 
@@ -943,13 +977,30 @@ restore() {
     local container_pre_credentials="/tmp/pre_credentials.json"
 
     local backup_failed=false
+    local no_existing_data=false
     log INFO "Exporting current n8n data for backup..."
     if [[ "$restore_type" == "all" || "$restore_type" == "workflows" ]]; then
-        if ! dockExec "$container_id" "n8n export:workflow --all --output=$container_pre_workflows" false; then backup_failed=true; fi
+        if ! dockExec "$container_id" "n8n export:workflow --all --output=$container_pre_workflows" false; then 
+            # Check if the error is due to no workflows existing
+            if docker exec "$container_id" n8n list workflows 2>&1 | grep -q "No workflows found"; then
+                log INFO "No existing workflows found - this is a clean installation"
+                no_existing_data=true
+            else
+                backup_failed=true
+            fi
+        fi
     fi
     if [[ "$restore_type" == "all" || "$restore_type" == "credentials" ]]; then
         if ! $backup_failed; then
-            if ! dockExec "$container_id" "n8n export:credentials --all --decrypted --output=$container_pre_credentials" false; then backup_failed=true; fi
+            if ! dockExec "$container_id" "n8n export:credentials --all --decrypted --output=$container_pre_credentials" false; then 
+                # Check if the error is due to no credentials existing
+                if docker exec "$container_id" n8n list credentials 2>&1 | grep -q "No credentials found"; then
+                    log INFO "No existing credentials found - this is a clean installation"
+                    no_existing_data=true
+                else
+                    backup_failed=true
+                fi
+            fi
         fi
     fi
 
@@ -959,9 +1010,14 @@ restore() {
         rm -rf "$pre_restore_dir"
         pre_restore_dir=""
         if ! $is_dry_run; then
-             log ERROR "Cannot proceed with restore safely without pre-restore backup."
-             return 1
+            log ERROR "Cannot proceed with restore safely without pre-restore backup."
+            return 1
         fi
+    elif $no_existing_data; then
+        log INFO "No existing data found - proceeding with restore without pre-restore backup"
+        dockExec "$container_id" "rm -f $container_pre_workflows $container_pre_credentials" false || true
+        rm -rf "$pre_restore_dir"
+        pre_restore_dir=""
     else
         log INFO "Copying current data to host backup directory..."
         local copy_failed=false
@@ -1207,12 +1263,22 @@ restore() {
             log DRYRUN "Would run: n8n import:workflow --input=$container_import_workflows"
         else
             log INFO "Importing workflows..."
-            if dockExec "$container_id" "n8n import:workflow --input=$container_import_workflows" "$is_dry_run"; then
-                log SUCCESS "Workflows imported successfully"
-            else
-                log ERROR "Failed to import workflows. Note this can sometimes happen if they already exist."
-                import_status="failed"
-            fi
+            local import_output
+            import_output=$(docker exec "$container_id" n8n import:workflow --input=$container_import_workflows 2>&1) || {
+                # Check for specific error conditions
+                if echo "$import_output" | grep -q "already exists"; then
+                    log WARN "Some workflows already exist - attempting to update them..."
+                    if ! dockExec "$container_id" "n8n import:workflow --input=$container_import_workflows --force" "$is_dry_run"; then
+                        log ERROR "Failed to import/update workflows"
+                        import_status="failed"
+                    else
+                        log SUCCESS "Workflows imported/updated successfully"
+                    fi
+                else
+                    log ERROR "Failed to import workflows: $import_output"
+                    import_status="failed"
+                fi
+            }
         fi
     fi
     
@@ -1222,12 +1288,22 @@ restore() {
             log DRYRUN "Would run: n8n import:credentials --input=$container_import_credentials"
         else
             log INFO "Importing credentials..."
-            if dockExec "$container_id" "n8n import:credentials --input=$container_import_credentials" "$is_dry_run"; then
-                log SUCCESS "Credentials imported successfully"
-            else
-                log ERROR "Failed to import credentials. Note this can sometimes happen if they already exist."
-                import_status="failed"
-            fi
+            local import_output
+            import_output=$(docker exec "$container_id" n8n import:credentials --input=$container_import_credentials 2>&1) || {
+                # Check for specific error conditions
+                if echo "$import_output" | grep -q "already exists"; then
+                    log WARN "Some credentials already exist - attempting to update them..."
+                    if ! dockExec "$container_id" "n8n import:credentials --input=$container_import_credentials --force" "$is_dry_run"; then
+                        log ERROR "Failed to import/update credentials"
+                        import_status="failed"
+                    else
+                        log SUCCESS "Credentials imported/updated successfully"
+                    fi
+                else
+                    log ERROR "Failed to import credentials: $import_output"
+                    import_status="failed"
+                fi
+            }
         fi
     fi
     
