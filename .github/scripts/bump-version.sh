@@ -8,7 +8,8 @@ SCRIPT_FILE="n8n-manager.sh"
 
 # Function to get current version
 get_current_version() {
-    grep -E '^SCRIPT_VERSION=' "$SCRIPT_FILE" | cut -d'"' -f2
+    # Support either SCRIPT_VERSION="x.y.z" or VERSION="x.y.z"
+    grep -E '^(SCRIPT_VERSION|VERSION)=' "$SCRIPT_FILE" | head -n1 | cut -d'"' -f2
 }
 
 # Function to bump version (major, minor, patch)
@@ -43,8 +44,12 @@ echo "Current version: $CURRENT_VERSION"
 echo "Bumping type: $BUMP_TYPE"
 echo "New version: $NEW_VERSION"
 
-# Update version in script file
-sed -i "s/^SCRIPT_VERSION=.*/SCRIPT_VERSION=\"$NEW_VERSION\"/" "$SCRIPT_FILE"
+# Update version in script file: replace VERSION= or SCRIPT_VERSION=
+if grep -q '^SCRIPT_VERSION=' "$SCRIPT_FILE"; then
+  sed -i "s/^SCRIPT_VERSION=.*/SCRIPT_VERSION=\"$NEW_VERSION\"/" "$SCRIPT_FILE"
+else
+  sed -i "s/^VERSION=.*/VERSION=\"$NEW_VERSION\"/" "$SCRIPT_FILE"
+fi
 
 # Output new version for GitHub Actions
 echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
