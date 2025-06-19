@@ -3,6 +3,7 @@
 ### Features
 
 * add CI/CD workflows with shellcheck, integration tests, and release automation ([eb2d451](https://github.com/Automations-Project/n8n-data-manager/commit/eb2d451ecb9031bf3c0433125de9614eb989f19e))
+* add script to dynamically update README badges with version and repo info ([59e3a10](https://github.com/Automations-Project/n8n-data-manager/commit/59e3a10014e74adbb817771663e4bacbd566321f))
 * add version bump script with major/minor/patch support ([a8b55a6](https://github.com/Automations-Project/n8n-data-manager/commit/a8b55a65e8de332743a57b5cb599a7584467c755))
 * improve backup/restore handling for empty n8n instances and duplicate items ([31e32e3](https://github.com/Automations-Project/n8n-data-manager/commit/31e32e34c758d185b64135cbbe867be074b17bbb))
 
