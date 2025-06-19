@@ -56,8 +56,8 @@ jobs:
         with:
           # Fetch all history for changelog generation
           fetch-depth: 0
-          # Checkout the specific commit created by the version bump job
-          ref: ${{ needs.calculate-version.outputs.version_commit_sha }}
+          # Checkout the branch, not the specific commit, to avoid detached HEAD
+          ref: ${{ github.ref_name }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -80,7 +80,7 @@ jobs:
           # Check if there are changes to commit to avoid error if changelog is empty or unchanged
           if ! git diff --staged --quiet; then
             git commit -m "docs(changelog): update CHANGELOG.md for v${{ needs.calculate-version.outputs.new_version }}"
-            git push
+            git push origin HEAD:${{ github.ref_name }} # Push to the correct branch
           else
             echo "No changes to CHANGELOG.md to commit."
           fi
