@@ -1,7 +1,19 @@
 # n8n-manager: Backup & Restore for n8n Docker via GitHub
-**Current Version: 3.0.5**
+<!-- BADGE_VERSION -->
+<!-- Version badge will be auto-updated here -->
+<!-- BADGE_VERSION_END -->
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) <!-- Placeholder - Update if needed -->
+<!-- BADGE_LICENSE -->
+<!-- License badge will be auto-updated here -->
+<!-- BADGE_LICENSE_END -->
+
+<!-- BADGE_LAST_COMMIT -->
+<!-- Last commit date badge will be auto-updated here -->
+<!-- BADGE_LAST_COMMIT_END -->
+
+<!-- BADGE_BUILD_STATUS -->
+<!-- Build status badge will be auto-updated here (optional) -->
+<!-- BADGE_BUILD_STATUS_END -->
 
 ![Banner](.github/images/Banner.png)
 
