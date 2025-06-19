@@ -4,47 +4,47 @@
 <!-- BADGE_VERSION_END -->
 
 <!-- BADGE_BUILD_STATUS -->
-<!-- Build status badge will be auto-updated here (optional) -->
+[![Build Status](https://img.shields.io/github/actions/workflow/status/Automations-Project/n8n-data-manager/ci.yml?branch=main&style=flat-square)](https://github.com/Automations-Project/n8n-data-manager/actions/workflows/ci.yml)
 <!-- BADGE_BUILD_STATUS_END -->
 
 <!-- BADGE_LATEST_RELEASE -->
-<!-- Latest release badge will be auto-updated here -->
+[![Latest Release](https://img.shields.io/github/v/release/Automations-Project/n8n-data-manager?include_prereleases&style=flat-square&label=release)](https://github.com/Automations-Project/n8n-data-manager/releases/latest)
 <!-- BADGE_LATEST_RELEASE_END -->
 
 <!-- BADGE_SHELLCHECK -->
-<!-- Shellcheck badge will be auto-updated here -->
+[![ShellCheck](https://img.shields.io/badge/ShellCheck-passing-brightgreen?style=flat-square)](https://github.com/Automations-Project/n8n-data-manager/actions/workflows/ci.yml?query=branch%3Amain)
 <!-- BADGE_SHELLCHECK_END -->
 
 <!-- BADGE_LICENSE -->
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
 <!-- BADGE_LICENSE_END -->
 
 <!-- BADGE_STARS -->
-<!-- Stars badge will be auto-updated here -->
+[![GitHub Stars](https://img.shields.io/github/stars/Automations-Project/n8n-data-manager?style=flat-square&logo=github)](https://github.com/Automations-Project/n8n-data-manager/stargazers)
 <!-- BADGE_STARS_END -->
 
 <!-- BADGE_FORKS -->
-<!-- Forks badge will be auto-updated here -->
+[![GitHub Forks](https://img.shields.io/github/forks/Automations-Project/n8n-data-manager?style=flat-square&logo=github)](https://github.com/Automations-Project/n8n-data-manager/network/members)
 <!-- BADGE_FORKS_END -->
 
 <!-- BADGE_CONTRIBUTORS -->
-<!-- Contributors badge will be auto-updated here -->
+[![Contributors](https://img.shields.io/github/contributors/Automations-Project/n8n-data-manager?style=flat-square)](https://github.com/Automations-Project/n8n-data-manager/graphs/contributors)
 <!-- BADGE_CONTRIBUTORS_END -->
 
 <!-- BADGE_OPEN_ISSUES -->
-<!-- Open issues badge will be auto-updated here -->
+[![Open Issues](https://img.shields.io/github/issues-raw/Automations-Project/n8n-data-manager?style=flat-square&logo=github)](https://github.com/Automations-Project/n8n-data-manager/issues)
 <!-- BADGE_OPEN_ISSUES_END -->
 
 <!-- BADGE_LAST_COMMIT -->
-[![Last Commit](https://img.shields.io/badge/last%20commit-2025-06-19-orange.svg)](https://github.com/Automations-Project/n8n-data-manager/commits/main)
+[![Last Commit](https://img.shields.io/github/last-commit/Automations-Project/n8n-data-manager/main?style=flat-square)](https://github.com/Automations-Project/n8n-data-manager/commits/main)
 <!-- BADGE_LAST_COMMIT_END -->
 
 <!-- BADGE_CODE_SIZE -->
-<!-- Code size badge will be auto-updated here -->
+[![Repo Size](https://img.shields.io/github/repo-size/Automations-Project/n8n-data-manager?style=flat-square)](https://github.com/Automations-Project/n8n-data-manager)
 <!-- BADGE_CODE_SIZE_END -->
 
 <!-- BADGE_PROJECT_STATUS -->
-<!-- Project status badge will be auto-updated here -->
+[![Project Status: Active](https://img.shields.io/badge/status-active-success.svg?style=flat-square)](./#)
 <!-- BADGE_PROJECT_STATUS_END -->
 <!-- BADGE_BUILD_STATUS_END -->
 
