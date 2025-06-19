@@ -27,13 +27,20 @@ update_badge() {
 }
 
 # Get script version
-SCRIPT_VERSION=$(grep -E '^SCRIPT_VERSION=' "$SCRIPT_FILE" | cut -d'"' -f2)
-if [ -z "$SCRIPT_VERSION" ]; then
-    # Fallback to checking for VERSION if SCRIPT_VERSION is not found
-    SCRIPT_VERSION=$(grep -E '^VERSION=' "$SCRIPT_FILE" | cut -d'"' -f2)
+# Try to get SCRIPT_VERSION
+script_version_line=$(grep -E '^SCRIPT_VERSION=' "$SCRIPT_FILE" || true) # Allow grep to fail without exiting script
+if [ -n "$script_version_line" ]; then
+    SCRIPT_VERSION=$(echo "$script_version_line" | cut -d'"' -f2)
+else
+    # Fallback to checking for VERSION if SCRIPT_VERSION was not found
+    version_line=$(grep -E '^VERSION=' "$SCRIPT_FILE" || true) # Allow grep to fail without exiting script
+    if [ -n "$version_line" ]; then
+        SCRIPT_VERSION=$(echo "$version_line" | cut -d'"' -f2)
+    fi
 fi
 
-if [ -z "$SCRIPT_VERSION" ]; then
+# Check if SCRIPT_VERSION was successfully extracted
+if [ -z "${SCRIPT_VERSION:-}" ]; then # Use :- to handle unbound variable if set -u is also active
     echo "Error: Could not extract SCRIPT_VERSION or VERSION from $SCRIPT_FILE" >&2
     exit 1
 fi
