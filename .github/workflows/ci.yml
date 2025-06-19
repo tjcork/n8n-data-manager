@@ -105,6 +105,7 @@ jobs:
 
     - name: Validate documentation
       run: |
+        chmod +x n8n-manager.sh # Ensure main script is executable
         chmod +x .github/scripts/test-docs.sh
         ./.github/scripts/test-docs.sh
 

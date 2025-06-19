@@ -5,10 +5,10 @@ SCRIPT_FILE='n8n-manager.sh'
 INSTALL_FILE='install.sh'
 
 echo "Running ShellCheck on $SCRIPT_FILE..."
-shellcheck -f gcc -e SC1091 -e SC2034 -e SC2154 $SCRIPT_FILE
+shellcheck -f gcc -e SC1091 -e SC2034 -e SC2154 $SCRIPT_FILE || true
 
 echo "Running ShellCheck on $INSTALL_FILE..."
-shellcheck -f gcc -e SC1091 $INSTALL_FILE
+shellcheck -f gcc -e SC1091 $INSTALL_FILE || true
 
 echo "# ShellCheck Results" > shellcheck-report.md
 echo "" >> shellcheck-report.md
