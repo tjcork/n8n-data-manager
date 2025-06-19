@@ -163,13 +163,14 @@ jobs:
         fi
         
         # Create changelog entry
-        CHANGELOG_ENTRY="## [$NEW_VERSION] - $DATE
+        CHANGELOG_ENTRY=$(cat <<EOF
+## [$NEW_VERSION] - $DATE
 
 ### Changes
 $COMMITS
+EOF
+)
 
-"
-        
         # Update CHANGELOG.md
         if [ -f "$CHANGELOG_FILE" ]; then
           # Insert new entry after the first line (assuming it's a header)

@@ -106,17 +106,17 @@ jobs:
       run: |
         # Create badge section for README
         cat > badges.md << 'EOF'
-[![Version](${{ steps.badges.outputs.version_badge }})](${{ steps.badges.outputs.release_badge }})
-[![License](${{ steps.badges.outputs.license_badge }})](https://opensource.org/licenses/MIT)
-[![Shell Requirement](${{ steps.badges.outputs.shell_badge }})](https://www.gnu.org/software/bash/)
-[![Docker Compatible](${{ steps.badges.outputs.docker_badge }})](https://www.docker.com/)
-[![Script Size](${{ steps.badges.outputs.size_badge }})]()
-[![Lines of Code](${{ steps.badges.outputs.lines_badge }})]()
-[![Status](${{ steps.badges.outputs.status_badge }})]()
-[![Last Commit](${{ steps.badges.outputs.last_commit_badge }})](https://github.com/${{ github.repository }}/commits/main)
-[![GitHub Release](${{ steps.badges.outputs.release_badge }})](https://github.com/${{ github.repository }}/releases/latest)
-[![Downloads](${{ steps.badges.outputs.downloads_badge }})](https://github.com/${{ github.repository }}/releases)
-[![Issues](${{ steps.badges.outputs.issues_badge }})](https://github.com/${{ github.repository }}/issues)
+[![Version](${steps.badges.outputs.version_badge})](${steps.badges.outputs.release_badge})
+[![License](${steps.badges.outputs.license_badge})](https://opensource.org/licenses/MIT)
+[![Shell Requirement](${steps.badges.outputs.shell_badge})](https://www.gnu.org/software/bash/)
+[![Docker Compatible](${steps.badges.outputs.docker_badge})](https://www.docker.com/)
+[![Script Size](${steps.badges.outputs.size_badge})]()
+[![Lines of Code](${steps.badges.outputs.lines_badge})]()
+[![Status](${steps.badges.outputs.status_badge})]()
+[![Last Commit](${steps.badges.outputs.last_commit_badge})](https://github.com/${github.repository}/commits/main)
+[![GitHub Release](${steps.badges.outputs.release_badge})](https://github.com/${github.repository}/releases/latest)
+[![Downloads](${steps.badges.outputs.downloads_badge})](https://github.com/${github.repository}/releases)
+[![Issues](${steps.badges.outputs.issues_badge})](https://github.com/${github.repository}/issues)
 EOF
         
         # Update README with new badges
