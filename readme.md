@@ -1,6 +1,6 @@
 # n8n-manager: Backup & Restore for n8n Docker via GitHub
 <!-- BADGE_VERSION -->
-<!-- Version badge will be auto-updated here -->
+[![Version](https://img.shields.io/badge/version-3.0.15-blue.svg)](https://github.com/Automations-Project/n8n-data-manager/releases/tag/v3.0.15)
 <!-- BADGE_VERSION_END -->
 
 <!-- BADGE_BUILD_STATUS -->
@@ -16,7 +16,7 @@
 <!-- BADGE_SHELLCHECK_END -->
 
 <!-- BADGE_LICENSE -->
-<!-- License badge will be auto-updated here -->
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 <!-- BADGE_LICENSE_END -->
 
 <!-- BADGE_STARS -->
@@ -36,7 +36,7 @@
 <!-- BADGE_OPEN_ISSUES_END -->
 
 <!-- BADGE_LAST_COMMIT -->
-<!-- Last commit date badge will be auto-updated here -->
+[![Last Commit](https://img.shields.io/badge/last%20commit-2025-06-19-orange.svg)](https://github.com/Automations-Project/n8n-data-manager/commits/main)
 <!-- BADGE_LAST_COMMIT_END -->
 
 <!-- BADGE_CODE_SIZE -->
