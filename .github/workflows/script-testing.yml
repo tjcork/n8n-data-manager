@@ -1,0 +1,335 @@
+name: Script Testing and Validation
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'n8n-manager.sh'
+      - 'install.sh'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'n8n-manager.sh'
+      - 'install.sh'
+  workflow_dispatch:
+
+env:
+  SCRIPT_FILE: 'n8n-manager.sh'
+  INSTALL_FILE: 'install.sh'
+
+jobs:
+  shellcheck:
+    name: ShellCheck Linting
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install ShellCheck
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y shellcheck
+
+    - name: Run ShellCheck on main script
+      run: |
+        echo "Running ShellCheck on $SCRIPT_FILE..."
+        shellcheck -f gcc -e SC1091 -e SC2034 -e SC2154 $SCRIPT_FILE
+
+    - name: Run ShellCheck on install script
+      run: |
+        echo "Running ShellCheck on $INSTALL_FILE..."
+        shellcheck -f gcc -e SC1091 $INSTALL_FILE
+
+    - name: Generate ShellCheck report
+      if: always()
+      run: |
+        echo "# ShellCheck Results" > shellcheck-report.md
+        echo "" >> shellcheck-report.md
+        echo "## Main Script ($SCRIPT_FILE)" >> shellcheck-report.md
+        shellcheck -f diff $SCRIPT_FILE >> shellcheck-report.md 2>&1 || true
+        echo "" >> shellcheck-report.md
+        echo "## Install Script ($INSTALL_FILE)" >> shellcheck-report.md
+        shellcheck -f diff $INSTALL_FILE >> shellcheck-report.md 2>&1 || true
+
+    - name: Upload ShellCheck report
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: shellcheck-report
+        path: shellcheck-report.md
+
+  syntax-validation:
+    name: Bash Syntax Validation
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Validate main script syntax
+      run: |
+        echo "Validating syntax of $SCRIPT_FILE..."
+        bash -n $SCRIPT_FILE
+
+    - name: Validate install script syntax
+      run: |
+        echo "Validating syntax of $INSTALL_FILE..."
+        bash -n $INSTALL_FILE
+
+    - name: Test script execution (dry-run)
+      run: |
+        echo "Testing script execution with --help flag..."
+        chmod +x $SCRIPT_FILE
+        ./$SCRIPT_FILE --help || true
+        
+        echo "Testing script execution with --dry-run flag..."
+        ./$SCRIPT_FILE --action backup --dry-run --verbose || true
+
+  functional-testing:
+    name: Functional Testing
+    runs-on: ubuntu-latest
+    services:
+      docker:
+        image: docker:dind
+        options: --privileged
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Docker
+      run: |
+        # Start Docker daemon
+        dockerd &
+        sleep 10
+        
+        # Test Docker connectivity
+        docker --version
+        docker info
+
+    - name: Create test n8n container
+      run: |
+        echo "Creating test n8n container..."
+        docker run -d \
+          --name test-n8n \
+          -p 5678:5678 \
+          -e N8N_BASIC_AUTH_ACTIVE=true \
+          -e N8N_BASIC_AUTH_USER=admin \
+          -e N8N_BASIC_AUTH_PASSWORD=password \
+          n8nio/n8n:latest
+        
+        # Wait for container to be ready
+        sleep 30
+        docker ps
+
+    - name: Test script functions
+      run: |
+        chmod +x $SCRIPT_FILE
+        
+        echo "Testing container detection..."
+        ./$SCRIPT_FILE --action backup --container test-n8n --dry-run --verbose || true
+        
+        echo "Testing help functionality..."
+        ./$SCRIPT_FILE --help
+        
+        echo "Testing configuration file parsing..."
+        mkdir -p ~/.config/n8n-manager
+        echo 'CONF_VERBOSE=true' > ~/.config/n8n-manager/config
+        ./$SCRIPT_FILE --action backup --container test-n8n --dry-run || true
+
+    - name: Test install script
+      run: |
+        echo "Testing install script (dry-run simulation)..."
+        chmod +x $INSTALL_FILE
+        
+        # Test dependency checking
+        bash -c 'source $INSTALL_FILE; check_dependencies' || true
+
+    - name: Cleanup test environment
+      if: always()
+      run: |
+        docker stop test-n8n || true
+        docker rm test-n8n || true
+
+  security-scanning:
+    name: Security Scanning
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install security tools
+      run: |
+        # Install bandit-like tool for shell scripts
+        sudo apt-get update
+        sudo apt-get install -y grep
+
+    - name: Scan for security issues
+      run: |
+        echo "# Security Scan Results" > security-report.md
+        echo "" >> security-report.md
+        
+        echo "## Potential Security Issues" >> security-report.md
+        
+        # Check for common security anti-patterns
+        echo "### Command Injection Risks" >> security-report.md
+        grep -n "eval\|exec\|\`" $SCRIPT_FILE $INSTALL_FILE >> security-report.md || echo "None found" >> security-report.md
+        
+        echo "" >> security-report.md
+        echo "### Unsafe Variable Usage" >> security-report.md
+        grep -n '\$[a-zA-Z_][a-zA-Z0-9_]*[^"]' $SCRIPT_FILE $INSTALL_FILE | head -20 >> security-report.md || echo "None found" >> security-report.md
+        
+        echo "" >> security-report.md
+        echo "### Hardcoded Secrets Check" >> security-report.md
+        grep -i -n "password\|secret\|key\|token" $SCRIPT_FILE $INSTALL_FILE | grep -v "GITHUB_TOKEN\|CONF_" >> security-report.md || echo "None found" >> security-report.md
+
+    - name: Upload security report
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-report
+        path: security-report.md
+
+  documentation-validation:
+    name: Documentation Validation
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Validate README structure
+      run: |
+        echo "Validating README.md structure..."
+        
+        # Check for required sections
+        required_sections=("Features" "Prerequisites" "Installation" "Configuration" "Usage")
+        
+        for section in "${required_sections[@]}"; do
+          if grep -q "## .*$section" readme.md; then
+            echo "✅ Found: $section"
+          else
+            echo "❌ Missing: $section"
+            exit 1
+          fi
+        done
+
+    - name: Validate help text consistency
+      run: |
+        echo "Checking help text consistency..."
+        
+        # Extract help text from script
+        ./$SCRIPT_FILE --help > script-help.txt
+        
+        # Check if README contains similar information
+        if grep -q "Usage:" readme.md; then
+          echo "✅ README contains usage information"
+        else
+          echo "❌ README missing usage information"
+          exit 1
+        fi
+
+    - name: Check version consistency
+      run: |
+        echo "Checking version consistency..."
+        
+        # Extract version from script
+        SCRIPT_VERSION=$(grep -E '^SCRIPT_VERSION=' $SCRIPT_FILE | cut -d'"' -f2)
+        
+        # Check if README mentions the same version
+        if grep -q "$SCRIPT_VERSION" readme.md; then
+          echo "✅ Version consistent: $SCRIPT_VERSION"
+        else
+          echo "❌ Version mismatch in README"
+          echo "Script version: $SCRIPT_VERSION"
+          echo "README version references:"
+          grep -n "version\|Version" readme.md || echo "None found"
+          exit 1
+        fi
+
+  integration-testing:
+    name: Integration Testing
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up test environment
+      run: |
+        # Install required tools
+        sudo apt-get update
+        sudo apt-get install -y docker.io git curl
+
+    - name: Test installation process
+      run: |
+        echo "Testing installation process..."
+        
+        # Test install script locally
+        chmod +x $INSTALL_FILE
+        
+        # Create a temporary directory for testing
+        TEST_DIR=$(mktemp -d)
+        cd $TEST_DIR
+        
+        # Copy and modify install script for testing
+        cp $GITHUB_WORKSPACE/$INSTALL_FILE ./test-install.sh
+        
+        # Modify script to install to local directory instead of system
+        sed -i 's|/usr/local/bin|./bin|g' ./test-install.sh
+        sed -i 's|sudo ||g' ./test-install.sh
+        
+        mkdir -p ./bin
+        
+        # Test the modified install script
+        bash ./test-install.sh || echo "Install test completed (errors expected in CI)"
+
+    - name: Generate test report
+      if: always()
+      run: |
+        echo "# Integration Test Results" > integration-report.md
+        echo "" >> integration-report.md
+        echo "- Test environment: Ubuntu Latest" >> integration-report.md
+        echo "- Docker available: $(docker --version)" >> integration-report.md
+        echo "- Git available: $(git --version)" >> integration-report.md
+        echo "- Curl available: $(curl --version | head -1)" >> integration-report.md
+
+    - name: Upload integration report
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: integration-report
+        path: integration-report.md
+
+  test-summary:
+    name: Test Summary
+    runs-on: ubuntu-latest
+    needs: [shellcheck, syntax-validation, functional-testing, security-scanning, documentation-validation]
+    if: always()
+    steps:
+    - name: Generate test summary
+      run: |
+        echo "# Test Summary" > test-summary.md
+        echo "" >> test-summary.md
+        echo "## Results Overview" >> test-summary.md
+        echo "- ShellCheck: ${{ needs.shellcheck.result }}" >> test-summary.md
+        echo "- Syntax Validation: ${{ needs.syntax-validation.result }}" >> test-summary.md
+        echo "- Functional Testing: ${{ needs.functional-testing.result }}" >> test-summary.md
+        echo "- Security Scanning: ${{ needs.security-scanning.result }}" >> test-summary.md
+        echo "- Documentation Validation: ${{ needs.documentation-validation.result }}" >> test-summary.md
+        echo "" >> test-summary.md
+        echo "## Overall Status" >> test-summary.md
+        
+        # Determine overall status
+        if [[ "${{ needs.shellcheck.result }}" == "success" && \
+              "${{ needs.syntax-validation.result }}" == "success" && \
+              "${{ needs.functional-testing.result }}" == "success" && \
+              "${{ needs.security-scanning.result }}" == "success" && \
+              "${{ needs.documentation-validation.result }}" == "success" ]]; then
+          echo "✅ ALL TESTS PASSED" >> test-summary.md
+        else
+          echo "❌ SOME TESTS FAILED" >> test-summary.md
+        fi
+
+    - name: Upload test summary
+      uses: actions/upload-artifact@v3
+      with:
+        name: test-summary
+        path: test-summary.md

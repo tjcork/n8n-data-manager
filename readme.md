@@ -65,7 +65,7 @@ You can install `n8n-manager` using the provided installation script. This will 
 **Note:** You need `curl` and `sudo` (or run as root) for the installation.
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Automations-Project/n8n-data-manager/main/install.sh | sudo bash
+curl -sSL https://i.n8n.community | sudo bash
 ```
 
 Alternatively, you can download the `n8n-manager.sh` script manually, make it executable (`chmod +x n8n-manager.sh`), and run it directly (`./n8n-manager.sh`) or place it in your desired `$PATH` directory.
@@ -279,4 +279,3 @@ Contributions are welcome! Please feel free to open issues on the GitHub reposit
 ## 📄 License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
-
