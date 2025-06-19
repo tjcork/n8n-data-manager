@@ -108,6 +108,9 @@ jobs:
           chmod +x .github/scripts/update-readme-badges.sh
           ./.github/scripts/update-readme-badges.sh
 
+      - name: List files before commit
+        run: ls -la
+
       - name: Commit README.md update
         run: |
           git add README.md
