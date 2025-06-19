@@ -141,6 +141,3 @@ jobs:
           body_path: CHANGELOG.md # Assumes changelog is generated and committed
           draft: false
           prerelease: false
-
-      - name: Output Release URL
-        run: echo "Release URL: ${{ steps.create_release.outputs.html_url }}"
