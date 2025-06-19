@@ -6,23 +6,7 @@ IFS=$'\n\t'
 README_FILE="readme.md"
 SCRIPT_FILE="n8n-manager.sh"
 
-# Function to update a badge in README.md
-# Arguments: <badge_name_placeholder> <badge_url_markdown>
-update_badge() {
-    local placeholder="$1"
-    local markdown="$2"
-    if grep -q "<!-- $placeholder -->" "$README_FILE"; then
-        awk -v placeholder="$placeholder" -v md="$markdown" '
-        BEGIN {p_start = "<!-- " placeholder " -->"; p_end = "<!-- " placeholder "_END -->"}
-        $0 ~ p_start {print; print md; in_block=1; next}
-        $0 ~ p_end {print; in_block=0; next}
-        !in_block {print}
-        ' "$README_FILE" > tmp_readme.md && mv tmp_readme.md "$README_FILE"
-        echo "Updated badge: $placeholder"
-    else
-        echo "Warning: Placeholder '$placeholder' not found in $README_FILE. Badge not updated."
-    fi
-}
+
 
 # --- Configuration & Dynamic Data --- 
 # Attempt to get version from script file
@@ -102,18 +86,65 @@ CODE_SIZE_BADGE="[![Repo Size](https://img.shields.io/github/repo-size/$GITHUB_R
 # 11. Project Status (Static)
 PROJECT_STATUS_BADGE="[![Project Status: Active](https://img.shields.io/badge/status-active-success.svg?style=$BADGE_STYLE)](./#)"
 
-# --- Update README.md --- 
-update_badge "BADGE_BUILD_STATUS" "$BUILD_STATUS_BADGE"
-if [ -n "$LATEST_RELEASE_BADGE" ]; then update_badge "BADGE_LATEST_RELEASE" "$LATEST_RELEASE_BADGE"; fi
-update_badge "BADGE_LICENSE" "$LICENSE_BADGE"
-update_badge "BADGE_LAST_COMMIT" "$LAST_COMMIT_BADGE"
-update_badge "BADGE_STARS" "$STARS_BADGE"
-update_badge "BADGE_FORKS" "$FORKS_BADGE"
-update_badge "BADGE_OPEN_ISSUES" "$OPEN_ISSUES_BADGE"
-update_badge "BADGE_CONTRIBUTORS" "$CONTRIBUTORS_BADGE"
-update_badge "BADGE_SHELLCHECK" "$SHELLCHECK_BADGE"
-update_badge "BADGE_CODE_SIZE" "$CODE_SIZE_BADGE"
-update_badge "BADGE_PROJECT_STATUS" "$PROJECT_STATUS_BADGE"
+# 12. Top Language
+TOP_LANGUAGE_BADGE="[![GitHub Top Language](https://img.shields.io/github/languages/top/$GITHUB_REPO_SLUG?style=$BADGE_STYLE)](https://github.com/$GITHUB_REPO_SLUG)"
+
+# 13. Maintenance Status (Static)
+MAINTENANCE_STATUS_BADGE="[![Maintenance Status](https://img.shields.io/badge/Maintenance-Actively%20Maintained-green.svg?style=$BADGE_STYLE)](./#)"
+
+# --- Badge Definitions (Add more as needed) ---
+ALL_BADGES_MARKDOWN=""
+
+# Line 1
+ALL_BADGES_MARKDOWN+="$BUILD_STATUS_BADGE "
+if [ -n "$LATEST_RELEASE_BADGE" ]; then ALL_BADGES_MARKDOWN+="$LATEST_RELEASE_BADGE "; fi
+ALL_BADGES_MARKDOWN+="$SHELLCHECK_BADGE "
+ALL_BADGES_MARKDOWN+="$LICENSE_BADGE\n"
+
+# Line 2
+ALL_BADGES_MARKDOWN+="$STARS_BADGE "
+ALL_BADGES_MARKDOWN+="$FORKS_BADGE "
+ALL_BADGES_MARKDOWN+="$CONTRIBUTORS_BADGE "
+ALL_BADGES_MARKDOWN+="$OPEN_ISSUES_BADGE\n"
+
+# Line 3
+ALL_BADGES_MARKDOWN+="$LAST_COMMIT_BADGE "
+ALL_BADGES_MARKDOWN+="$CODE_SIZE_BADGE "
+ALL_BADGES_MARKDOWN+="$PROJECT_STATUS_BADGE\n"
+
+# Line 4
+ALL_BADGES_MARKDOWN+="$TOP_LANGUAGE_BADGE "
+ALL_BADGES_MARKDOWN+="$MAINTENANCE_STATUS_BADGE "
+# Add new badges here, for example:
+# DOWNLOADS_BADGE="[![GitHub All Releases](https://img.shields.io/github/downloads/$GITHUB_REPO_SLUG/total?style=$BADGE_STYLE)](https://github.com/$GITHUB_REPO_SLUG/releases)"
+# TOP_LANGUAGE_BADGE="[![GitHub Top Language](https://img.shields.io/github/languages/top/$GITHUB_REPO_SLUG?style=$BADGE_STYLE)](https://github.com/$GITHUB_REPO_SLUG)"
+# ALL_BADGES_MARKDOWN+="$DOWNLOADS_BADGE "
+# ALL_BADGES_MARKDOWN+="$TOP_LANGUAGE_BADGE\n"
+
+# --- Update README.md with the consolidated badge block ---
+PLACEHOLDER_TAG="ALL_BADGES"
+if grep -q "<!-- ${PLACEHOLDER_TAG}_START -->" "$README_FILE"; then
+    # Use awk to replace content between placeholder comments
+    awk -v placeholder_start="<!-- ${PLACEHOLDER_TAG}_START -->" \
+        -v placeholder_end="<!-- ${PLACEHOLDER_TAG}_END -->" \
+        -v content="${ALL_BADGES_MARKDOWN}" '
+    BEGIN {printing=1}
+    $0 ~ placeholder_start {
+        print;
+        print content;
+        printing=0;
+        next;
+    }
+    $0 ~ placeholder_end {
+        printing=1;
+    }
+    printing {print}
+    ' "$README_FILE" > tmp_readme.md && mv tmp_readme.md "$README_FILE"
+    echo "Successfully updated all badges in $README_FILE."
+else
+    echo "Error: Placeholder '<!-- ${PLACEHOLDER_TAG}_START -->' or '<!-- ${PLACEHOLDER_TAG}_END -->' not found in $README_FILE." >&2
+    exit 1
+fi
 
 echo "README badges update process completed."
 exit 0

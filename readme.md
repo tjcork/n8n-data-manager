@@ -1,52 +1,7 @@
 # n8n-manager: Backup & Restore for n8n Docker via GitHub
-<!-- BADGE_VERSION -->
-[![Version](https://img.shields.io/badge/version-3.0.15-blue.svg)](https://github.com/Automations-Project/n8n-data-manager/releases/tag/v3.0.15)
-<!-- BADGE_VERSION_END -->
-
-<!-- BADGE_BUILD_STATUS -->
-[![Build Status](https://img.shields.io/github/actions/workflow/status/Automations-Project/n8n-data-manager/ci.yml?branch=main&style=flat-square)](https://github.com/Automations-Project/n8n-data-manager/actions/workflows/ci.yml)
-<!-- BADGE_BUILD_STATUS_END -->
-
-<!-- BADGE_LATEST_RELEASE -->
-[![Latest Release](https://img.shields.io/github/v/release/Automations-Project/n8n-data-manager?include_prereleases&style=flat-square&label=release)](https://github.com/Automations-Project/n8n-data-manager/releases/latest)
-<!-- BADGE_LATEST_RELEASE_END -->
-
-<!-- BADGE_SHELLCHECK -->
-[![ShellCheck](https://img.shields.io/badge/ShellCheck-passing-brightgreen?style=flat-square)](https://github.com/Automations-Project/n8n-data-manager/actions/workflows/ci.yml?query=branch%3Amain)
-<!-- BADGE_SHELLCHECK_END -->
-
-<!-- BADGE_LICENSE -->
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
-<!-- BADGE_LICENSE_END -->
-
-<!-- BADGE_STARS -->
-[![GitHub Stars](https://img.shields.io/github/stars/Automations-Project/n8n-data-manager?style=flat-square&logo=github)](https://github.com/Automations-Project/n8n-data-manager/stargazers)
-<!-- BADGE_STARS_END -->
-
-<!-- BADGE_FORKS -->
-[![GitHub Forks](https://img.shields.io/github/forks/Automations-Project/n8n-data-manager?style=flat-square&logo=github)](https://github.com/Automations-Project/n8n-data-manager/network/members)
-<!-- BADGE_FORKS_END -->
-
-<!-- BADGE_CONTRIBUTORS -->
-[![Contributors](https://img.shields.io/github/contributors/Automations-Project/n8n-data-manager?style=flat-square)](https://github.com/Automations-Project/n8n-data-manager/graphs/contributors)
-<!-- BADGE_CONTRIBUTORS_END -->
-
-<!-- BADGE_OPEN_ISSUES -->
-[![Open Issues](https://img.shields.io/github/issues-raw/Automations-Project/n8n-data-manager?style=flat-square&logo=github)](https://github.com/Automations-Project/n8n-data-manager/issues)
-<!-- BADGE_OPEN_ISSUES_END -->
-
-<!-- BADGE_LAST_COMMIT -->
-[![Last Commit](https://img.shields.io/github/last-commit/Automations-Project/n8n-data-manager/main?style=flat-square)](https://github.com/Automations-Project/n8n-data-manager/commits/main)
-<!-- BADGE_LAST_COMMIT_END -->
-
-<!-- BADGE_CODE_SIZE -->
-[![Repo Size](https://img.shields.io/github/repo-size/Automations-Project/n8n-data-manager?style=flat-square)](https://github.com/Automations-Project/n8n-data-manager)
-<!-- BADGE_CODE_SIZE_END -->
-
-<!-- BADGE_PROJECT_STATUS -->
-[![Project Status: Active](https://img.shields.io/badge/status-active-success.svg?style=flat-square)](./#)
-<!-- BADGE_PROJECT_STATUS_END -->
-<!-- BADGE_BUILD_STATUS_END -->
+<!-- ALL_BADGES_START -->
+<!-- Badges will be automatically updated here by .github/scripts/update-readme-badges.sh -->
+<!-- ALL_BADGES_END -->
 
 ![Banner](.github/images/Banner.png)
 
