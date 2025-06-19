@@ -1,5 +1,10 @@
 name: Release Management
 
+# Required permissions for the workflow token
+permissions:
+  contents: write  # For commits and pushes
+  pull-requests: write  # For creating releases
+
 on:
   push:
     branches:
