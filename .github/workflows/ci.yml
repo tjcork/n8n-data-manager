@@ -167,17 +167,6 @@ jobs:
       with:
         name: test-summary
         path: test-summary.md
-    runs-on: ubuntu-latest
-
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-
-    - name: Install ShellCheck
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y shellcheck
-
     - name: Run ShellCheck
       run: |
         chmod +x .github/scripts/test-shellcheck.sh
