@@ -120,7 +120,7 @@ jobs:
     - name: Set up test environment
       run: |
         sudo apt-get update
-        sudo apt-get install -y docker.io git curl
+        sudo apt-get install -y git curl
 
     - name: Debug Workspace (Before Script)
       run: |
