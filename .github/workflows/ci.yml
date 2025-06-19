@@ -122,10 +122,29 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y docker.io git curl
 
+    - name: Debug Workspace (Before Script)
+      run: |
+        echo "GITHUB_WORKSPACE is: $GITHUB_WORKSPACE"
+        echo "Listing $GITHUB_WORKSPACE:"
+        ls -la $GITHUB_WORKSPACE
+        echo "Touching $GITHUB_WORKSPACE/integration-report.md"
+        touch $GITHUB_WORKSPACE/integration-report.md
+        echo "Listing $GITHUB_WORKSPACE after touch:"
+        ls -la $GITHUB_WORKSPACE
+
     - name: Run integration tests
       run: |
+        chmod +x install.sh # Ensure root install.sh is executable BEFORE test script copies it
         chmod +x .github/scripts/test-integration.sh
         ./.github/scripts/test-integration.sh
+
+    - name: Debug Workspace (After Script)
+      if: always() # Run this even if the script fails
+      run: |
+        echo "Listing $GITHUB_WORKSPACE after script execution:"
+        ls -la $GITHUB_WORKSPACE
+        echo "Contents of $GITHUB_WORKSPACE/integration-report.md (if it exists):"
+        cat $GITHUB_WORKSPACE/integration-report.md || echo "integration-report.md not found by cat command"
 
     - name: Upload integration report
       if: always()

@@ -143,6 +143,4 @@ jobs:
           prerelease: false
 
       - name: Output Release URL
-        env:
-          RELEASE_URL: ${{ steps.create_release.outputs.html_url }}
-        run: echo "Release URL: $RELEASE_URL"
+        run: echo "Release URL: ${{ steps.create_release.outputs.html_url }}"
