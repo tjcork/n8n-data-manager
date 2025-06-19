@@ -1,5 +1,6 @@
 #!/bin/bash
 set -Eeuo pipefail
+set -x # Enable command tracing for debugging
 IFS=$'\n\t'
 
 README_FILE="README.md"
