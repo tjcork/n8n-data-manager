@@ -3,6 +3,7 @@
 ### Features
 
 * add CI/CD workflows with shellcheck, integration tests, and release automation ([eb2d451](https://github.com/Automations-Project/n8n-data-manager/commit/eb2d451ecb9031bf3c0433125de9614eb989f19e))
+* add GitHub Actions workflow for release management and badge updates ([a42bd0e](https://github.com/Automations-Project/n8n-data-manager/commit/a42bd0efb3ed71de2fd69cded2e3b2cf1e1a3813))
 * add script to automatically update README badges with dynamic repository info ([ad9543a](https://github.com/Automations-Project/n8n-data-manager/commit/ad9543a6cc586450bac51f1bed9295759f9f077c))
 * add script to automatically update README badges with dynamic version and repo info ([92861d5](https://github.com/Automations-Project/n8n-data-manager/commit/92861d5ba8f7399cfac38943f47e06275e5b3134))
 * add script to dynamically update README badges with version and repo info ([59e3a10](https://github.com/Automations-Project/n8n-data-manager/commit/59e3a10014e74adbb817771663e4bacbd566321f))
