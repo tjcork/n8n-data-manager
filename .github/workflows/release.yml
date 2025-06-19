@@ -113,7 +113,7 @@ jobs:
 
       - name: Commit README.md update
         run: |
-          git add README.md
+          git add readme.md
           # Check if there are changes to commit
           if ! git diff --staged --quiet; then
             git commit -m "docs(readme): update badges for v${{ needs.calculate-version.outputs.new_version }}"

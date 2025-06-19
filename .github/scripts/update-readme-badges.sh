@@ -3,7 +3,7 @@ set -Eeuo pipefail
 set -x # Enable command tracing for debugging
 IFS=$'\n\t'
 
-README_FILE="README.md"
+README_FILE="readme.md"
 SCRIPT_FILE="n8n-manager.sh"
 
 # Function to update a badge in README.md
