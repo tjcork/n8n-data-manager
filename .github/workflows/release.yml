@@ -6,9 +6,17 @@ permissions:
   pull-requests: write  # For creating releases
 
 on:
-  push:
-    branches:
-      - main # Or your release branch
+  workflow_dispatch:
+    inputs:
+      version_bump_type:
+        description: 'The type of version bump (major, minor, or patch)'
+        required: true
+        default: 'patch'
+        type: 'choice'
+        options:
+          - patch
+          - minor
+          - major
 
 jobs:
   calculate-version:
@@ -33,6 +41,8 @@ jobs:
         run: |
           chmod +x .github/scripts/bump-version.sh
           ./.github/scripts/bump-version.sh
+        env:
+          VERSION_BUMP_TYPE: ${{ github.event.inputs.version_bump_type }}
         # In a real scenario, you might pass VERSION_BUMP_TYPE based on commit analysis
         # env:
         #   VERSION_BUMP_TYPE: 'patch' # or 'minor', 'major'
