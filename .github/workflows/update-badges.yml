@@ -102,36 +102,24 @@ jobs:
         echo "downloads_badge=$DOWNLOADS_BADGE" >> $GITHUB_OUTPUT
         echo "issues_badge=$ISSUES_BADGE" >> $GITHUB_OUTPUT
 
+    - name: Create badges markdown
+      run: |
+        # Create badges.md file with proper GitHub Actions syntax
+        echo "# Repository Badges" > badges.md
+        echo "" >> badges.md
+        echo "[![Version](${{ steps.badges.outputs.version_badge }})](https://github.com/${{ github.repository }}/releases)" >> badges.md
+        echo "[![Repository Size](${{ steps.badges.outputs.size_badge }})](https://github.com/${{ github.repository }})" >> badges.md
+        echo "[![Lines of Code](${{ steps.badges.outputs.lines_badge }})](https://github.com/${{ github.repository }})" >> badges.md
+        echo "[![Last Commit](${{ steps.badges.outputs.last_commit_badge }})](https://github.com/${{ github.repository }}/commits)" >> badges.md
+        echo "[![License](https://img.shields.io/github/license/${{ github.repository }}?style=flat-square&color=blue)](LICENSE)" >> badges.md
+        echo "[![Stars](https://img.shields.io/github/stars/${{ github.repository }}?style=flat-square&color=yellow)](https://github.com/${{ github.repository }}/stargazers)" >> badges.md
+        echo "[![Forks](https://img.shields.io/github/forks/${{ github.repository }}?style=flat-square&color=green)](https://github.com/${{ github.repository }}/network/members)" >> badges.md
+        echo "[![Issues](https://img.shields.io/github/issues/${{ github.repository }}?style=flat-square&color=red)](https://github.com/${{ github.repository }}/issues)" >> badges.md
+        echo "" >> badges.md
+        echo "**Current Version: ${{ steps.stats.outputs.version }}**" >> badges.md
+
     - name: Update README badges
       run: |
-        # Create badge section for README
-        VERSION_BADGE="${{ steps.badges.outputs.version_badge }}"
-        LICENSE_BADGE="${{ steps.badges.outputs.license_badge }}"
-        SHELL_BADGE="${{ steps.badges.outputs.shell_badge }}"
-        DOCKER_BADGE="${{ steps.badges.outputs.docker_badge }}"
-        SIZE_BADGE="${{ steps.badges.outputs.size_badge }}"
-        LINES_BADGE="${{ steps.badges.outputs.lines_badge }}"
-        STATUS_BADGE="${{ steps.badges.outputs.status_badge }}"
-        LAST_COMMIT_BADGE="${{ steps.badges.outputs.last_commit_badge }}"
-        RELEASE_BADGE="${{ steps.badges.outputs.release_badge }}"
-        DOWNLOADS_BADGE="${{ steps.badges.outputs.downloads_badge }}"
-        ISSUES_BADGE="${{ steps.badges.outputs.issues_badge }}"
-        REPO="${{ github.repository }}"
-        
-        cat > badges.md << EOF
-[![Version](${VERSION_BADGE})](${RELEASE_BADGE})
-[![License](${LICENSE_BADGE})](https://opensource.org/licenses/MIT)
-[![Shell Requirement](${SHELL_BADGE})](https://www.gnu.org/software/bash/)
-[![Docker Compatible](${DOCKER_BADGE})](https://www.docker.com/)
-[![Script Size](${SIZE_BADGE})]()
-[![Lines of Code](${LINES_BADGE})]()
-[![Status](${STATUS_BADGE})]()
-[![Last Commit](${LAST_COMMIT_BADGE})](https://github.com/${REPO}/commits/main)
-[![GitHub Release](${RELEASE_BADGE})](https://github.com/${REPO}/releases/latest)
-[![Downloads](${DOWNLOADS_BADGE})](https://github.com/${REPO}/releases)
-[![Issues](${ISSUES_BADGE})](https://github.com/${REPO}/issues)
-EOF
-        
         # Update README with new badges
         if grep -q "^\[\!\[Version\]" readme.md; then
           # Replace existing badges section

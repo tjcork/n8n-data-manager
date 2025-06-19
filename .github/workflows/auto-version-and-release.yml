@@ -163,23 +163,28 @@ jobs:
         fi
         
         # Create changelog entry
-        cat > changelog_temp.md << EOF
-## [$NEW_VERSION] - $DATE
+        echo 'release_notes<<EOF' >> $GITHUB_OUTPUT
+        echo "## [$NEW_VERSION] - $DATE" >> $GITHUB_OUTPUT
+        echo "" >> $GITHUB_OUTPUT
+        echo "### Changes" >> $GITHUB_OUTPUT
+        echo "$COMMITS" >> $GITHUB_OUTPUT
+        echo "" >> $GITHUB_OUTPUT
+        echo 'EOF' >> $GITHUB_OUTPUT
+        
+        # Store in variable for file operations
+        CHANGELOG_ENTRY="## [$NEW_VERSION] - $DATE
 
 ### Changes
 $COMMITS
 
-EOF
-        CHANGELOG_ENTRY=$(cat changelog_temp.md)
-        rm changelog_temp.md
+"
         
         # Update CHANGELOG.md
         if [ -f "$CHANGELOG_FILE" ]; then
-          # Insert new entry after the first line (assuming it's a header)
-          sed -i "1a\\
-$CHANGELOG_ENTRY" $CHANGELOG_FILE
+          # Prepend new entry to existing changelog
+          echo -e "$CHANGELOG_ENTRY\n$(cat $CHANGELOG_FILE)" > $CHANGELOG_FILE
         else
-          # Create new changelog
+          # Create new changelog file
           echo "# Changelog
 
 All notable changes to this project will be documented in this file.
@@ -187,10 +192,7 @@ All notable changes to this project will be documented in this file.
 $CHANGELOG_ENTRY" > $CHANGELOG_FILE
         fi
         
-        # Output release notes
-        echo "release_notes<<EOF" >> $GITHUB_OUTPUT
-        echo "$CHANGELOG_ENTRY" >> $GITHUB_OUTPUT
-        echo "EOF" >> $GITHUB_OUTPUT
+        echo "Updated CHANGELOG.md"
 
     - name: Update README version badge
       run: |
