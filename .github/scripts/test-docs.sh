@@ -19,7 +19,7 @@ done
 echo "Checking help text consistency..."
 ./$SCRIPT_FILE --help > script-help.txt
 
-if grep -E -q "## +Usage|Usage:" $README_FILE; then
+if grep -E -q "## .*Usage|Usage:" $README_FILE; then
   echo "✅ README contains usage information"
 else
   echo "❌ README missing usage information"
