@@ -1,7 +1,8 @@
-## [](https://github.com/Automations-Project/n8n-data-manager/compare/v3.0.15...v) (2025-06-19)
+## [](https://github.com/Automations-Project/n8n-data-manager/compare/v3.0.16...v) (2025-06-19)
 
 ### Features
 
+* add automated readme badge generation script and update badge section ([dcc987a](https://github.com/Automations-Project/n8n-data-manager/commit/dcc987a17f91e0d69be66f0c1ad91b3bb575f428))
 * add GitHub Actions workflow for auto-updating README badges ([a6944bb](https://github.com/Automations-Project/n8n-data-manager/commit/a6944bb619d8480377eb8346d094825636e8c5fc))
 ## [3.0.15](https://github.com/Automations-Project/n8n-data-manager/compare/02f689ce9f6dc97eae0263b0ee74e6a3d8a932ea...v3.0.15) (2025-06-19)
 
