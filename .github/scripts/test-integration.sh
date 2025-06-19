@@ -4,6 +4,10 @@ IFS=$'\n\t'
 
 INSTALL_FILE_BASENAME='install.sh'
 REPORT_NAME='integration-report.md'
+# If GITHUB_WORKSPACE is not set (e.g., when running locally), default to current directory
+if [ -z "${GITHUB_WORKSPACE:-}" ]; then
+  GITHUB_WORKSPACE="$PWD"
+fi
 REPORT_PATH="$GITHUB_WORKSPACE/$REPORT_NAME" # Create report directly in workspace
 
 TEST_DIR=""
