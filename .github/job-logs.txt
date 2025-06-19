@@ -1,205 +1,225 @@
-﻿2025-06-19T12:01:12.6043182Z Current runner version: '2.325.0'
-2025-06-19T12:01:12.6069075Z ##[group]Runner Image Provisioner
-2025-06-19T12:01:12.6069873Z Hosted Compute Agent
-2025-06-19T12:01:12.6070709Z Version: 20250617.347
-2025-06-19T12:01:12.6071411Z Commit: a94982a9c1baf5723aa59f6acd00bd3c220e8de7
-2025-06-19T12:01:12.6072102Z Build Date: 2025-06-17T13:43:39Z
-2025-06-19T12:01:12.6072692Z ##[endgroup]
-2025-06-19T12:01:12.6073191Z ##[group]Operating System
-2025-06-19T12:01:12.6073833Z Ubuntu
-2025-06-19T12:01:12.6074272Z 24.04.2
-2025-06-19T12:01:12.6074762Z LTS
-2025-06-19T12:01:12.6075190Z ##[endgroup]
-2025-06-19T12:01:12.6075670Z ##[group]Runner Image
-2025-06-19T12:01:12.6076283Z Image: ubuntu-24.04
-2025-06-19T12:01:12.6076766Z Version: 20250602.3.0
-2025-06-19T12:01:12.6077759Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20250602.3/images/ubuntu/Ubuntu2404-Readme.md
-2025-06-19T12:01:12.6079351Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20250602.3
-2025-06-19T12:01:12.6080316Z ##[endgroup]
-2025-06-19T12:01:12.6081643Z ##[group]GITHUB_TOKEN Permissions
-2025-06-19T12:01:12.6083714Z Contents: write
-2025-06-19T12:01:12.6084348Z Metadata: read
-2025-06-19T12:01:12.6084847Z PullRequests: write
-2025-06-19T12:01:12.6085356Z ##[endgroup]
-2025-06-19T12:01:12.6087628Z Secret source: Actions
-2025-06-19T12:01:12.6088599Z Prepare workflow directory
-2025-06-19T12:01:12.6412510Z Prepare all required actions
-2025-06-19T12:01:12.6450968Z Getting action download info
-2025-06-19T12:01:12.9276111Z ##[group]Download immutable action package 'actions/checkout@v4'
-2025-06-19T12:01:12.9277214Z Version: 4.2.2
-2025-06-19T12:01:12.9278218Z Digest: sha256:ccb2698953eaebd21c7bf6268a94f9c26518a7e38e27e0b83c1fe1ad049819b1
-2025-06-19T12:01:12.9279375Z Source commit SHA: 11bd71901bbe5b1630ceea73d27597364c9af683
-2025-06-19T12:01:12.9280172Z ##[endgroup]
-2025-06-19T12:01:13.0884414Z Complete job name: Update README Badges
-2025-06-19T12:01:13.1679500Z ##[group]Run actions/checkout@v4
-2025-06-19T12:01:13.1680508Z with:
-2025-06-19T12:01:13.1680883Z   ref: main
-2025-06-19T12:01:13.1681231Z   fetch-depth: 0
-2025-06-19T12:01:13.1681707Z   repository: Automations-Project/n8n-data-manager
-2025-06-19T12:01:13.1682461Z   token: ***
-2025-06-19T12:01:13.1682836Z   ssh-strict: true
-2025-06-19T12:01:13.1683222Z   ssh-user: git
-2025-06-19T12:01:13.1683653Z   persist-credentials: true
-2025-06-19T12:01:13.1684110Z   clean: true
-2025-06-19T12:01:13.1684499Z   sparse-checkout-cone-mode: true
-2025-06-19T12:01:13.1684997Z   fetch-tags: false
-2025-06-19T12:01:13.1685390Z   show-progress: true
-2025-06-19T12:01:13.1685798Z   lfs: false
-2025-06-19T12:01:13.1686147Z   submodules: false
-2025-06-19T12:01:13.1686554Z   set-safe-directory: true
-2025-06-19T12:01:13.1687369Z ##[endgroup]
-2025-06-19T12:01:13.2740133Z Syncing repository: Automations-Project/n8n-data-manager
-2025-06-19T12:01:13.2742529Z ##[group]Getting Git version info
-2025-06-19T12:01:13.2743395Z Working directory is '/home/runner/work/n8n-data-manager/n8n-data-manager'
-2025-06-19T12:01:13.2744420Z [command]/usr/bin/git version
-2025-06-19T12:01:13.2793009Z git version 2.49.0
-2025-06-19T12:01:13.2819293Z ##[endgroup]
-2025-06-19T12:01:13.2835014Z Temporarily overriding HOME='/home/runner/work/_temp/9fc83231-5cc0-47f1-b47a-95d6eb1a916a' before making global git config changes
-2025-06-19T12:01:13.2837411Z Adding repository directory to the temporary git global config as a safe directory
-2025-06-19T12:01:13.2849122Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/n8n-data-manager/n8n-data-manager
-2025-06-19T12:01:13.2883114Z Deleting the contents of '/home/runner/work/n8n-data-manager/n8n-data-manager'
-2025-06-19T12:01:13.2886676Z ##[group]Initializing the repository
-2025-06-19T12:01:13.2891703Z [command]/usr/bin/git init /home/runner/work/n8n-data-manager/n8n-data-manager
-2025-06-19T12:01:13.2962044Z hint: Using 'master' as the name for the initial branch. This default branch name
-2025-06-19T12:01:13.2963515Z hint: is subject to change. To configure the initial branch name to use in all
-2025-06-19T12:01:13.2964946Z hint: of your new repositories, which will suppress this warning, call:
-2025-06-19T12:01:13.2966211Z hint:
-2025-06-19T12:01:13.2966885Z hint: 	git config --global init.defaultBranch <name>
-2025-06-19T12:01:13.2967931Z hint:
-2025-06-19T12:01:13.2968941Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
-2025-06-19T12:01:13.2970829Z hint: 'development'. The just-created branch can be renamed via this command:
-2025-06-19T12:01:13.2972143Z hint:
-2025-06-19T12:01:13.2972867Z hint: 	git branch -m <name>
-2025-06-19T12:01:13.2974258Z Initialized empty Git repository in /home/runner/work/n8n-data-manager/n8n-data-manager/.git/
-2025-06-19T12:01:13.2979745Z [command]/usr/bin/git remote add origin https://github.com/Automations-Project/n8n-data-manager
-2025-06-19T12:01:13.3015396Z ##[endgroup]
-2025-06-19T12:01:13.3016132Z ##[group]Disabling automatic garbage collection
-2025-06-19T12:01:13.3019136Z [command]/usr/bin/git config --local gc.auto 0
-2025-06-19T12:01:13.3047168Z ##[endgroup]
-2025-06-19T12:01:13.3047839Z ##[group]Setting up auth
-2025-06-19T12:01:13.3054091Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
-2025-06-19T12:01:13.3083222Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
-2025-06-19T12:01:13.3376095Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
-2025-06-19T12:01:13.3406170Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
-2025-06-19T12:01:13.3624176Z [command]/usr/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
-2025-06-19T12:01:13.3658339Z ##[endgroup]
-2025-06-19T12:01:13.3659152Z ##[group]Fetching the repository
-2025-06-19T12:01:13.3675363Z [command]/usr/bin/git -c protocol.version=2 fetch --prune --no-recurse-submodules origin +refs/heads/*:refs/remotes/origin/* +refs/tags/*:refs/tags/*
-2025-06-19T12:01:13.6913367Z From https://github.com/Automations-Project/n8n-data-manager
-2025-06-19T12:01:13.6915599Z  * [new branch]      main       -> origin/main
-2025-06-19T12:01:13.6953874Z ##[endgroup]
-2025-06-19T12:01:13.6954797Z ##[group]Determining the checkout info
-2025-06-19T12:01:13.6962740Z [command]/usr/bin/git branch --list --remote origin/main
-2025-06-19T12:01:13.6987373Z   origin/main
-2025-06-19T12:01:13.6996377Z ##[endgroup]
-2025-06-19T12:01:13.7000734Z [command]/usr/bin/git sparse-checkout disable
-2025-06-19T12:01:13.7041454Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
-2025-06-19T12:01:13.7068029Z ##[group]Checking out the ref
-2025-06-19T12:01:13.7072445Z [command]/usr/bin/git checkout --progress --force -B main refs/remotes/origin/main
-2025-06-19T12:01:13.7142633Z Switched to a new branch 'main'
-2025-06-19T12:01:13.7145403Z branch 'main' set up to track 'origin/main'.
-2025-06-19T12:01:13.7152127Z ##[endgroup]
-2025-06-19T12:01:13.7184825Z [command]/usr/bin/git log -1 --format=%H
-2025-06-19T12:01:13.7206399Z c0154bcac78ebcd90789ca2e959478aa4d9e7c35
-2025-06-19T12:01:13.7379354Z ##[group]Run git config user.name "GitHub Actions Bot"
-2025-06-19T12:01:13.7380207Z [36;1mgit config user.name "GitHub Actions Bot"[0m
-2025-06-19T12:01:13.7381102Z [36;1mgit config user.email "actions@github.com"[0m
-2025-06-19T12:01:13.7449255Z shell: /usr/bin/bash -e {0}
-2025-06-19T12:01:13.7449794Z ##[endgroup]
-2025-06-19T12:01:13.7606298Z ##[group]Run chmod +x .github/scripts/update-readme-badges.sh
-2025-06-19T12:01:13.7607227Z [36;1mchmod +x .github/scripts/update-readme-badges.sh[0m
-2025-06-19T12:01:13.7607946Z [36;1m./.github/scripts/update-readme-badges.sh[0m
-2025-06-19T12:01:13.7653955Z shell: /usr/bin/bash -e {0}
-2025-06-19T12:01:13.7654466Z ##[endgroup]
-2025-06-19T12:01:13.7741898Z + IFS='
-2025-06-19T12:01:13.7742894Z 	'
-2025-06-19T12:01:13.7743537Z + README_FILE=README.md
-2025-06-19T12:01:13.7744198Z + SCRIPT_FILE=n8n-manager.sh
-2025-06-19T12:01:13.7745509Z ++ grep -E '^SCRIPT_VERSION=' n8n-manager.sh
-2025-06-19T12:01:13.7758921Z ++ true
-2025-06-19T12:01:13.7761036Z + script_version_line=
-2025-06-19T12:01:13.7762115Z + '[' -n '' ']'
-2025-06-19T12:01:13.7764464Z ++ grep -E '^VERSION=' n8n-manager.sh
-2025-06-19T12:01:13.7779113Z + version_line='VERSION="3.0.14"'
-2025-06-19T12:01:13.7780096Z + '[' -n 'VERSION="3.0.14"' ']'
-2025-06-19T12:01:13.7784205Z ++ echo 'VERSION="3.0.14"'
-2025-06-19T12:01:13.7785982Z ++ cut '-d"' -f2
-2025-06-19T12:01:13.7796812Z + SCRIPT_VERSION=3.0.14
-2025-06-19T12:01:13.7797605Z + '[' -z 3.0.14 ']'
-2025-06-19T12:01:13.7802070Z +++ git config --get remote.origin.url
-2025-06-19T12:01:13.7815798Z ++ basename -s .git https://github.com/Automations-Project/n8n-data-manager
-2025-06-19T12:01:13.7824919Z + REPO_NAME=n8n-data-manager
-2025-06-19T12:01:13.7829242Z ++ git config --get remote.origin.url
-2025-06-19T12:01:13.7832280Z ++ sed -n 's|.*github.com/\([^/]*\)/.*|\1|p'
-2025-06-19T12:01:13.7846152Z + OWNER_NAME=Automations-Project
-2025-06-19T12:01:13.7848354Z ++ date -u +%Y-%m-%d
-2025-06-19T12:01:13.7858570Z + LAST_COMMIT_DATE_FORMATTED=2025-06-19
-2025-06-19T12:01:13.7859671Z + LICENSE_TYPE=MIT
-2025-06-19T12:01:13.7862272Z + VERSION_BADGE_URL='[![Version](https://img.shields.io/badge/version-3.0.14-blue.svg)](https://github.com/Automations-Project/n8n-data-manager/releases/tag/v3.0.14)'
-2025-06-19T12:01:13.7863966Z + LICENSE_BADGE_URL='[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)'
-2025-06-19T12:01:13.7865654Z + LAST_COMMIT_BADGE_URL='[![Last Commit](https://img.shields.io/badge/last%20commit-2025-06-19-orange.svg)](https://github.com/Automations-Project/n8n-data-manager/commits/main)'
-2025-06-19T12:01:13.7867786Z + update_badge BADGE_VERSION '[![Version](https://img.shields.io/badge/version-3.0.14-blue.svg)](https://github.com/Automations-Project/n8n-data-manager/releases/tag/v3.0.14)'
-2025-06-19T12:01:13.7869169Z + local placeholder=BADGE_VERSION
-2025-06-19T12:01:13.7870641Z + local 'url=[![Version](https://img.shields.io/badge/version-3.0.14-blue.svg)](https://github.com/Automations-Project/n8n-data-manager/releases/tag/v3.0.14)'
-2025-06-19T12:01:13.7872444Z + grep -q '<!-- BADGE_VERSION -->' README.md
-2025-06-19T12:01:13.7873584Z grep: README.md: No such file or directory
-2025-06-19T12:01:13.7875036Z + echo 'Warning: Placeholder '\''BADGE_VERSION'\'' not found in README.md.'
-2025-06-19T12:01:13.7877058Z + update_badge BADGE_LICENSE '[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)'
-2025-06-19T12:01:13.7878315Z Warning: Placeholder 'BADGE_VERSION' not found in README.md.
-2025-06-19T12:01:13.7879022Z + local placeholder=BADGE_LICENSE
-2025-06-19T12:01:13.7879789Z + local 'url=[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)'
-2025-06-19T12:01:13.7881067Z + grep -q '<!-- BADGE_LICENSE -->' README.md
-2025-06-19T12:01:13.7887182Z grep: README.md: No such file or directory
-2025-06-19T12:01:13.7889161Z + echo 'Warning: Placeholder '\''BADGE_LICENSE'\'' not found in README.md.'
-2025-06-19T12:01:13.7890887Z Warning: Placeholder 'BADGE_LICENSE' not found in README.md.
-2025-06-19T12:01:13.7892495Z + update_badge BADGE_LAST_COMMIT '[![Last Commit](https://img.shields.io/badge/last%20commit-2025-06-19-orange.svg)](https://github.com/Automations-Project/n8n-data-manager/commits/main)'
-2025-06-19T12:01:13.7893946Z + local placeholder=BADGE_LAST_COMMIT
-2025-06-19T12:01:13.7895459Z + local 'url=[![Last Commit](https://img.shields.io/badge/last%20commit-2025-06-19-orange.svg)](https://github.com/Automations-Project/n8n-data-manager/commits/main)'
-2025-06-19T12:01:13.7896805Z + grep -q '<!-- BADGE_LAST_COMMIT -->' README.md
-2025-06-19T12:01:13.7900751Z grep: README.md: No such file or directory
-2025-06-19T12:01:13.7903927Z + echo 'Warning: Placeholder '\''BADGE_LAST_COMMIT'\'' not found in README.md.'
-2025-06-19T12:01:13.7905399Z + echo 'README badges update process completed.'
-2025-06-19T12:01:13.7905988Z + exit 0
-2025-06-19T12:01:13.7906539Z Warning: Placeholder 'BADGE_LAST_COMMIT' not found in README.md.
-2025-06-19T12:01:13.7908029Z README badges update process completed.
-2025-06-19T12:01:13.7944834Z ##[group]Run ls -la
-2025-06-19T12:01:13.7945339Z [36;1mls -la[0m
-2025-06-19T12:01:13.7992365Z shell: /usr/bin/bash -e {0}
-2025-06-19T12:01:13.7992879Z ##[endgroup]
-2025-06-19T12:01:13.8072428Z total 108
-2025-06-19T12:01:13.8073226Z drwxr-xr-x 5 runner docker  4096 Jun 19 12:01 .
-2025-06-19T12:01:13.8073914Z drwxr-xr-x 3 runner docker  4096 Jun 19 12:01 ..
-2025-06-19T12:01:13.8074574Z drwxr-xr-x 7 runner docker  4096 Jun 19 12:01 .git
-2025-06-19T12:01:13.8075822Z drwxr-xr-x 5 runner docker  4096 Jun 19 12:01 .github
-2025-06-19T12:01:13.8077128Z -rw-r--r-- 1 runner docker   112 Jun 19 12:01 .gitignore
-2025-06-19T12:01:13.8078292Z drwxr-xr-x 3 runner docker  4096 Jun 19 12:01 .windsurf
-2025-06-19T12:01:13.8079388Z -rw-r--r-- 1 runner docker  1594 Jun 19 12:01 CHANGELOG.md
-2025-06-19T12:01:13.8080110Z -rw-r--r-- 1 runner docker  3262 Jun 19 12:01 install.sh
-2025-06-19T12:01:13.8081055Z -rw-r--r-- 1 runner docker 61403 Jun 19 12:01 n8n-manager.sh
-2025-06-19T12:01:13.8081775Z -rw-r--r-- 1 runner docker 13733 Jun 19 12:01 readme.md
-2025-06-19T12:01:13.8137014Z ##[group]Run git add README.md
-2025-06-19T12:01:13.8137604Z [36;1mgit add README.md[0m
-2025-06-19T12:01:13.8138138Z [36;1m# Check if there are changes to commit[0m
-2025-06-19T12:01:13.8138770Z [36;1mif ! git diff --staged --quiet; then[0m
-2025-06-19T12:01:13.8139479Z [36;1m  git commit -m "docs(readme): update badges for v3.0.14"[0m
-2025-06-19T12:01:13.8140146Z [36;1m  git push[0m
-2025-06-19T12:01:13.8140739Z [36;1melse[0m
-2025-06-19T12:01:13.8141242Z [36;1m  echo "No changes to README.md badges to commit."[0m
-2025-06-19T12:01:13.8141851Z [36;1mfi[0m
-2025-06-19T12:01:13.8187307Z shell: /usr/bin/bash -e {0}
-2025-06-19T12:01:13.8188133Z ##[endgroup]
-2025-06-19T12:01:13.8270739Z fatal: pathspec 'README.md' did not match any files
-2025-06-19T12:01:13.8284986Z ##[error]Process completed with exit code 128.
-2025-06-19T12:01:13.8402707Z Post job cleanup.
-2025-06-19T12:01:13.9329446Z [command]/usr/bin/git version
-2025-06-19T12:01:13.9365142Z git version 2.49.0
-2025-06-19T12:01:13.9407737Z Temporarily overriding HOME='/home/runner/work/_temp/562b54a6-87ad-4da9-a63e-ecd5aff567c7' before making global git config changes
-2025-06-19T12:01:13.9413078Z Adding repository directory to the temporary git global config as a safe directory
-2025-06-19T12:01:13.9414576Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/n8n-data-manager/n8n-data-manager
-2025-06-19T12:01:13.9447689Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
-2025-06-19T12:01:13.9479960Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
-2025-06-19T12:01:13.9727566Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
-2025-06-19T12:01:13.9729448Z http.https://github.com/.extraheader
-2025-06-19T12:01:13.9741104Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
-2025-06-19T12:01:13.9774230Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
-2025-06-19T12:01:14.0123726Z Cleaning up orphan processes
+﻿2025-06-19T12:06:56.5609769Z Current runner version: '2.325.0'
+2025-06-19T12:06:56.5644973Z ##[group]Runner Image Provisioner
+2025-06-19T12:06:56.5646251Z Hosted Compute Agent
+2025-06-19T12:06:56.5646873Z Version: 20250617.347
+2025-06-19T12:06:56.5647498Z Commit: a94982a9c1baf5723aa59f6acd00bd3c220e8de7
+2025-06-19T12:06:56.5648270Z Build Date: 2025-06-17T13:43:39Z
+2025-06-19T12:06:56.5648916Z ##[endgroup]
+2025-06-19T12:06:56.5649478Z ##[group]Operating System
+2025-06-19T12:06:56.5650157Z Ubuntu
+2025-06-19T12:06:56.5650658Z 24.04.2
+2025-06-19T12:06:56.5651160Z LTS
+2025-06-19T12:06:56.5651605Z ##[endgroup]
+2025-06-19T12:06:56.5652236Z ##[group]Runner Image
+2025-06-19T12:06:56.5652848Z Image: ubuntu-24.04
+2025-06-19T12:06:56.5653333Z Version: 20250602.3.0
+2025-06-19T12:06:56.5654464Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20250602.3/images/ubuntu/Ubuntu2404-Readme.md
+2025-06-19T12:06:56.5656155Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20250602.3
+2025-06-19T12:06:56.5657224Z ##[endgroup]
+2025-06-19T12:06:56.5658310Z ##[group]GITHUB_TOKEN Permissions
+2025-06-19T12:06:56.5660219Z Contents: write
+2025-06-19T12:06:56.5660750Z Metadata: read
+2025-06-19T12:06:56.5661247Z PullRequests: write
+2025-06-19T12:06:56.5661907Z ##[endgroup]
+2025-06-19T12:06:56.5663929Z Secret source: Actions
+2025-06-19T12:06:56.5664601Z Prepare workflow directory
+2025-06-19T12:06:56.6080226Z Prepare all required actions
+2025-06-19T12:06:56.6136896Z Getting action download info
+2025-06-19T12:06:56.9044921Z ##[group]Download immutable action package 'actions/checkout@v4'
+2025-06-19T12:06:56.9046124Z Version: 4.2.2
+2025-06-19T12:06:56.9047270Z Digest: sha256:ccb2698953eaebd21c7bf6268a94f9c26518a7e38e27e0b83c1fe1ad049819b1
+2025-06-19T12:06:56.9048414Z Source commit SHA: 11bd71901bbe5b1630ceea73d27597364c9af683
+2025-06-19T12:06:56.9049101Z ##[endgroup]
+2025-06-19T12:06:57.0743082Z Complete job name: Update README Badges
+2025-06-19T12:06:57.1558255Z ##[group]Run actions/checkout@v4
+2025-06-19T12:06:57.1559135Z with:
+2025-06-19T12:06:57.1559522Z   ref: main
+2025-06-19T12:06:57.1559925Z   fetch-depth: 0
+2025-06-19T12:06:57.1560408Z   repository: Automations-Project/n8n-data-manager
+2025-06-19T12:06:57.1561143Z   token: ***
+2025-06-19T12:06:57.1561754Z   ssh-strict: true
+2025-06-19T12:06:57.1562164Z   ssh-user: git
+2025-06-19T12:06:57.1562577Z   persist-credentials: true
+2025-06-19T12:06:57.1563020Z   clean: true
+2025-06-19T12:06:57.1563409Z   sparse-checkout-cone-mode: true
+2025-06-19T12:06:57.1563884Z   fetch-tags: false
+2025-06-19T12:06:57.1564279Z   show-progress: true
+2025-06-19T12:06:57.1564686Z   lfs: false
+2025-06-19T12:06:57.1565049Z   submodules: false
+2025-06-19T12:06:57.1565607Z   set-safe-directory: true
+2025-06-19T12:06:57.1566353Z ##[endgroup]
+2025-06-19T12:06:57.2623976Z Syncing repository: Automations-Project/n8n-data-manager
+2025-06-19T12:06:57.2626520Z ##[group]Getting Git version info
+2025-06-19T12:06:57.2627410Z Working directory is '/home/runner/work/n8n-data-manager/n8n-data-manager'
+2025-06-19T12:06:57.2628464Z [command]/usr/bin/git version
+2025-06-19T12:06:57.2677243Z git version 2.49.0
+2025-06-19T12:06:57.2703239Z ##[endgroup]
+2025-06-19T12:06:57.2718096Z Temporarily overriding HOME='/home/runner/work/_temp/4586a994-7789-47bb-968a-8f84de77d394' before making global git config changes
+2025-06-19T12:06:57.2719487Z Adding repository directory to the temporary git global config as a safe directory
+2025-06-19T12:06:57.2731287Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/n8n-data-manager/n8n-data-manager
+2025-06-19T12:06:57.2767081Z Deleting the contents of '/home/runner/work/n8n-data-manager/n8n-data-manager'
+2025-06-19T12:06:57.2771552Z ##[group]Initializing the repository
+2025-06-19T12:06:57.2776581Z [command]/usr/bin/git init /home/runner/work/n8n-data-manager/n8n-data-manager
+2025-06-19T12:06:57.2866035Z hint: Using 'master' as the name for the initial branch. This default branch name
+2025-06-19T12:06:57.2867611Z hint: is subject to change. To configure the initial branch name to use in all
+2025-06-19T12:06:57.2868819Z hint: of your new repositories, which will suppress this warning, call:
+2025-06-19T12:06:57.2870293Z hint:
+2025-06-19T12:06:57.2870835Z hint: 	git config --global init.defaultBranch <name>
+2025-06-19T12:06:57.2871693Z hint:
+2025-06-19T12:06:57.2872667Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+2025-06-19T12:06:57.2874307Z hint: 'development'. The just-created branch can be renamed via this command:
+2025-06-19T12:06:57.2875784Z hint:
+2025-06-19T12:06:57.2876497Z hint: 	git branch -m <name>
+2025-06-19T12:06:57.2877948Z Initialized empty Git repository in /home/runner/work/n8n-data-manager/n8n-data-manager/.git/
+2025-06-19T12:06:57.2884436Z [command]/usr/bin/git remote add origin https://github.com/Automations-Project/n8n-data-manager
+2025-06-19T12:06:57.2919235Z ##[endgroup]
+2025-06-19T12:06:57.2919975Z ##[group]Disabling automatic garbage collection
+2025-06-19T12:06:57.2923421Z [command]/usr/bin/git config --local gc.auto 0
+2025-06-19T12:06:57.2952884Z ##[endgroup]
+2025-06-19T12:06:57.2954138Z ##[group]Setting up auth
+2025-06-19T12:06:57.2960817Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2025-06-19T12:06:57.2991499Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2025-06-19T12:06:57.3260153Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2025-06-19T12:06:57.3288868Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2025-06-19T12:06:57.3506135Z [command]/usr/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+2025-06-19T12:06:57.3541845Z ##[endgroup]
+2025-06-19T12:06:57.3542822Z ##[group]Fetching the repository
+2025-06-19T12:06:57.3559928Z [command]/usr/bin/git -c protocol.version=2 fetch --prune --no-recurse-submodules origin +refs/heads/*:refs/remotes/origin/* +refs/tags/*:refs/tags/*
+2025-06-19T12:06:57.8773988Z From https://github.com/Automations-Project/n8n-data-manager
+2025-06-19T12:06:57.8774915Z  * [new branch]      main       -> origin/main
+2025-06-19T12:06:57.8803047Z ##[endgroup]
+2025-06-19T12:06:57.8804574Z ##[group]Determining the checkout info
+2025-06-19T12:06:57.8810461Z [command]/usr/bin/git branch --list --remote origin/main
+2025-06-19T12:06:57.8833414Z   origin/main
+2025-06-19T12:06:57.8840174Z ##[endgroup]
+2025-06-19T12:06:57.8843680Z [command]/usr/bin/git sparse-checkout disable
+2025-06-19T12:06:57.8897005Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+2025-06-19T12:06:57.8922792Z ##[group]Checking out the ref
+2025-06-19T12:06:57.8926773Z [command]/usr/bin/git checkout --progress --force -B main refs/remotes/origin/main
+2025-06-19T12:06:57.8995482Z Switched to a new branch 'main'
+2025-06-19T12:06:57.8998047Z branch 'main' set up to track 'origin/main'.
+2025-06-19T12:06:57.9004662Z ##[endgroup]
+2025-06-19T12:06:57.9039111Z [command]/usr/bin/git log -1 --format=%H
+2025-06-19T12:06:57.9061562Z 07ca408c7c6187855862bfd2618e3478f9051b2a
+2025-06-19T12:06:57.9242432Z ##[group]Run git config user.name "GitHub Actions Bot"
+2025-06-19T12:06:57.9243237Z [36;1mgit config user.name "GitHub Actions Bot"[0m
+2025-06-19T12:06:57.9243894Z [36;1mgit config user.email "actions@github.com"[0m
+2025-06-19T12:06:57.9311080Z shell: /usr/bin/bash -e {0}
+2025-06-19T12:06:57.9311610Z ##[endgroup]
+2025-06-19T12:06:57.9478420Z ##[group]Run chmod +x .github/scripts/update-readme-badges.sh
+2025-06-19T12:06:57.9479309Z [36;1mchmod +x .github/scripts/update-readme-badges.sh[0m
+2025-06-19T12:06:57.9480004Z [36;1m./.github/scripts/update-readme-badges.sh[0m
+2025-06-19T12:06:57.9529040Z shell: /usr/bin/bash -e {0}
+2025-06-19T12:06:57.9529553Z ##[endgroup]
+2025-06-19T12:06:57.9617794Z + IFS='
+2025-06-19T12:06:57.9618775Z 	'
+2025-06-19T12:06:57.9619483Z + README_FILE=readme.md
+2025-06-19T12:06:57.9620282Z + SCRIPT_FILE=n8n-manager.sh
+2025-06-19T12:06:57.9621195Z ++ grep -E '^SCRIPT_VERSION=' n8n-manager.sh
+2025-06-19T12:06:57.9634735Z ++ true
+2025-06-19T12:06:57.9636832Z + script_version_line=
+2025-06-19T12:06:57.9637605Z + '[' -n '' ']'
+2025-06-19T12:06:57.9640026Z ++ grep -E '^VERSION=' n8n-manager.sh
+2025-06-19T12:06:57.9654972Z + version_line='VERSION="3.0.15"'
+2025-06-19T12:06:57.9656150Z + '[' -n 'VERSION="3.0.15"' ']'
+2025-06-19T12:06:57.9660183Z ++ echo 'VERSION="3.0.15"'
+2025-06-19T12:06:57.9661970Z ++ cut '-d"' -f2
+2025-06-19T12:06:57.9672745Z + SCRIPT_VERSION=3.0.15
+2025-06-19T12:06:57.9673544Z + '[' -z 3.0.15 ']'
+2025-06-19T12:06:57.9678313Z +++ git config --get remote.origin.url
+2025-06-19T12:06:57.9692409Z ++ basename -s .git https://github.com/Automations-Project/n8n-data-manager
+2025-06-19T12:06:57.9701614Z + REPO_NAME=n8n-data-manager
+2025-06-19T12:06:57.9706327Z ++ git config --get remote.origin.url
+2025-06-19T12:06:57.9707751Z ++ sed -n 's|.*github.com/\([^/]*\)/.*|\1|p'
+2025-06-19T12:06:57.9725869Z + OWNER_NAME=Automations-Project
+2025-06-19T12:06:57.9728144Z ++ date -u +%Y-%m-%d
+2025-06-19T12:06:57.9738171Z + LAST_COMMIT_DATE_FORMATTED=2025-06-19
+2025-06-19T12:06:57.9739149Z + LICENSE_TYPE=MIT
+2025-06-19T12:06:57.9741107Z + VERSION_BADGE_URL='[![Version](https://img.shields.io/badge/version-3.0.15-blue.svg)](https://github.com/Automations-Project/n8n-data-manager/releases/tag/v3.0.15)'
+2025-06-19T12:06:57.9742685Z + LICENSE_BADGE_URL='[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)'
+2025-06-19T12:06:57.9744339Z + LAST_COMMIT_BADGE_URL='[![Last Commit](https://img.shields.io/badge/last%20commit-2025-06-19-orange.svg)](https://github.com/Automations-Project/n8n-data-manager/commits/main)'
+2025-06-19T12:06:57.9746673Z + update_badge BADGE_VERSION '[![Version](https://img.shields.io/badge/version-3.0.15-blue.svg)](https://github.com/Automations-Project/n8n-data-manager/releases/tag/v3.0.15)'
+2025-06-19T12:06:57.9747996Z + local placeholder=BADGE_VERSION
+2025-06-19T12:06:57.9749164Z + local 'url=[![Version](https://img.shields.io/badge/version-3.0.15-blue.svg)](https://github.com/Automations-Project/n8n-data-manager/releases/tag/v3.0.15)'
+2025-06-19T12:06:57.9750380Z + grep -q '<!-- BADGE_VERSION -->' readme.md
+2025-06-19T12:06:57.9754605Z + awk -v placeholder=BADGE_VERSION -v 'url=[![Version](https://img.shields.io/badge/version-3.0.15-blue.svg)](https://github.com/Automations-Project/n8n-data-manager/releases/tag/v3.0.15)' '
+2025-06-19T12:06:57.9756606Z         BEGIN {p_start = "<!-- " placeholder " -->"; p_end = "<!-- " placeholder "_END -->"}
+2025-06-19T12:06:57.9757418Z         $0 ~ p_start {print; print url; in_block=1; next}
+2025-06-19T12:06:57.9758026Z         $0 ~ p_end {print; in_block=0; next}
+2025-06-19T12:06:57.9758557Z         !in_block {print}
+2025-06-19T12:06:57.9759043Z         ' readme.md
+2025-06-19T12:06:57.9777027Z + mv tmp_readme.md readme.md
+2025-06-19T12:06:57.9791164Z + echo 'Updated badge: BADGE_VERSION'
+2025-06-19T12:06:57.9792026Z Updated badge: BADGE_VERSION
+2025-06-19T12:06:57.9793400Z + update_badge BADGE_LICENSE '[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)'
+2025-06-19T12:06:57.9794624Z + local placeholder=BADGE_LICENSE
+2025-06-19T12:06:57.9795873Z + local 'url=[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)'
+2025-06-19T12:06:57.9796692Z + grep -q '<!-- BADGE_LICENSE -->' readme.md
+2025-06-19T12:06:57.9806555Z + awk -v placeholder=BADGE_LICENSE -v 'url=[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)' '
+2025-06-19T12:06:57.9808513Z         BEGIN {p_start = "<!-- " placeholder " -->"; p_end = "<!-- " placeholder "_END -->"}
+2025-06-19T12:06:57.9809346Z         $0 ~ p_start {print; print url; in_block=1; next}
+2025-06-19T12:06:57.9809953Z         $0 ~ p_end {print; in_block=0; next}
+2025-06-19T12:06:57.9810481Z         !in_block {print}
+2025-06-19T12:06:57.9811113Z         ' readme.md
+2025-06-19T12:06:57.9827917Z + mv tmp_readme.md readme.md
+2025-06-19T12:06:57.9842154Z + echo 'Updated badge: BADGE_LICENSE'
+2025-06-19T12:06:57.9843177Z Updated badge: BADGE_LICENSE
+2025-06-19T12:06:57.9845507Z + update_badge BADGE_LAST_COMMIT '[![Last Commit](https://img.shields.io/badge/last%20commit-2025-06-19-orange.svg)](https://github.com/Automations-Project/n8n-data-manager/commits/main)'
+2025-06-19T12:06:57.9846965Z + local placeholder=BADGE_LAST_COMMIT
+2025-06-19T12:06:57.9848224Z + local 'url=[![Last Commit](https://img.shields.io/badge/last%20commit-2025-06-19-orange.svg)](https://github.com/Automations-Project/n8n-data-manager/commits/main)'
+2025-06-19T12:06:57.9849494Z + grep -q '<!-- BADGE_LAST_COMMIT -->' readme.md
+2025-06-19T12:06:57.9857202Z + awk -v placeholder=BADGE_LAST_COMMIT -v 'url=[![Last Commit](https://img.shields.io/badge/last%20commit-2025-06-19-orange.svg)](https://github.com/Automations-Project/n8n-data-manager/commits/main)' '
+2025-06-19T12:06:57.9858958Z         BEGIN {p_start = "<!-- " placeholder " -->"; p_end = "<!-- " placeholder "_END -->"}
+2025-06-19T12:06:57.9859780Z         $0 ~ p_start {print; print url; in_block=1; next}
+2025-06-19T12:06:57.9860386Z         $0 ~ p_end {print; in_block=0; next}
+2025-06-19T12:06:57.9860940Z         !in_block {print}
+2025-06-19T12:06:57.9861390Z         ' readme.md
+2025-06-19T12:06:57.9877270Z + mv tmp_readme.md readme.md
+2025-06-19T12:06:57.9890915Z + echo 'Updated badge: BADGE_LAST_COMMIT'
+2025-06-19T12:06:57.9891940Z Updated badge: BADGE_LAST_COMMIT
+2025-06-19T12:06:57.9892839Z + echo 'README badges update process completed.'
+2025-06-19T12:06:57.9893416Z + exit 0
+2025-06-19T12:06:57.9893832Z README badges update process completed.
+2025-06-19T12:06:57.9931194Z ##[group]Run ls -la
+2025-06-19T12:06:57.9931696Z [36;1mls -la[0m
+2025-06-19T12:06:57.9982401Z shell: /usr/bin/bash -e {0}
+2025-06-19T12:06:57.9982899Z ##[endgroup]
+2025-06-19T12:06:58.0067309Z total 108
+2025-06-19T12:06:58.0068138Z drwxr-xr-x 5 runner docker  4096 Jun 19 12:06 .
+2025-06-19T12:06:58.0068841Z drwxr-xr-x 3 runner docker  4096 Jun 19 12:06 ..
+2025-06-19T12:06:58.0069458Z drwxr-xr-x 7 runner docker  4096 Jun 19 12:06 .git
+2025-06-19T12:06:58.0071008Z drwxr-xr-x 5 runner docker  4096 Jun 19 12:06 .github
+2025-06-19T12:06:58.0072515Z -rw-r--r-- 1 runner docker   112 Jun 19 12:06 .gitignore
+2025-06-19T12:06:58.0073323Z drwxr-xr-x 3 runner docker  4096 Jun 19 12:06 .windsurf
+2025-06-19T12:06:58.0074020Z -rw-r--r-- 1 runner docker  1782 Jun 19 12:06 CHANGELOG.md
+2025-06-19T12:06:58.0074702Z -rw-r--r-- 1 runner docker  3262 Jun 19 12:06 install.sh
+2025-06-19T12:06:58.0076084Z -rw-r--r-- 1 runner docker 61403 Jun 19 12:06 n8n-manager.sh
+2025-06-19T12:06:58.0077316Z -rw-r--r-- 1 runner docker 13950 Jun 19 12:06 readme.md
+2025-06-19T12:06:58.0138911Z ##[group]Run git add readme.md
+2025-06-19T12:06:58.0139521Z [36;1mgit add readme.md[0m
+2025-06-19T12:06:58.0140051Z [36;1m# Check if there are changes to commit[0m
+2025-06-19T12:06:58.0140869Z [36;1mif ! git diff --staged --quiet; then[0m
+2025-06-19T12:06:58.0141572Z [36;1m  git commit -m "docs(readme): update badges for v3.0.15"[0m
+2025-06-19T12:06:58.0142198Z [36;1m  git push[0m
+2025-06-19T12:06:58.0142608Z [36;1melse[0m
+2025-06-19T12:06:58.0143168Z [36;1m  echo "No changes to README.md badges to commit."[0m
+2025-06-19T12:06:58.0143959Z [36;1mfi[0m
+2025-06-19T12:06:58.0194067Z shell: /usr/bin/bash -e {0}
+2025-06-19T12:06:58.0194558Z ##[endgroup]
+2025-06-19T12:06:58.0389532Z [main dba46d7] docs(readme): update badges for v3.0.15
+2025-06-19T12:06:58.0390774Z  1 file changed, 4 insertions(+), 4 deletions(-)
+2025-06-19T12:06:58.5528959Z To https://github.com/Automations-Project/n8n-data-manager
+2025-06-19T12:06:58.5530318Z    07ca408..dba46d7  main -> main
+2025-06-19T12:06:58.5741957Z Post job cleanup.
+2025-06-19T12:06:58.6719243Z [command]/usr/bin/git version
+2025-06-19T12:06:58.6756800Z git version 2.49.0
+2025-06-19T12:06:58.6802217Z Temporarily overriding HOME='/home/runner/work/_temp/733315d0-aa4b-4efb-bf1c-0604bf644843' before making global git config changes
+2025-06-19T12:06:58.6806105Z Adding repository directory to the temporary git global config as a safe directory
+2025-06-19T12:06:58.6809465Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/n8n-data-manager/n8n-data-manager
+2025-06-19T12:06:58.6846495Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2025-06-19T12:06:58.6881358Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2025-06-19T12:06:58.7111861Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2025-06-19T12:06:58.7133589Z http.https://github.com/.extraheader
+2025-06-19T12:06:58.7147327Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+2025-06-19T12:06:58.7181353Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2025-06-19T12:06:58.7528141Z Cleaning up orphan processes

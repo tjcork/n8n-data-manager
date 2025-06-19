@@ -3,16 +3,49 @@
 <!-- Version badge will be auto-updated here -->
 <!-- BADGE_VERSION_END -->
 
+<!-- BADGE_BUILD_STATUS -->
+<!-- Build status badge will be auto-updated here (optional) -->
+<!-- BADGE_BUILD_STATUS_END -->
+
+<!-- BADGE_LATEST_RELEASE -->
+<!-- Latest release badge will be auto-updated here -->
+<!-- BADGE_LATEST_RELEASE_END -->
+
+<!-- BADGE_SHELLCHECK -->
+<!-- Shellcheck badge will be auto-updated here -->
+<!-- BADGE_SHELLCHECK_END -->
+
 <!-- BADGE_LICENSE -->
 <!-- License badge will be auto-updated here -->
 <!-- BADGE_LICENSE_END -->
+
+<!-- BADGE_STARS -->
+<!-- Stars badge will be auto-updated here -->
+<!-- BADGE_STARS_END -->
+
+<!-- BADGE_FORKS -->
+<!-- Forks badge will be auto-updated here -->
+<!-- BADGE_FORKS_END -->
+
+<!-- BADGE_CONTRIBUTORS -->
+<!-- Contributors badge will be auto-updated here -->
+<!-- BADGE_CONTRIBUTORS_END -->
+
+<!-- BADGE_OPEN_ISSUES -->
+<!-- Open issues badge will be auto-updated here -->
+<!-- BADGE_OPEN_ISSUES_END -->
 
 <!-- BADGE_LAST_COMMIT -->
 <!-- Last commit date badge will be auto-updated here -->
 <!-- BADGE_LAST_COMMIT_END -->
 
-<!-- BADGE_BUILD_STATUS -->
-<!-- Build status badge will be auto-updated here (optional) -->
+<!-- BADGE_CODE_SIZE -->
+<!-- Code size badge will be auto-updated here -->
+<!-- BADGE_CODE_SIZE_END -->
+
+<!-- BADGE_PROJECT_STATUS -->
+<!-- Project status badge will be auto-updated here -->
+<!-- BADGE_PROJECT_STATUS_END -->
 <!-- BADGE_BUILD_STATUS_END -->
 
 ![Banner](.github/images/Banner.png)
@@ -247,36 +280,6 @@ For optimal performance with both Alpine and Ubuntu/Debian containers:
 - Ensure the n8n CLI tool is available in the container
 - Check that Docker permissions are sufficient on the host machine
 - Consider using a named volume for n8n persistent data
-
-## 📋 Changelog
-
-### v3.0.5 (Latest)
-- Fixed backup operations to work reliably with Alpine containers
-- Eliminated unbound variable errors in backup process
-- Updated documentation and improved error messaging
-
-### v3.0.4
-- Comprehensive fixes for backup functions and Alpine compatibility
-- Converted all boolean variables to use explicit string comparisons
-
-### v3.0.3
-- Added Alpine container compatibility fixes for file cleanup
-- Improved handling of temp files in containers
-
-### v3.0.2
-- Fixed remaining "command not found" errors
-
-### v3.0.1
-- Fixed file validation in restore function
-- Improved restore process reliability
-
-### v3.0.0
-- Emergency fix for restore functionality
-- Complete rewrite of the restore file handling for better reliability
-
-*   **Dependency/Access Errors:** Fails early if dependencies are missing or GitHub access checks fail.
-*   **Docker/Git Errors:** Reports errors from Docker or Git commands.
-*   **Restore Rollback:** During a restore, if the import process fails, the script automatically attempts to restore the data it backed up just before the restore started. If the rollback also fails, the pre-restore backup files are kept locally for manual recovery.
 
 ## 📜 Logging
 
