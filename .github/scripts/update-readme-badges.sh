@@ -28,7 +28,12 @@ update_badge() {
 # Get script version
 SCRIPT_VERSION=$(grep -E '^SCRIPT_VERSION=' "$SCRIPT_FILE" | cut -d'"' -f2)
 if [ -z "$SCRIPT_VERSION" ]; then
-    echo "Error: Could not extract SCRIPT_VERSION from $SCRIPT_FILE" >&2
+    # Fallback to checking for VERSION if SCRIPT_VERSION is not found
+    SCRIPT_VERSION=$(grep -E '^VERSION=' "$SCRIPT_FILE" | cut -d'"' -f2)
+fi
+
+if [ -z "$SCRIPT_VERSION" ]; then
+    echo "Error: Could not extract SCRIPT_VERSION or VERSION from $SCRIPT_FILE" >&2
     exit 1
 fi
 
