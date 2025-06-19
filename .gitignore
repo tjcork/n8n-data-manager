@@ -1,5 +1,4 @@
-n8n-manager-sveltekit
 .windsurfrules
-logs
-ai.md
-front
+.windsurf/workflows
+*windsurf/*
+.windsurf/workflows/n8n-manager-shell-script-project-knowledge.md
