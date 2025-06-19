@@ -1,0 +1,15 @@
+##  (2025-06-19)
+
+### Features
+
+* add CI/CD workflows with shellcheck, integration tests, and release automation ([eb2d451](https://github.com/Automations-Project/n8n-data-manager/commit/eb2d451ecb9031bf3c0433125de9614eb989f19e))
+* add version bump script with major/minor/patch support ([a8b55a6](https://github.com/Automations-Project/n8n-data-manager/commit/a8b55a65e8de332743a57b5cb599a7584467c755))
+* improve backup/restore handling for empty n8n instances and duplicate items ([31e32e3](https://github.com/Automations-Project/n8n-data-manager/commit/31e32e34c758d185b64135cbbe867be074b17bbb))
+
+### Bug Fixes
+
+* improve backup handling for clean n8n installations with empty data files ([0b4a7d3](https://github.com/Automations-Project/n8n-data-manager/commit/0b4a7d35e6cdd3ca4da73a4c5524472f948803c1))
+
+### Reverts
+
+* Revert "Add non-interactive mode and bump version to 3.0.6" ([02f689c](https://github.com/Automations-Project/n8n-data-manager/commit/02f689ce9f6dc97eae0263b0ee74e6a3d8a932ea))
