@@ -8,7 +8,51 @@
 # Source common utilities
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
-# Test connection to n8n instance and validate API key
+# Authenticate with n8n and get session cookie for REST API endpoints
+authenticate_n8n_session() {
+    local base_url="$1"
+    local email="$2"
+    local password="$3"
+    local cookie_file="$4"
+    
+    # Clean up URL
+    base_url="${base_url%/}"
+    
+    log DEBUG "Authenticating with n8n session for REST API access"
+    
+    # First, get the login page to extract CSRF token if needed
+    local login_response
+    if ! login_response=$(curl -s -c "$cookie_file" "$base_url/signin" 2>/dev/null); then
+        log ERROR "Failed to access n8n login page"
+        return 1
+    fi
+    
+    # Attempt to login and get session cookie
+    local auth_response
+    local http_status
+    if ! auth_response=$(curl -s -w "\n%{http_code}" -b "$cookie_file" -c "$cookie_file" \
+        -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"email\":\"$email\",\"password\":\"$password\"}" \
+        "$base_url/rest/login" 2>/dev/null); then
+        log ERROR "Failed to authenticate with n8n"
+        return 1
+    fi
+    
+    http_status=$(echo "$auth_response" | tail -n1)
+    local response_body=$(echo "$auth_response" | head -n -1)
+    
+    if [[ "$http_status" == "200" ]]; then
+        log DEBUG "Successfully authenticated with n8n session"
+        return 0
+    else
+        log ERROR "n8n session authentication failed with HTTP $http_status"
+        log DEBUG "Response: $response_body"
+        return 1
+    fi
+}
+
+# Test n8n API connection using appropriate authentication method
 test_n8n_api_connection() {
     local base_url="$1"
     local api_key="$2"
@@ -45,87 +89,91 @@ test_n8n_api_connection() {
     return 0
 }
 
-# Comprehensive API validation - tests all required endpoints
+# Comprehensive API validation - tests all available authentication methods
 validate_n8n_api_access() {
     local base_url="$1"
     local api_key="$2"
+    local email="$3"      # Optional: for session auth fallback
+    local password="$4"   # Optional: for session auth fallback
     
     log INFO "🔍 Validating n8n API access and permissions..."
-    
-    # Test basic connection first
-    if ! test_n8n_api_connection "$base_url" "$api_key" "true"; then
-        return 1
-    fi
     
     # Clean up URL
     base_url="${base_url%/}"
     
-    # Test projects endpoint
-    log DEBUG "Testing projects API endpoint..."
-    local projects_response
-    local projects_status
-    if ! projects_response=$(curl -s -w "\n%{http_code}" -H "X-N8N-API-KEY: $api_key" "$base_url/rest/projects" 2>/dev/null); then
-        log WARN "Projects endpoint test failed - continuing with fallback"
-    else
-        projects_status=$(echo "$projects_response" | tail -n1)
-        if [[ "$projects_status" == "200" ]]; then
-            local project_count
-            project_count=$(echo "$projects_response" | head -n -1 | python3 -c "
+    # First try API key authentication with /api/v1/ endpoint
+    if [[ -n "$api_key" ]]; then
+        log DEBUG "Testing API key authentication on /api/v1/ endpoints..."
+        local api_response
+        local api_status
+        if api_response=$(curl -s -w "\n%{http_code}" -H "X-N8N-API-KEY: $api_key" "$base_url/api/v1/workflows?limit=1" 2>/dev/null); then
+            api_status=$(echo "$api_response" | tail -n1)
+            if [[ "$api_status" == "200" ]]; then
+                local workflow_count
+                workflow_count=$(echo "$api_response" | head -n -1 | python3 -c "
 import json
 import sys
 try:
     data = json.load(sys.stdin)
     if isinstance(data, dict) and 'data' in data:
         print(len(data['data']))
-    elif isinstance(data, list):
-        print(len(data))
     else:
         print('0')
 except:
     print('0')
 " 2>/dev/null)
-            log SUCCESS "✅ Projects endpoint: $project_count projects found"
+                log SUCCESS "✅ API key authentication successful!"
+                log INFO "Found $workflow_count workflows accessible via API key (/api/v1/)"
+                return 0
+            else
+                log WARN "⚠️ API key authentication failed (HTTP $api_status)"
+            fi
         else
-            log WARN "⚠️  Projects endpoint returned HTTP $projects_status - folder structure may be limited"
+            log WARN "⚠️ API key authentication request failed"
         fi
     fi
     
-    # Test workflows with folders endpoint
-    log DEBUG "Testing workflows with folders endpoint..."
-    local workflows_response
-    local workflows_status
-    if ! workflows_response=$(curl -s -w "\n%{http_code}" -H "X-N8N-API-KEY: $api_key" "$base_url/rest/workflows?includeFolders=true&limit=5" 2>/dev/null); then
-        log ERROR "Failed to test workflows endpoint"
-        return 1
+    # If API key failed, try session authentication for REST API endpoints
+    log DEBUG "Trying session authentication for /rest/ endpoints..."
+    
+    # If no email/password provided, prompt for them
+    if [[ -z "$email" || -z "$password" ]]; then
+        log INFO "API key authentication failed. Trying session-based authentication for REST API..."
+        if [[ -z "$email" ]]; then
+            printf "n8n email or LDAP login ID: "
+            read -r email
+        fi
+        if [[ -z "$password" ]]; then
+            printf "n8n password: "
+            read -r -s password
+            echo  # Add newline after hidden input
+        fi
     fi
     
-    workflows_status=$(echo "$workflows_response" | tail -n1)
-    if [[ "$workflows_status" == "200" ]]; then
-        local workflow_count
-        workflow_count=$(echo "$workflows_response" | head -n -1 | python3 -c "
-import json
-import sys
-try:
-    data = json.load(sys.stdin)
-    if isinstance(data, dict) and 'data' in data:
-        print(len(data['data']))
-    elif isinstance(data, list):
-        print(len(data))
-    else:
-        print('0')
-except:
-    print('0')
-" 2>/dev/null)
-        log SUCCESS "✅ Workflows endpoint: $workflow_count workflows accessible"
-    else
-        log ERROR "❌ Workflows endpoint failed with HTTP $workflows_status"
-        return 1
+    if [[ -n "$email" && -n "$password" ]]; then
+        if test_n8n_session_auth "$base_url" "$email" "$password" "true"; then
+            log SUCCESS "✅ Session authentication successful!"
+            log INFO "REST API endpoints are accessible via session authentication"
+            return 0
+        else
+            log ERROR "❌ Session authentication also failed"
+        fi
     fi
     
-    # Final validation summary
-    log SUCCESS "🎉 n8n API validation completed successfully!"
-    log INFO "Your API configuration is working correctly."
-    return 0
+    # If we get here, all authentication methods failed
+    log ERROR "❌ n8n API validation failed with all available methods!"
+    log ERROR "Please check:"
+    if [[ -n "$api_key" ]]; then
+        log ERROR "  1. API key is correct and active"
+        log ERROR "  2. Try /api/v1/ endpoints: curl -H \"X-N8N-API-KEY: $api_key\" \"$base_url/api/v1/workflows?limit=1\""
+    fi
+    if [[ -n "$email" && -n "$password" ]]; then
+        log ERROR "  3. Email/LDAP login ID and password are correct"
+        log ERROR "  4. n8n instance allows password authentication"
+    fi
+    log ERROR "  5. n8n instance is properly configured and accessible"
+    
+    return 1
 }
 
 # Fetch all projects from n8n instance
@@ -264,18 +312,46 @@ create_n8n_folder_structure() {
     
     # Fetch projects and workflows with folder information from API
     local projects_response
-    if ! projects_response=$(fetch_n8n_projects "$base_url" "$api_key"); then
-        log ERROR "Failed to fetch projects from n8n API"
-        return 1
-    fi
-    log DEBUG "Projects API response received: $(echo "$projects_response" | wc -c) characters"
+    local workflows_response
+    local using_session_auth=false
     
-    local workflows_response  
-    if ! workflows_response=$(fetch_workflows_with_folders "$base_url" "$api_key"); then
-        log ERROR "Failed to fetch workflows with folder information"
-        return 1
+    # First try API key authentication
+    if projects_response=$(fetch_n8n_projects "$base_url" "$api_key" 2>/dev/null) && \
+       workflows_response=$(fetch_workflows_with_folders "$base_url" "$api_key" 2>/dev/null); then
+        log DEBUG "Successfully fetched data using API key authentication"
+        log DEBUG "Projects API response received: $(echo "$projects_response" | wc -c) characters"
+        log DEBUG "Workflows API response received: $(echo "$workflows_response" | wc -c) characters"
+    else
+        log WARN "API key authentication failed for REST endpoints, trying session authentication..."
+        
+        # Try to get email/password for session auth
+        local email password
+        if [[ -n "$CONF_N8N_EMAIL" && -n "$CONF_N8N_PASSWORD" ]]; then
+            email="$CONF_N8N_EMAIL"
+            password="$CONF_N8N_PASSWORD"
+        else
+            log INFO "Session authentication requires email/password credentials"
+            printf "n8n email or LDAP login ID: "
+            read -r email
+            printf "n8n password: "
+            read -r -s password
+            echo  # Add newline after hidden input
+        fi
+        
+        # Authenticate and fetch data using session
+        if authenticate_n8n_session "$base_url" "$email" "$password" && \
+           projects_response=$(fetch_n8n_projects_session "$base_url" 2>/dev/null) && \
+           workflows_response=$(fetch_workflows_with_folders_session "$base_url" 2>/dev/null); then
+            log SUCCESS "Successfully fetched data using session authentication"
+            log DEBUG "Projects session response received: $(echo "$projects_response" | wc -c) characters"
+            log DEBUG "Workflows session response received: $(echo "$workflows_response" | wc -c) characters"
+            using_session_auth=true
+        else
+            log ERROR "Both API key and session authentication failed"
+            log ERROR "Cannot proceed with folder structure creation"
+            return 1
+        fi
     fi
-    log DEBUG "Workflows API response received: $(echo "$workflows_response" | wc -c) characters"
     
     # Show sample of workflow data for debugging
     local workflow_count
@@ -504,5 +580,171 @@ except Exception as e:
     log INFO "  • Updated workflows: $updated_count" 
     log INFO "  • Deleted workflows: $deleted_count"
     
+    # Cleanup session if we used it
+    if $using_session_auth; then
+        cleanup_n8n_session
+    fi
+    
     return 0
+}
+
+# ============================================================================
+# Session-based Authentication Functions for REST API (/rest/* endpoints)
+# ============================================================================
+
+# Global variable to store session cookie file path
+N8N_SESSION_COOKIE_FILE="/tmp/n8n-session-cookies-$$"
+
+# Authenticate with n8n and get session cookie for REST API endpoints
+authenticate_n8n_session() {
+    local base_url="$1"
+    local email="$2"
+    local password="$3"
+    
+    # Clean up URL
+    base_url="${base_url%/}"
+    
+    log DEBUG "Authenticating with n8n session for REST API access"
+    
+    # Attempt to login and get session cookie
+    local auth_response
+    local http_status
+    if ! auth_response=$(curl -s -w "\n%{http_code}" -c "$N8N_SESSION_COOKIE_FILE" \
+        -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"body\":{\"emailOrLdapLoginId\":\"$email\",\"password\":\"$password\"}}" \
+        "$base_url/rest/login" 2>/dev/null); then
+        log ERROR "Failed to authenticate with n8n session"
+        return 1
+    fi
+    
+    http_status=$(echo "$auth_response" | tail -n1)
+    local response_body=$(echo "$auth_response" | head -n -1)
+    
+    if [[ "$http_status" == "200" ]]; then
+        log DEBUG "Successfully authenticated with n8n session"
+        return 0
+    else
+        log ERROR "n8n session authentication failed with HTTP $http_status"
+        log DEBUG "Response: $response_body"
+        return 1
+    fi
+}
+
+# Fetch projects using session authentication (REST API)
+fetch_n8n_projects_session() {
+    local base_url="$1"
+    
+    log DEBUG "Fetching projects from n8n REST API using session..."
+    
+    # Clean up URL
+    base_url="${base_url%/}"
+    
+    local response
+    local http_status
+    if ! response=$(curl -s -w "\n%{http_code}" -b "$N8N_SESSION_COOKIE_FILE" "$base_url/rest/projects" 2>/dev/null); then
+        log ERROR "Failed to fetch projects from n8n REST API"
+        return 1
+    fi
+    
+    http_status=$(echo "$response" | tail -n1)
+    local response_body=$(echo "$response" | head -n -1)
+    
+    if [[ "$http_status" != "200" ]]; then
+        log ERROR "Failed to fetch projects via session (HTTP $http_status)"
+        return 1
+    fi
+    
+    echo "$response_body"
+    return 0
+}
+
+# Fetch workflows with folders using session authentication (REST API)
+fetch_workflows_with_folders_session() {
+    local base_url="$1"
+    
+    log DEBUG "Fetching workflows with folders from n8n REST API using session..."
+    
+    # Clean up URL
+    base_url="${base_url%/}"
+    
+    local response
+    local http_status
+    if ! response=$(curl -s -w "\n%{http_code}" -b "$N8N_SESSION_COOKIE_FILE" "$base_url/rest/workflows?includeFolders=true" 2>/dev/null); then
+        log ERROR "Failed to fetch workflows from n8n REST API"
+        return 1
+    fi
+    
+    http_status=$(echo "$response" | tail -n1)
+    local response_body=$(echo "$response" | head -n -1)
+    
+    if [[ "$http_status" != "200" ]]; then
+        log ERROR "Failed to fetch workflows with folders via session (HTTP $http_status)"
+        return 1
+    fi
+    
+    echo "$response_body"
+    return 0
+}
+
+# Test session-based authentication
+test_n8n_session_auth() {
+    local base_url="$1"
+    local email="$2"
+    local password="$3"
+    local verbose="${4:-false}"
+    
+    if $verbose; then
+        log INFO "Testing n8n session authentication to: $base_url"
+    fi
+    
+    # Authenticate first
+    if ! authenticate_n8n_session "$base_url" "$email" "$password"; then
+        return 1
+    fi
+    
+    # Test with a simple API call
+    local response
+    local http_status
+    if ! response=$(curl -s -w "\n%{http_code}" -b "$N8N_SESSION_COOKIE_FILE" "$base_url/rest/workflows?limit=1" 2>/dev/null); then
+        log ERROR "Failed to test session authentication"
+        rm -f "$N8N_SESSION_COOKIE_FILE"
+        return 1
+    fi
+    
+    http_status=$(echo "$response" | tail -n1)
+    local response_body=$(echo "$response" | head -n -1)
+    
+    if [[ "$http_status" == "200" ]]; then
+        if $verbose; then
+            log SUCCESS "n8n session authentication successful!"
+            local workflow_count
+            workflow_count=$(echo "$response_body" | python3 -c "
+import json
+import sys
+try:
+    data = json.load(sys.stdin)
+    if isinstance(data, dict) and 'data' in data:
+        print(len(data['data']))
+    else:
+        print('0')
+except:
+    print('0')
+" 2>/dev/null)
+            log INFO "Found $workflow_count workflows accessible via session"
+        fi
+        return 0
+    else
+        log ERROR "Session authentication test failed with HTTP $http_status"
+        rm -f "$N8N_SESSION_COOKIE_FILE"
+        return 1
+    fi
+}
+
+# Cleanup session cookie file
+cleanup_n8n_session() {
+    if [[ -f "$N8N_SESSION_COOKIE_FILE" ]]; then
+        rm -f "$N8N_SESSION_COOKIE_FILE"
+        log DEBUG "Cleaned up session cookie file"
+    fi
 }
