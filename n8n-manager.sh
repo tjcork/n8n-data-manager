@@ -1011,7 +1011,6 @@ backup() {
     
     # Handle credentials locally  
     if [[ "$credentials_storage" == "local" ]] && docker exec "$container_id" test -f "$container_credentials"; then
-    if [[ "$credentials_storage" == "local" ]] && docker exec "$container_id" test -f "$container_credentials"; then
         log INFO "Saving credentials to local secure storage..."
         if $is_dry_run; then
             log DRYRUN "Would copy credentials from container to local storage: $local_credentials_file"
@@ -2159,10 +2158,6 @@ main() {
                 log INFO "🔒 Local secure credentials found and will be used (recommended)"
                 log INFO "💡 Use --restore-type workflows to restore only workflows if desired"
             else
-                log INFO "🔍 Will search for credentials in Git repository (legacy backups)"
-                log INFO "💡 Consider creating a new backup to store credentials securely locally"
-            fi
-        fi
                 log INFO "🔍 Will search for credentials in Git repository (legacy backups)"
                 log INFO "💡 Consider creating a new backup to store credentials securely locally"
             fi
