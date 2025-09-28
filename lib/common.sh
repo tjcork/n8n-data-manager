@@ -178,11 +178,11 @@ load_config() {
         
         # Handle boolean configs properly - only set if config file has explicit value
         if [[ -z "$dated_backups" ]] && [[ -n "${DATED_BACKUPS:-}" ]]; then 
-            if [[ "${DATED_BACKUPS}" == "true" ]]; then 
-                dated_backups=true
-            elif [[ "${DATED_BACKUPS}" == "false" ]]; then 
-                dated_backups=false
-            fi
+            case "${DATED_BACKUPS,,}" in  # Convert to lowercase for comparison
+                true|1|yes|on) dated_backups=true ;;
+                false|0|no|off) dated_backups=false ;;
+                *) log WARN "Invalid DATED_BACKUPS value: ${DATED_BACKUPS}. Using false."; dated_backups=false ;;
+            esac
         fi
         
         # Storage settings
@@ -194,11 +194,11 @@ load_config() {
         # Folder structure settings
         # Handle boolean configs properly - only set if config file has explicit value
         if [[ -z "$folder_structure" ]] && [[ -n "${FOLDER_STRUCTURE:-}" ]]; then
-            if [[ "${FOLDER_STRUCTURE}" == "true" ]]; then
-                folder_structure=true
-            elif [[ "${FOLDER_STRUCTURE}" == "false" ]]; then
-                folder_structure=false
-            fi
+            case "${FOLDER_STRUCTURE,,}" in  # Convert to lowercase for comparison
+                true|1|yes|on) folder_structure=true ;;
+                false|0|no|off) folder_structure=false ;;
+                *) log WARN "Invalid FOLDER_STRUCTURE value: ${FOLDER_STRUCTURE}. Using false."; folder_structure=false ;;
+            esac
         fi
         
         # n8n API settings
@@ -212,20 +212,20 @@ load_config() {
         
         # Handle verbose boolean config
         if [[ -z "$verbose" ]] && [[ -n "${VERBOSE:-}" ]]; then
-            if [[ "${VERBOSE}" == "true" ]]; then
-                verbose=true
-            elif [[ "${VERBOSE}" == "false" ]]; then
-                verbose=false
-            fi
+            case "${VERBOSE,,}" in  # Convert to lowercase for comparison
+                true|1|yes|on) verbose=true ;;
+                false|0|no|off) verbose=false ;;
+                *) log WARN "Invalid VERBOSE value: ${VERBOSE}. Using false."; verbose=false ;;
+            esac
         fi
         
         # Handle dry_run boolean config
         if [[ -z "$dry_run" ]] && [[ -n "${DRY_RUN:-}" ]]; then
-            if [[ "${DRY_RUN}" == "true" ]]; then
-                dry_run=true
-            elif [[ "${DRY_RUN}" == "false" ]]; then
-                dry_run=false
-            fi
+            case "${DRY_RUN,,}" in  # Convert to lowercase for comparison
+                true|1|yes|on) dry_run=true ;;
+                false|0|no|off) dry_run=false ;;
+                *) log WARN "Invalid DRY_RUN value: ${DRY_RUN}. Using false."; dry_run=false ;;
+            esac
         fi
         
         log_file=${log_file:-${LOG_FILE:-}}
