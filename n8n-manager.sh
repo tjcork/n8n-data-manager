@@ -57,6 +57,8 @@ github_branch="main"
 dated_backups=""  # empty = unset, true/false = explicitly configured
 
 # Storage settings (handled by numeric config)
+workflows=""              # empty = unset, 0=disabled, 1=local, 2=remote
+credentials=""            # empty = unset, 0=disabled, 1=local, 2=remote
 local_backup_path="$HOME/n8n-backup"
 local_rotation_limit="10"
 
