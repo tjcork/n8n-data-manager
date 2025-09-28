@@ -45,6 +45,7 @@ SELECTED_RESTORE_TYPE="all"
 # Core operation settings
 action=""
 container=""
+default_container=""           # Default container from config
 dry_run=false
 verbose=false
 
