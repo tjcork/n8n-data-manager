@@ -49,6 +49,7 @@ default_container=""           # Default container from config
 # Control flags
 dry_run=""     # empty = unset, true/false = explicitly configured
 verbose=""     # empty = unset, true/false = explicitly configured
+needs_github="" # tracks if GitHub access is required
 
 # Git/GitHub settings  
 github_token=""
