@@ -2,11 +2,12 @@
 # =========================================================
 # n8n-manager.sh - Interactive backup/restore for n8n
 # =========================================================
-# Security-Enhanced Version:
-# - Credentials stored locally with proper permissions (chmod 600)
-# - Environment variables excluded from Git repositories  
-# - Credential archiving with rotation (5-10 backups)
-# - .gitignore created to prevent accidental commits
+# Flexible Backup System:
+# - Workflows: local files or Git repository (user choice)
+# - Credentials: local files or Git repository (user choice)
+# - Local storage with proper permissions (chmod 600)
+# - Archive rotation for local backups (5-10 backups)
+# - .gitignore management for Git repositories
 # =========================================================
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -364,8 +365,8 @@ select_container() {
 
 select_action() {
     log HEADER "Choose Action"
-    echo "1) Backup n8n to GitHub"
-    echo "2) Restore n8n from GitHub"
+    echo "1) Backup n8n - Local or to GitHub"
+    echo "2) Restore n8n - Local or from GitHub"
     echo "3) Quit"
 
     local choice
@@ -1993,9 +1994,7 @@ main() {
     load_config
 
     log HEADER "n8n Backup/Restore Manager v$VERSION"
-    log INFO "🔒 Security-Enhanced Version: Credentials stored locally, not in Git repositories"
-    log INFO "📁 Local storage: ~/n8n-backup/ (credentials and environment variables)"
-    log INFO "🗂️  Git repository: workflows only (sensitive data excluded)"
+    log INFO "� Flexible backup storage: local files or Git repository (user configurable)"
     if [ "$ARG_DRY_RUN" = "true" ]; then log WARN "DRY RUN MODE ENABLED"; fi
     if [ "$ARG_VERBOSE" = "true" ]; then log DEBUG "Verbose mode enabled."; fi
     
@@ -2052,11 +2051,23 @@ main() {
     # Check if running non-interactively
     if ! [ -t 0 ]; then
         log DEBUG "Running in non-interactive mode."
-        if { [ -z "$action" ] || [ -z "$container_id" ] || [ -z "$github_token" ] || [ -z "$github_repo" ]; }; then
+        
+        # Basic parameters are always required
+        if [ -z "$action" ] || [ -z "$container_id" ]; then
             log ERROR "Running in non-interactive mode but required parameters are missing."
-            log INFO "Please provide --action, --container, --token, and --repo via arguments or config file."
+            log INFO "Please provide --action and --container via arguments or config file."
             show_help
             exit 1
+        fi
+        
+        # GitHub parameters only required for remote operations or restore
+        if [[ "$action" == "restore" ]] || [[ "$workflows_storage" == "remote" ]] || [[ "$credentials_storage" == "remote" ]]; then
+            if [ -z "$github_token" ] || [ -z "$github_repo" ]; then
+                log ERROR "GitHub token and repository are required for remote operations or restore."
+                log INFO "Please provide --token and --repo via arguments or config file."
+                show_help
+                exit 1
+            fi
         fi
         log DEBUG "Validating non-interactive container: $container_id"
         local found_id
@@ -2095,14 +2106,6 @@ main() {
         fi
         log DEBUG "Container selected: $container_id"
         
-        get_github_config
-        github_token="$GITHUB_TOKEN"
-        github_repo="$GITHUB_REPO"
-        branch="$GITHUB_BRANCH"
-        log DEBUG "GitHub Token: ****"
-        log DEBUG "GitHub Repo: $github_repo"
-        log DEBUG "GitHub Branch: $branch"
-        
         if [[ "$action" == "backup" ]] && ! $use_dated_backup && ! grep -q "CONF_DATED_BACKUPS=true" "${ARG_CONFIG_FILE:-$CONFIG_FILE_PATH}" 2>/dev/null; then
              printf "Create a dated backup (in a timestamped subdirectory)? (yes/no) [no]: "
              local confirm_dated
@@ -2114,32 +2117,52 @@ main() {
         log DEBUG "Use Dated Backup: $use_dated_backup"
         
         if [[ "$action" == "backup" ]] && [[ -z "$workflows_storage" && -z "$credentials_storage" ]]; then
-            log INFO "No storage options specified. Choose backup strategy:"
-            echo "1) Both Local (Secure - recommended for personal use)"
-            echo "2) Both Remote (Git repository - good for team sharing)"
-            echo "3) Workflows Remote + Credentials Local (Hybrid - secure credentials, shared workflows)"
-            echo "4) Custom (specify each independently)"
+            log INFO "Configure backup storage locations:"
             
-            local backup_strategy
-            while true; do
-                printf "\nSelect backup strategy (1-4): "
-                read -r backup_strategy
-                case "$backup_strategy" in
-                    1) workflows_storage="local"; credentials_storage="local"; break ;;
-                    2) workflows_storage="remote"; credentials_storage="remote"; 
-                       log WARN "⚠️  You chose to store credentials in Git (less secure)"; break ;;
-                    3) workflows_storage="remote"; credentials_storage="local"; break ;;
-                    4) 
-                        printf "Workflows storage (local/remote) [local]: "
-                        read -r workflows_storage
-                        workflows_storage=${workflows_storage:-local}
-                        printf "Credentials storage (local/remote) [local]: "
-                        read -r credentials_storage
-                        credentials_storage=${credentials_storage:-local}
-                        break ;;
-                    *) log ERROR "Invalid option. Please select 1-4." ;;
-                esac
-            done
+            # Ask about workflows storage
+            echo "Workflows storage:"
+            echo "1) Local (secure, private)"
+            echo "2) Remote (Git repository, shareable)"
+            printf "Where to store workflows? (1-2) [1]: "
+            read -r workflow_choice
+            workflow_choice=${workflow_choice:-1}
+            case "$workflow_choice" in
+                1) workflows_storage="local" ;;
+                2) workflows_storage="remote" ;;
+                *) workflows_storage="local"; log WARN "Invalid choice, defaulting to local" ;;
+            esac
+            
+            # Ask about credentials storage  
+            echo "Credentials storage:"
+            echo "1) Local (secure, recommended)"
+            echo "2) Remote (Git repository, less secure)"
+            printf "Where to store credentials? (1-2) [1]: "
+            read -r credential_choice
+            credential_choice=${credential_choice:-1}
+            case "$credential_choice" in
+                1) credentials_storage="local" ;;
+                2) credentials_storage="remote"
+                   log WARN "⚠️  You chose to store credentials in Git (less secure)" ;;
+                *) credentials_storage="local"; log WARN "Invalid choice, defaulting to local" ;;
+            esac
+            
+            log INFO "Selected: Workflows -> $workflows_storage, Credentials -> $credentials_storage"
+        fi
+        
+        # Get GitHub config only if needed (when using remote storage or for restore)
+        if [[ "$action" == "restore" ]] || [[ "$workflows_storage" == "remote" ]] || [[ "$credentials_storage" == "remote" ]]; then
+            get_github_config
+            github_token="$GITHUB_TOKEN"
+            github_repo="$GITHUB_REPO"
+            branch="$GITHUB_BRANCH"
+            log DEBUG "GitHub Token: ****"
+            log DEBUG "GitHub Repo: $github_repo"
+            log DEBUG "GitHub Branch: $branch"
+        else
+            log INFO "🏠 Local-only backup - no GitHub configuration needed"
+            github_token=""
+            github_repo=""
+            branch="main"  # Default branch for local-only operations
         fi
         
         if [[ "$action" == "restore" ]] && [[ "$restore_type" == "all" ]] && ! grep -q "CONF_RESTORE_TYPE=" "${ARG_CONFIG_FILE:-$CONFIG_FILE_PATH}" 2>/dev/null; then
@@ -2165,15 +2188,29 @@ main() {
     fi
 
     # Final validation
-    if [ -z "$action" ] || [ -z "$container_id" ] || [ -z "$github_token" ] || [ -z "$github_repo" ] || [ -z "$branch" ]; then
-        log ERROR "Missing required parameters (Action, Container, Token, Repo, Branch). Exiting."
+    if [ -z "$action" ] || [ -z "$container_id" ]; then
+        log ERROR "Missing required parameters (Action, Container). Exiting."
         exit 1
     fi
+    
+    # For remote operations, GitHub parameters are required
+    local needs_github=false
+    if [[ "$action" == "restore" ]] || [[ "$workflows_storage" == "remote" ]] || [[ "$credentials_storage" == "remote" ]]; then
+        needs_github=true
+        if [ -z "$github_token" ] || [ -z "$github_repo" ] || [ -z "$branch" ]; then
+            log ERROR "Missing required GitHub parameters (Token, Repo, Branch) for remote operations. Exiting."
+            exit 1
+        fi
+    fi
 
-    # Perform GitHub API pre-checks (skip in dry run? No, checks are read-only)
-    if ! check_github_access "$github_token" "$github_repo" "$branch" "$action"; then
-        log ERROR "GitHub access pre-checks failed. Aborting."
-        exit 1
+    # Perform GitHub API pre-checks only when needed
+    if $needs_github; then
+        if ! check_github_access "$github_token" "$github_repo" "$branch" "$action"; then
+            log ERROR "GitHub access pre-checks failed. Aborting."
+            exit 1
+        fi
+    else
+        log INFO "✅ Local-only operation - skipping GitHub validation"
     fi
 
     # Execute action
