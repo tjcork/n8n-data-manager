@@ -164,8 +164,9 @@ main() {
     log DEBUG "Branch: $github_branch, Workflows: ($workflows) $(format_storage_value $workflows), Credentials: ($credentials) $(format_storage_value $credentials)"
     log DEBUG "Local Path: $local_backup_path, Rotation: $local_rotation_limit"
     
-    # Set intelligent defaults for backup
+    # Set intelligent defaults for backup (only if not already configured)
     if [[ "$action" == "backup" ]]; then
+        # Check if both are disabled after config loading
         if [[ "$workflows" == "0" && "$credentials" == "0" ]]; then
             log ERROR "Both workflows and credentials are disabled. Nothing to backup!"
             log INFO "Please specify backup options:"
@@ -176,16 +177,15 @@ main() {
             log INFO "  --workflows 1                     (workflows local only, skip credentials)"
             log INFO "  --credentials 1                   (credentials local only, skip workflows)"
             exit 1
-        elif [[ -z "$workflows" && -z "$credentials" ]]; then
+        fi
+        
+        # Only apply defaults if no config was provided and no command line args
+        # (This should rarely happen since config loading sets defaults)
+        if [[ -z "${WORKFLOWS:-}" && -z "${workflows:-}" && -z "${CREDENTIALS:-}" && -z "${credentials:-}" ]]; then
+            log DEBUG "No storage configuration found anywhere - applying fallback defaults"
             workflows=1  # Default to local
             credentials=1  # Default to local
             log INFO "No storage options specified - defaulting to local storage for both workflows and credentials"
-        elif [[ -z "$workflows" ]]; then
-            workflows=2  # Default to remote if only credentials specified
-            log INFO "Workflows storage not specified - defaulting to remote (Git repository)"
-        elif [[ -z "$credentials" ]]; then
-            credentials=1  # Default to local (secure)
-            log INFO "Credentials storage not specified - defaulting to local (secure)"
         fi
     fi
 

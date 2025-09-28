@@ -192,7 +192,7 @@ load_config() {
             case "${DATED_BACKUPS,,}" in  # Convert to lowercase for comparison
                 true|1|yes|on) dated_backups=true ;;
                 false|0|no|off) dated_backups=false ;;
-                *) log WARN "Invalid DATED_BACKUPS value: ${DATED_BACKUPS}. Using default: false"
+                *) log WARN "Invalid DATED_BACKUPS value: '${DATED_BACKUPS}' in config. Using default: false"
                    dated_backups=false ;;
             esac
         fi
@@ -206,7 +206,7 @@ load_config() {
             0|disabled) workflows=0 ;;
             1|local) workflows=1 ;;
             2|remote) workflows=2 ;;
-            *) log WARN "Invalid workflows value: $workflows_raw. Using default (1) local"
+            *) log WARN "Invalid WORKFLOWS value: '$workflows_raw' in config. Using default: (1) local"
                workflows=1 ;;
         esac
         
@@ -216,7 +216,7 @@ load_config() {
             0|disabled) credentials=0 ;;
             1|local) credentials=1 ;;
             2|remote) credentials=2 ;;
-            *) log WARN "Invalid credentials value: $credentials_raw. Using default (1) local"
+            *) log WARN "Invalid CREDENTIALS value: '$credentials_raw' in config. Using default: (1) local"
                credentials=1 ;;
         esac
         
@@ -230,7 +230,7 @@ load_config() {
             case "${FOLDER_STRUCTURE,,}" in  # Convert to lowercase for comparison
                 true|1|yes|on) folder_structure=true ;;
                 false|0|no|off) folder_structure=false ;;
-                *) log WARN "Invalid FOLDER_STRUCTURE value: ${FOLDER_STRUCTURE}. Using default: false"
+                *) log WARN "Invalid FOLDER_STRUCTURE value: '${FOLDER_STRUCTURE}'. Using default: false"
                    folder_structure=false ;;
             esac
         fi
@@ -249,7 +249,7 @@ load_config() {
             case "${VERBOSE,,}" in  # Convert to lowercase for comparison
                 true|1|yes|on) verbose=true ;;
                 false|0|no|off) verbose=false ;;
-                *) log WARN "Invalid VERBOSE value: ${VERBOSE}. Using default: false"
+                *) log WARN "Invalid VERBOSE value: '${VERBOSE}'. Using default: false"
                    verbose=false ;;
             esac
         fi
@@ -259,7 +259,7 @@ load_config() {
             case "${DRY_RUN,,}" in  # Convert to lowercase for comparison
                 true|1|yes|on) dry_run=true ;;
                 false|0|no|off) dry_run=false ;;
-                *) log WARN "Invalid DRY_RUN value: ${DRY_RUN}. Using default: false"
+                *) log WARN "Invalid DRY_RUN value: '${DRY_RUN}'. Using default: false"
                    dry_run=false ;;
             esac
         fi
