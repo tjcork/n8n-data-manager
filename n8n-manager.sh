@@ -36,10 +36,12 @@ ARG_DATED_BACKUPS=false
 ARG_WORKFLOWS_STORAGE=""  # Where to store workflows: "local", "remote", or "" (not specified)
 ARG_CREDENTIALS_STORAGE=""  # Where to store credentials: "local", "remote", or "" (not specified)
 ARG_LOCAL_BACKUP_PATH=""  # Custom local backup path (defaults to ~/n8n-backup)
+ARG_LOCAL_ROTATION_LIMIT=""  # Local backup rotation limit (0=overwrite, number=keep N most recent, empty=unlimited)
 ARG_RESTORE_TYPE="all"  # Keep for backwards compatibility
 ARG_DRY_RUN=false
 ARG_VERBOSE=false
 ARG_LOG_FILE=""
+CONF_LOCAL_ROTATION_LIMIT=""  # Default rotation limit for local backups
 CONF_DATED_BACKUPS=false
 CONF_VERBOSE=false
 CONF_LOG_FILE=""
@@ -215,6 +217,11 @@ load_config() {
             ARG_LOCAL_BACKUP_PATH=${CONF_LOCAL_BACKUP_PATH:-}
         fi
         
+        # Load rotation limit from config if not specified
+        if [[ -z "$ARG_LOCAL_ROTATION_LIMIT" ]]; then
+            ARG_LOCAL_ROTATION_LIMIT=${CONF_LOCAL_ROTATION_LIMIT:-}
+        fi
+        
         ARG_RESTORE_TYPE=${ARG_RESTORE_TYPE:-${CONF_RESTORE_TYPE:-all}}
         
         if ! $ARG_VERBOSE; then
@@ -258,6 +265,7 @@ Options:
   --workflows [mode]    Include workflows in backup. Mode: 'local' (default) or 'remote' (Git repo).
   --credentials [mode]  Include credentials in backup. Mode: 'local' (default) or 'remote' (Git repo).
   --path <path>         Local backup directory path (defaults to '~/n8n-backup').
+  --rotation <limit>    Local backup rotation: '0' (overwrite), number (keep N most recent), 'unlimited' (keep all).
   --restore-type <type> Type of restore: 'all' (default), 'workflows', or 'credentials' (legacy).
                         Overrides CONF_RESTORE_TYPE in config file.
   --dry-run             Simulate the action without making any changes.
@@ -276,6 +284,7 @@ Configuration File (${CONFIG_FILE_PATH}):
     CONF_WORKFLOWS_STORAGE="local" # Optional: "local" or "remote" (Git repo)
     CONF_CREDENTIALS_STORAGE="local" # Optional: "local" (default, secure) or "remote" (Git repo)
     CONF_LOCAL_BACKUP_PATH="/custom/backup/path" # Optional, defaults to ~/n8n-backup
+    CONF_LOCAL_ROTATION_LIMIT="10" # Optional: 0 (overwrite), number (keep N), "unlimited" (keep all)
     CONF_RESTORE_TYPE="all" # Optional, defaults to 'all' (legacy compatibility)
     CONF_VERBOSE=false      # Optional, defaults to false
     CONF_LOG_FILE="/var/log/n8n-manager.log" # Optional
@@ -535,11 +544,18 @@ archive_credentials() {
     local source_file="$1"
     local backup_dir="$2"
     local is_dry_run="$3"
-    local max_archives=${4:-10}
+    local rotation_limit=${4:-10}  # 0=overwrite, number=keep N, unlimited=keep all
 
     if [ ! -f "$source_file" ]; then
         log WARN "Source credentials file not found: $source_file"
         return 1
+    fi
+
+    # Handle different rotation modes
+    if [[ "$rotation_limit" == "0" ]]; then
+        # Mode 0: Just overwrite, no archiving
+        log DEBUG "Rotation disabled - credentials will be overwritten"
+        return 0
     fi
 
     local archive_dir="$backup_dir/archive"
@@ -549,7 +565,11 @@ archive_credentials() {
     if $is_dry_run; then
         log DRYRUN "Would create archive directory: $archive_dir"
         log DRYRUN "Would archive credentials to: $archive_file"
-        log DRYRUN "Would rotate archives to keep max $max_archives files"
+        if [[ "$rotation_limit" == "unlimited" ]]; then
+            log DRYRUN "Would keep unlimited credential archives"
+        else
+            log DRYRUN "Would rotate archives to keep max $rotation_limit files"
+        fi
         return 0
     fi
 
@@ -568,34 +588,46 @@ archive_credentials() {
     chmod 600 "$archive_file" || log WARN "Could not set permissions on archived credentials"
     log SUCCESS "Credentials archived to: $archive_file"
 
-    # Rotate archives - keep only the most recent max_archives
-    local archive_count
-    archive_count=$(find "$archive_dir" -name "credentials_*.json" | wc -l)
-    if [ "$archive_count" -gt "$max_archives" ]; then
-        local files_to_remove=$((archive_count - max_archives))
-        log INFO "Rotating credential archives - removing $files_to_remove old files"
-        
-        # Remove oldest files (sort by name, which includes timestamp)
-        find "$archive_dir" -name "credentials_*.json" | sort | head -n "$files_to_remove" | while read -r old_file; do
-            rm -f "$old_file"
-            log DEBUG "Removed old archive: $(basename "$old_file")"
-        done
+    # Handle rotation based on limit
+    if [[ "$rotation_limit" == "unlimited" ]]; then
+        log DEBUG "Unlimited rotation - keeping all credential archives"
+    elif [[ "$rotation_limit" =~ ^[0-9]+$ ]] && [ "$rotation_limit" -gt 0 ]; then
+        # Rotate archives - keep only the most recent N
+        local archive_count
+        archive_count=$(find "$archive_dir" -name "credentials_*.json" | wc -l)
+        if [ "$archive_count" -gt "$rotation_limit" ]; then
+            local files_to_remove=$((archive_count - rotation_limit))
+            log INFO "Rotating credential archives - removing $files_to_remove old files (keeping $rotation_limit most recent)"
+            
+            # Remove oldest files (sort by name, which includes timestamp)
+            find "$archive_dir" -name "credentials_*.json" | sort | head -n "$files_to_remove" | while read -r old_file; do
+                rm -f "$old_file"
+                log DEBUG "Removed old archive: $(basename "$old_file")"
+            done
+        fi
+        log INFO "Credential archive rotation complete (keeping $rotation_limit most recent)"
     fi
 
-    log INFO "Credential archive rotation complete (keeping $max_archives most recent)"
     return 0
 }
 
-# Archive workflows with rotation (keep 5-10 backups)
+# Archive workflows with configurable rotation
 archive_workflows() {
     local source_file="$1"
     local backup_dir="$2"
     local is_dry_run="$3"
-    local max_archives=${4:-10}
+    local rotation_limit=${4:-10}  # 0=overwrite, number=keep N, unlimited=keep all
 
     if [ ! -f "$source_file" ]; then
         log WARN "Source workflows file not found: $source_file"
         return 1
+    fi
+
+    # Handle different rotation modes
+    if [[ "$rotation_limit" == "0" ]]; then
+        # Mode 0: Just overwrite, no archiving
+        log DEBUG "Rotation disabled - workflows will be overwritten"
+        return 0
     fi
 
     local archive_dir="$backup_dir/archive"
@@ -624,21 +656,76 @@ archive_workflows() {
     chmod 600 "$archive_file" || log WARN "Could not set permissions on archived workflows"
     log SUCCESS "Workflows archived to: $archive_file"
 
-    # Rotate archives - keep only the most recent max_archives
-    local archive_count
-    archive_count=$(find "$archive_dir" -name "workflows_*.json" | wc -l)
-    if [ "$archive_count" -gt "$max_archives" ]; then
-        local files_to_remove=$((archive_count - max_archives))
-        log INFO "Rotating workflow archives - removing $files_to_remove old files"
-        
-        # Remove oldest files (sort by name, which includes timestamp)
-        find "$archive_dir" -name "workflows_*.json" | sort | head -n "$files_to_remove" | while read -r old_file; do
-            rm -f "$old_file"
-            log DEBUG "Removed old archive: $(basename "$old_file")"
-        done
+    # Handle rotation based on limit
+    if [[ "$rotation_limit" == "unlimited" ]]; then
+        log DEBUG "Unlimited rotation - keeping all workflow archives"
+    elif [[ "$rotation_limit" =~ ^[0-9]+$ ]] && [ "$rotation_limit" -gt 0 ]; then
+        # Rotate archives - keep only the most recent N
+        local archive_count
+        archive_count=$(find "$archive_dir" -name "workflows_*.json" | wc -l)
+        if [ "$archive_count" -gt "$rotation_limit" ]; then
+            local files_to_remove=$((archive_count - rotation_limit))
+            log INFO "Rotating workflow archives - removing $files_to_remove old files (keeping $rotation_limit most recent)"
+            
+            # Remove oldest files (sort by name, which includes timestamp)
+            find "$archive_dir" -name "workflows_*.json" | sort | head -n "$files_to_remove" | while read -r old_file; do
+                rm -f "$old_file"
+                log DEBUG "Removed old archive: $(basename "$old_file")"
+            done
+        fi
+        log INFO "Workflow archive rotation complete (keeping $rotation_limit most recent)"
+    fi
+    return 0
+}
+
+rotate_local_timestamped_backups() {
+    local base_backup_dir="$1"
+    local rotation_limit=${2:-10}  # 0=overwrite, number=keep N, unlimited=keep all
+    local is_dry_run="$3"
+
+    if [ ! -d "$base_backup_dir" ]; then
+        log WARN "Base backup directory not found: $base_backup_dir"
+        return 1
     fi
 
-    log INFO "Workflow archive rotation complete (keeping $max_archives most recent)"
+    # Handle different rotation modes
+    if [[ "$rotation_limit" == "0" ]]; then
+        log DEBUG "Rotation disabled for timestamped directories - they accumulate until manually cleaned"
+        return 0
+    elif [[ "$rotation_limit" == "unlimited" ]]; then
+        log DEBUG "Unlimited rotation - keeping all timestamped backup directories"
+        return 0
+    elif ! [[ "$rotation_limit" =~ ^[0-9]+$ ]]; then
+        log WARN "Invalid rotation limit: $rotation_limit - defaulting to 10"
+        rotation_limit=10
+    fi
+
+    # Find timestamped directories (format: YYYY-MM-DD_HH-MM-SS)
+    local timestamped_dirs=()
+    while IFS= read -r -d '' dir; do
+        timestamped_dirs+=("$dir")
+    done < <(find "$base_backup_dir" -maxdepth 1 -type d -name "*-*-*_*-*-*" -print0 | sort -z)
+
+    local backup_count=${#timestamped_dirs[@]}
+    if [ "$backup_count" -gt "$rotation_limit" ]; then
+        local dirs_to_remove=$((backup_count - rotation_limit))
+        log INFO "Rotating local timestamped backups - removing $dirs_to_remove old directories (keeping $rotation_limit most recent)"
+        
+        if $is_dry_run; then
+            for ((i=0; i<dirs_to_remove; i++)); do
+                log DRYRUN "Would remove old backup directory: $(basename "${timestamped_dirs[$i]}")"
+            done
+        else
+            # Remove oldest directories
+            for ((i=0; i<dirs_to_remove; i++)); do
+                rm -rf "${timestamped_dirs[$i]}"
+                log DEBUG "Removed old backup directory: $(basename "${timestamped_dirs[$i]}")"
+            done
+        fi
+    else
+        log DEBUG "Local backup rotation: keeping all $backup_count directories (under limit of $rotation_limit)"
+    fi
+
     return 0
 }
 
@@ -847,6 +934,7 @@ backup() {
     local workflows_storage="${7:-local}"  # Where to store workflows (default: local)
     local credentials_storage="${8:-local}"  # Where to store credentials (default: local)
     local local_backup_path="${9:-$HOME/n8n-backup}"  # Local backup path (default: ~/n8n-backup)
+    local local_rotation_limit="${10:-10}"  # Rotation limit (default: 10)
 
     log HEADER "Performing Backup - Workflows: $workflows_storage, Credentials: $credentials_storage"
     if $is_dry_run; then log WARN "DRY RUN MODE ENABLED - NO CHANGES WILL BE MADE"; fi
@@ -863,8 +951,17 @@ backup() {
     fi
     if $is_dry_run; then log WARN "DRY RUN MODE ENABLED - NO CHANGES WILL BE MADE"; fi
 
-    # Setup local backup storage directory
-    local local_backup_dir="$local_backup_path"
+    # Setup local backup storage directory with optional timestamping
+    local base_backup_dir="$local_backup_path"
+    local local_backup_dir="$base_backup_dir"
+    
+    # Apply timestamping to local storage if requested
+    if [[ "$use_dated_backup" == "true" ]] && [[ "$workflows_storage" == "local" || "$credentials_storage" == "local" ]]; then
+        local backup_timestamp=$(date +"%Y-%m-%d_%H-%M-%S")
+        local_backup_dir="$base_backup_dir/$backup_timestamp"
+        log INFO "📅 Using timestamped local backup directory: $backup_timestamp"
+    fi
+    
     local local_workflows_file="$local_backup_dir/workflows.json"
     local local_credentials_file="$local_backup_dir/credentials.json"
     local local_env_file="$local_backup_dir/.env"
@@ -875,6 +972,12 @@ backup() {
             return 1
         fi
         chmod 700 "$local_backup_dir" || log WARN "Could not set permissions on local backup directory"
+        
+        # Also ensure base directory has proper permissions
+        if [[ "$local_backup_dir" != "$base_backup_dir" ]]; then
+            chmod 700 "$base_backup_dir" || log WARN "Could not set permissions on base backup directory"
+        fi
+        
         log SUCCESS "Local backup directory ready: $local_backup_dir"
     else
         log DRYRUN "Would create local backup directory: $local_backup_dir"
@@ -979,10 +1082,11 @@ backup() {
             log DRYRUN "Would copy workflows from container to local storage: $local_workflows_file"
             log DRYRUN "Would set permissions 600 on workflows file"
         else
-            # Archive existing workflows if they exist
-            if [ -f "$local_workflows_file" ]; then
+            # Archive existing workflows only if NOT using timestamped directories
+            # (timestamped directories naturally separate backups)
+            if [[ "$use_dated_backup" != "true" ]] && [ -f "$local_workflows_file" ]; then
                 log INFO "Archiving existing workflows before backup..."
-                if ! archive_workflows "$local_workflows_file" "$local_backup_dir" "$is_dry_run" 10; then
+                if ! archive_workflows "$local_workflows_file" "$base_backup_dir" "$is_dry_run" "$local_rotation_limit"; then
                     log WARN "Failed to archive existing workflows, but continuing..."
                 fi
             fi
@@ -1018,10 +1122,11 @@ backup() {
             log DRYRUN "Would set permissions 600 on credentials file"
             log DRYRUN "Would archive previous credentials if they exist"
         else
-            # Archive existing credentials if they exist
-            if [ -f "$local_credentials_file" ]; then
+            # Archive existing credentials only if NOT using timestamped directories
+            # (timestamped directories naturally separate backups)
+            if [[ "$use_dated_backup" != "true" ]] && [ -f "$local_credentials_file" ]; then
                 log INFO "Archiving existing credentials before backup..."
-                if ! archive_credentials "$local_credentials_file" "$local_backup_dir" "$is_dry_run" 10; then
+                if ! archive_credentials "$local_credentials_file" "$base_backup_dir" "$is_dry_run" "$local_rotation_limit"; then
                     log WARN "Failed to archive existing credentials, but continuing..."
                 fi
             fi
@@ -1425,11 +1530,29 @@ EOF
     fi
 
     log HEADER "Backup Summary"
-    log SUCCESS "✅ Workflows: Successfully backed up to GitHub repository"
-    log SUCCESS "🔒 Credentials: Securely stored locally at $local_credentials_file"
+    
+    # Show what was actually backed up and where
+    if [[ "$workflows_storage" == "remote" ]]; then
+        log SUCCESS "✅ Workflows: Successfully backed up to GitHub repository"
+    elif [[ "$workflows_storage" == "local" ]]; then
+        log SUCCESS "✅ Workflows: Securely stored locally at $local_workflows_file"
+    fi
+    
+    if [[ "$credentials_storage" == "remote" ]]; then
+        log SUCCESS "🔒 Credentials: Stored in GitHub repository"
+        log WARN "⚠️  Security: Credentials are stored in Git repository (less secure)"
+    elif [[ "$credentials_storage" == "local" ]]; then
+        log SUCCESS "🔒 Credentials: Securely stored locally at $local_credentials_file"
+    fi
+    
     log SUCCESS "🌍 Environment: Securely stored locally at $local_env_file"
     log INFO "📁 Local backup directory: $local_backup_dir"
-    log WARN "⚠️  Important: Credentials and environment variables are NOT in Git for security"
+    
+    # Rotate old timestamped local backups if using timestamped directories
+    if [[ "$use_dated_backup" == "true" ]] && [[ "$workflows_storage" == "local" || "$credentials_storage" == "local" ]]; then
+        log INFO "Rotating old timestamped local backups..."
+        rotate_local_timestamped_backups "$base_backup_dir" "$local_rotation_limit" "$is_dry_run"
+    fi
     
     if $is_dry_run; then log WARN "(Dry run mode was active - no changes made)"; fi
     return 0
@@ -1969,6 +2092,17 @@ main() {
                     ARG_CREDENTIALS_STORAGE="local"; shift 1  # Default to local if no argument
                 fi ;;
             --path) ARG_LOCAL_BACKUP_PATH="$2"; shift 2 ;;
+            --rotation) 
+                if [[ "$2" =~ ^[0-9]+$ ]] || [[ "$2" == "unlimited" ]]; then
+                    ARG_LOCAL_ROTATION_LIMIT="$2"; shift 2
+                else
+                    echo -e "${RED}[ERROR]${NC} Invalid --rotation value: '$2'." >&2
+                    echo -e "${YELLOW}[INFO]${NC} Valid options:" >&2
+                    echo -e "${YELLOW}[INFO]${NC}   • 0          - No rotation (overwrite current backup)" >&2
+                    echo -e "${YELLOW}[INFO]${NC}   • <number>   - Keep N most recent backups (creates archive/timestamp dirs)" >&2
+                    echo -e "${YELLOW}[INFO]${NC}   • unlimited  - Keep all backups (no deletion)" >&2
+                    exit 1
+                fi ;;
             --restore-type) 
                 if [[ "$2" == "all" || "$2" == "workflows" || "$2" == "credentials" ]]; then
                     ARG_RESTORE_TYPE="$2"
@@ -2010,6 +2144,7 @@ main() {
     local workflows_storage="$ARG_WORKFLOWS_STORAGE"
     local credentials_storage="$ARG_CREDENTIALS_STORAGE"
     local local_backup_path="${ARG_LOCAL_BACKUP_PATH:-$HOME/n8n-backup}"
+    local local_rotation_limit="${ARG_LOCAL_ROTATION_LIMIT:-10}"  # Default to 10 if not specified
     local restore_type="${ARG_RESTORE_TYPE:-all}"  # Keep for backwards compatibility
     local is_dry_run=$ARG_DRY_RUN
     
@@ -2147,6 +2282,20 @@ main() {
             esac
             
             log INFO "Selected: Workflows -> $workflows_storage, Credentials -> $credentials_storage"
+            
+            # Ask for local backup directory if either storage option is local
+            if [[ "$workflows_storage" == "local" || "$credentials_storage" == "local" ]]; then
+                printf "Local backup directory [~/n8n-backup]: "
+                read -r custom_backup_path
+                if [[ -n "$custom_backup_path" ]]; then
+                    # Expand tilde if present
+                    if [[ "$custom_backup_path" =~ ^~ ]]; then
+                        custom_backup_path="${custom_backup_path/#\~/$HOME}"
+                    fi
+                    local_backup_path="$custom_backup_path"
+                    log INFO "Using custom local backup directory: $local_backup_path"
+                fi
+            fi
         fi
         
         # Get GitHub config only if needed (when using remote storage or for restore)
@@ -2217,7 +2366,7 @@ main() {
     log INFO "Starting action: $action"
     case "$action" in
         backup)
-            if backup "$container_id" "$github_token" "$github_repo" "$branch" "$use_dated_backup" "$is_dry_run" "$workflows_storage" "$credentials_storage" "$local_backup_path"; then
+            if backup "$container_id" "$github_token" "$github_repo" "$branch" "$use_dated_backup" "$is_dry_run" "$workflows_storage" "$credentials_storage" "$local_backup_path" "$local_rotation_limit"; then
                 log SUCCESS "Backup operation completed successfully."
             else
                 log ERROR "Backup operation failed."
