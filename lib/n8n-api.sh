@@ -297,12 +297,12 @@ create_n8n_folder_structure() {
     
     log INFO "Creating folder structure based on n8n's actual folders (not tags)..."
     
-    # Use global variables for API credentials
-    local base_url="$CONF_N8N_BASE_URL"
-    local api_key="$CONF_N8N_API_KEY"
+    # Use runtime variables for API credentials
+    local base_url="$n8n_base_url"
+    local api_key="$n8n_api_key"
     
     if [[ -z "$base_url" ]] || [[ -z "$api_key" ]]; then
-        log ERROR "n8n API credentials not configured. Please set CONF_N8N_BASE_URL and CONF_N8N_API_KEY"
+        log ERROR "n8n API credentials not configured. Please set N8N_BASE_URL and N8N_API_KEY"
         return 1
     fi
     
@@ -350,9 +350,9 @@ create_n8n_folder_structure() {
     if [[ -z "$api_key" || "$api_key" == "" ]]; then
         # Try to get email/password for session auth
         local email password
-        if [[ -n "$CONF_N8N_EMAIL" && -n "$CONF_N8N_PASSWORD" ]]; then
-            email="$CONF_N8N_EMAIL"
-            password="$CONF_N8N_PASSWORD"
+        if [[ -n "$n8n_email" && -n "$n8n_password" ]]; then
+            email="$n8n_email"
+            password="$n8n_password"
         else
             log INFO "Session authentication requires email/password credentials"
             printf "n8n email or LDAP login ID: "

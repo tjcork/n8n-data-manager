@@ -646,18 +646,20 @@ backup() {
         # Handle workflows for remote storage
         if [[ "$workflows_storage" == "remote" ]] && docker exec "$container_id" test -f "$container_workflows"; then
             log INFO "Preparing workflows for Git repository..."
-            if [[ "$CONF_FOLDER_STRUCTURE" == "true" ]]; then
+            if [[ "$folder_structure" == "true" ]]; then
                 # Create folder structure in Git repo
                 if $is_dry_run; then
                     log DRYRUN "Would create n8n folder structure in Git repository"
                 else
-                    log DEBUG "Creating folder structure with API credentials: URL=$CONF_N8N_BASE_URL, API Key=${CONF_N8N_API_KEY:0:8}..."
+                    echo "[DEBUG] Creating n8n folder structure using API..."
+                    echo "[DEBUG] n8n URL: $N8N_BASE_URL"
+                    echo "[DEBUG] API Key: ${N8N_API_KEY:0:8}..."
                     if create_folder_structure_with_git "$target_dir" "$tmp_dir" "$is_dry_run"; then
                         log SUCCESS "n8n folder structure created in repository with individual commits"
                         # Debug: Show what files were created
-                        log DEBUG "Files created by folder structure:"
+                        echo "[DEBUG] Files created by folder structure:"
                         find "$target_dir" -name "*.json" | head -10 | while read -r file; do
-                            log DEBUG "  Created: $file"
+                            echo "[DEBUG]   Created: $file"
                         done
                     else
                         log ERROR "Failed to create folder structure, falling back to flat structure"
@@ -763,22 +765,6 @@ EOF
             log ERROR "File copy operations failed, aborting backup"
             rm -rf "$tmp_dir"
             return 1
-        fi
-
-        # Create backup timestamp file
-        local ts_file="${tmp_dir}/backup_timestamp.txt"
-        local backup_time=$(date +"%Y-%m-%d %H:%M:%S.%N")
-        if ! $is_dry_run; then
-            echo "Workflows backup generated at: $backup_time" > "$ts_file"
-            if [[ "$credentials_storage" == "remote" ]]; then
-                echo "Credentials included in Git repository" >> "$ts_file"
-            else
-                echo "Credentials stored locally at: $local_credentials_file" >> "$ts_file"
-            fi
-            echo "Environment stored locally at: $local_env_file" >> "$ts_file"
-            log DEBUG "Created timestamp file $ts_file to track backup metadata"
-        else
-            log DRYRUN "Would create backup timestamp file: $ts_file"
         fi
 
         log INFO "Cleaning up temporary files in container..."

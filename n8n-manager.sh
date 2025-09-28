@@ -28,40 +28,47 @@ DEBUG_TRACE=${DEBUG_TRACE:-false}
 # Selected values from interactive mode
 SELECTED_ACTION=""
 SELECTED_CONTAINER_ID=""
-GITHUB_TOKEN=""
-GITHUB_REPO=""
-GITHUB_BRANCH="main"
-DEFAULT_CONTAINER=""
 SELECTED_RESTORE_TYPE="all"
 
-# Command-line argument variables
-ARG_ACTION=""
-ARG_CONTAINER=""
-ARG_TOKEN=""
-ARG_REPO=""
-ARG_BRANCH=""
-ARG_CONFIG_FILE=""
-ARG_DATED_BACKUPS=false
-ARG_WORKFLOWS_STORAGE=""
-ARG_CREDENTIALS_STORAGE=""
-ARG_LOCAL_BACKUP_PATH=""
-ARG_LOCAL_ROTATION_LIMIT=""
-ARG_RESTORE_TYPE="all"
-ARG_DRY_RUN=false
-ARG_VERBOSE=false
-ARG_LOG_FILE=""
-ARG_FOLDER_STRUCTURE=false
-ARG_N8N_BASE_URL=""
-ARG_N8N_API_KEY=""
+# ==============================================================================
+# RUNTIME CONFIGURATION - Single source of truth for all settings  
+# ==============================================================================
+# These variables represent the final runtime state and are used throughout
+# the application. They are populated through a hierarchy:
+# 1. Defaults (set here)
+# 2. Config file values (load_config)  
+# 3. Command line arguments (parse_args)
+# 4. Interactive prompts (interactive_mode)
 
-# Configuration file variables (loaded by modules)
-CONF_LOCAL_ROTATION_LIMIT=""
-CONF_DATED_BACKUPS=false
-CONF_VERBOSE=false
-CONF_LOG_FILE=""
-CONF_FOLDER_STRUCTURE=false
-CONF_N8N_BASE_URL=""
-CONF_N8N_API_KEY=""
+# Core operation settings
+action=""
+container=""
+dry_run=false
+verbose=false
+
+# Git/GitHub settings  
+github_token=""
+github_repo=""
+github_branch="main"
+dated_backups=false
+
+# Storage settings
+workflows_storage=""           # local|remote
+credentials_storage="local"    # local|remote (default secure)
+local_backup_path="$HOME/n8n-backup"
+local_rotation_limit="10"
+
+# Advanced features
+folder_structure=false         # Enable n8n API folder structure
+n8n_base_url=""               # Required if folder_structure=true
+n8n_api_key=""                # Optional - session auth used if empty
+n8n_email=""                  # Optional - for session auth
+n8n_password=""               # Optional - for session auth
+
+# Logging and misc
+log_file=""
+restore_type="all"            # all|workflows|credentials
+config_file=""                # Custom config file path
 
 # Load all modules
 source "$SCRIPT_DIR/lib/common.sh"
@@ -75,59 +82,58 @@ source "$SCRIPT_DIR/lib/restore.sh"
 main() {
     # Parse command-line arguments first
     while [ $# -gt 0 ]; do
-        case "$1" in
-            --action) ARG_ACTION="$2"; shift 2 ;; 
-            --container) ARG_CONTAINER="$2"; shift 2 ;; 
-            --token) ARG_TOKEN="$2"; shift 2 ;; 
-            --repo) ARG_REPO="$2"; shift 2 ;; 
-            --branch) ARG_BRANCH="$2"; shift 2 ;; 
-            --config) ARG_CONFIG_FILE="$2"; shift 2 ;; 
-            --dated) ARG_DATED_BACKUPS=true; shift 1 ;;
+        case $1 in
+            --action) action="$2"; shift 2 ;; 
+            --container) container="$2"; shift 2 ;; 
+            --token) github_token="$2"; shift 2 ;; 
+            --repo) github_repo="$2"; shift 2 ;; 
+            --branch) github_branch="$2"; shift 2 ;; 
+            --config) config_file="$2"; shift 2 ;; 
+            --dated) dated_backups=true; shift 1 ;;
             --workflows)
-                if [ $# -gt 1 ] && [[ "$2" == "local" || "$2" == "remote" ]]; then
-                    ARG_WORKFLOWS_STORAGE="$2"; shift 2
+                if [[ -n "$2" && "$2" != -* ]]; then
+                    workflows_storage="$2"; shift 2
                 else
-                    ARG_WORKFLOWS_STORAGE="local"; shift 1
-                fi ;;
+                    workflows_storage="local"; shift 1
+                fi
+                ;;
             --credentials)
-                if [ $# -gt 1 ] && [[ "$2" == "local" || "$2" == "remote" ]]; then
-                    ARG_CREDENTIALS_STORAGE="$2"; shift 2
+                if [[ -n "$2" && "$2" != -* ]]; then
+                    credentials_storage="$2"; shift 2
                 else
-                    ARG_CREDENTIALS_STORAGE="local"; shift 1
-                fi ;;
-            --path) ARG_LOCAL_BACKUP_PATH="$2"; shift 2 ;;
-            --rotation) 
-                if [[ "$2" =~ ^[0-9]+$ ]] || [[ "$2" == "unlimited" ]]; then
-                    ARG_LOCAL_ROTATION_LIMIT="$2"; shift 2
+                    credentials_storage="local"; shift 1
+                fi
+                ;;
+            --path) local_backup_path="$2"; shift 2 ;;
+            --rotation)
+                if [[ -n "$2" && "$2" != -* ]]; then
+                    local_rotation_limit="$2"; shift 2
                 else
-                    echo -e "${RED}[ERROR]${NC} Invalid --rotation value: '$2'." >&2
-                    echo -e "${YELLOW}[INFO]${NC} Valid options:" >&2
+                    echo -e "${YELLOW}[INFO]${NC}   Valid rotation options:" >&2
                     echo -e "${YELLOW}[INFO]${NC}   • 0          - No rotation (overwrite current backup)" >&2
                     echo -e "${YELLOW}[INFO]${NC}   • <number>   - Keep N most recent backups (creates archive/timestamp dirs)" >&2
                     echo -e "${YELLOW}[INFO]${NC}   • unlimited  - Keep all backups (no deletion)" >&2
-                    exit 1
-                fi ;;
-            --restore-type) 
-                if [[ "$2" == "all" || "$2" == "workflows" || "$2" == "credentials" ]]; then
-                    ARG_RESTORE_TYPE="$2"
-                else
-                    echo -e "${RED}[ERROR]${NC} Invalid --restore-type: '$2'." >&2
-                    echo -e "${YELLOW}[INFO]${NC} Valid options:" >&2
-                    echo -e "${YELLOW}[INFO]${NC}   • all        - Restore workflows and credentials" >&2
-                    echo -e "${YELLOW}[INFO]${NC}   • workflows  - Restore workflows only (credentials unchanged)" >&2
-                    echo -e "${YELLOW}[INFO]${NC}   • credentials - Restore credentials only (workflows unchanged)" >&2
+                    echo -e "${RED}[ERROR]${NC} Missing required argument for --rotation" >&2
                     exit 1
                 fi
-                shift 2 ;;
-            --dry-run) ARG_DRY_RUN=true; shift 1 ;; 
-            --verbose) ARG_VERBOSE=true; shift 1 ;; 
-            --log-file) ARG_LOG_FILE="$2"; shift 2 ;; 
-            --folder-structure) ARG_FOLDER_STRUCTURE=true; shift 1 ;;
-            --n8n-url) ARG_N8N_BASE_URL="$2"; shift 2 ;;
-            --n8n-api-key) ARG_N8N_API_KEY="$2"; shift 2 ;;
-            --trace) DEBUG_TRACE=true; shift 1;; 
-            -h|--help) show_help; exit 0 ;; 
-            *) echo -e "${RED}[ERROR]${NC} Invalid option: $1" >&2; show_help; exit 1 ;; 
+                ;;
+            --restore-type)
+                if [[ "$2" =~ ^(all|workflows|credentials)$ ]]; then
+                    restore_type="$2"
+                    shift 2
+                else
+                    echo -e "${RED}[ERROR]${NC} Invalid restore type: $2. Valid options: all, workflows, credentials" >&2
+                    exit 1
+                fi
+                ;;
+            --dry-run) dry_run=true; shift 1 ;; 
+            --verbose) verbose=true; shift 1 ;; 
+            --log-file) log_file="$2"; shift 2 ;; 
+            --folder-structure) folder_structure=true; shift 1 ;;
+            --n8n-url) n8n_base_url="$2"; shift 2 ;;
+            --n8n-api-key) n8n_api_key="$2"; shift 2 ;;
+            -h|--help) show_help; exit 0 ;;
+            *) echo "[ERROR] Invalid option: $1"; show_help; exit 1 ;;
         esac
     done
 
@@ -136,24 +142,15 @@ main() {
 
     log HEADER "n8n Backup/Restore Manager v$VERSION"
     log INFO "🚀 Flexible backup storage: local files or Git repository"
-    if [ "$ARG_DRY_RUN" = "true" ]; then log WARN "DRY RUN MODE ENABLED"; fi
-    if [ "$ARG_VERBOSE" = "true" ]; then log DEBUG "Verbose mode enabled."; fi
+    if [ "$dry_run" = "true" ]; then log WARN "DRY RUN MODE ENABLED"; fi
+    if [ "$verbose" = "true" ]; then log DEBUG "Verbose mode enabled."; fi
     
     check_host_dependencies
 
-    # Use local variables within main
-    local action="$ARG_ACTION"
-    local container_id="$ARG_CONTAINER"
-    local github_token="$ARG_TOKEN"
-    local github_repo="$ARG_REPO"
-    local branch="${ARG_BRANCH:-main}"
-    local use_dated_backup=$ARG_DATED_BACKUPS
-    local workflows_storage="$ARG_WORKFLOWS_STORAGE"
-    local credentials_storage="$ARG_CREDENTIALS_STORAGE"
-    local local_backup_path="${ARG_LOCAL_BACKUP_PATH:-$HOME/n8n-backup}"
-    local local_rotation_limit="${ARG_LOCAL_ROTATION_LIMIT:-10}"
-    local restore_type="${ARG_RESTORE_TYPE:-all}"
-    local is_dry_run=$ARG_DRY_RUN
+    # Runtime variables are now lowercase and used directly
+    log DEBUG "Action: $action, Container: $container, Repo: $github_repo"
+    log DEBUG "Branch: $github_branch, Workflows: $workflows_storage, Credentials: $credentials_storage"
+    log DEBUG "Local Path: $local_backup_path, Rotation: $local_rotation_limit"
     
     # Set intelligent defaults for backup
     if [[ "$action" == "backup" ]]; then
@@ -184,7 +181,7 @@ main() {
         log DEBUG "Running in non-interactive mode."
         
         # Basic parameters are always required
-        if [ -z "$action" ] || [ -z "$container_id" ]; then
+        if [ -z "$action" ] || [ -z "$container" ]; then
             log ERROR "Running in non-interactive mode but required parameters are missing."
             log INFO "Please provide --action and --container via arguments or config file."
             show_help
@@ -202,8 +199,8 @@ main() {
         fi
         
         # n8n base URL required when folder structure is enabled
-        if [[ "$CONF_FOLDER_STRUCTURE" == "true" ]]; then
-            if [[ -z "$CONF_N8N_BASE_URL" ]]; then
+        if [[ "$folder_structure" == "true" ]]; then
+            if [[ -z "$n8n_base_url" ]]; then
                 log ERROR "n8n base URL is required when folder structure is enabled."
                 log INFO "Please provide --n8n-url via arguments or config file."
                 log INFO "API key (--n8n-api-key) is optional - if not provided, will use session authentication."
@@ -213,12 +210,12 @@ main() {
             
             # Validate API access
             log INFO "Validating n8n API access..."
-            if ! validate_n8n_api_access "$CONF_N8N_BASE_URL" "$CONF_N8N_API_KEY"; then
+            if ! validate_n8n_api_access "$n8n_base_url" "$n8n_api_key"; then
                 log ERROR "❌ n8n API validation failed!"
                 log ERROR "Please check your URL and credentials."
                 log INFO "💡 Tip: You can test manually with:"
-                if [[ -n "$CONF_N8N_API_KEY" ]]; then
-                    log INFO "   curl -H \"X-N8N-API-KEY: your_key\" \"$CONF_N8N_BASE_URL/api/v1/workflows?limit=1\""
+                if [[ -n "$n8n_api_key" ]]; then
+                    log INFO "   curl -H \"X-N8N-API-KEY: your_key\" \"$n8n_base_url/api/v1/workflows?limit=1\""
                 else
                     log INFO "   Session authentication will be used with email/password login"
                 fi
@@ -228,15 +225,15 @@ main() {
         fi
 
         # Validate container
-        log DEBUG "Validating non-interactive container: $container_id"
+        log DEBUG "Validating non-interactive container: $container"
         local found_id
-        found_id=$(docker ps -q --filter "id=$container_id" --filter "name=$container_id" | head -n 1)
+        found_id=$(docker ps -q --filter "id=$container" --filter "name=$container" | head -n 1)
         if [ -z "$found_id" ]; then
-             log ERROR "Container '$container_id' not found or not running."
+             log ERROR "Container '$container' not found or not running."
              exit 1
         fi
-        container_id=$found_id
-        log SUCCESS "Using specified container: $container_id"
+        container=$found_id
+        log SUCCESS "Using specified container: $container"
 
     else
         log DEBUG "Running in interactive mode."
@@ -249,35 +246,35 @@ main() {
         log DEBUG "Action selected: $action"
         
         # Interactive container selection
-        if [ -z "$container_id" ]; then
+        if [ -z "$container" ]; then
             select_container
-            container_id="$SELECTED_CONTAINER_ID"
+            container="$SELECTED_CONTAINER_ID"
         else
-            log DEBUG "Validating specified container: $container_id"
+            log DEBUG "Validating specified container: $container"
             local found_id
-            found_id=$(docker ps -q --filter "id=$container_id" --filter "name=$container_id" | head -n 1)
+            found_id=$(docker ps -q --filter "id=$container" --filter "name=$container" | head -n 1)
             if [ -z "$found_id" ]; then
-                 log ERROR "Container '$container_id' not found or not running."
+                 log ERROR "Container '$container' not found or not running."
                  log WARN "Falling back to interactive container selection..."
                  select_container
-                 container_id="$SELECTED_CONTAINER_ID"
+                 container="$SELECTED_CONTAINER_ID"
             else
-                 container_id=$found_id
-                 log SUCCESS "Using specified container: $container_id"
+                 container=$found_id
+                 log SUCCESS "Using specified container: $container"
             fi
         fi
-        log DEBUG "Container selected: $container_id"
+        log DEBUG "Container selected: $container"
         
         # Interactive dated backup prompt
-        if [[ "$action" == "backup" ]] && ! $use_dated_backup && ! grep -q "CONF_DATED_BACKUPS=true" "${ARG_CONFIG_FILE:-$CONFIG_FILE_PATH}" 2>/dev/null; then
+        if [[ "$action" == "backup" ]] && ! $dated_backups && ! grep -q "DATED_BACKUPS=true" "${config_file:-$CONFIG_FILE_PATH}" 2>/dev/null; then
              printf "Create a dated backup (in a timestamped subdirectory)? (yes/no) [no]: "
              local confirm_dated
              read -r confirm_dated
              if [[ "$confirm_dated" == "yes" || "$confirm_dated" == "y" ]]; then
-                 use_dated_backup=true
+                 dated_backups=true
              fi
         fi
-        log DEBUG "Use Dated Backup: $use_dated_backup"
+        log DEBUG "Use Dated Backup: $dated_backups"
         
         # Interactive storage configuration
         if [[ "$action" == "backup" ]] && [[ -z "$workflows_storage" && -z "$credentials_storage" ]]; then
@@ -330,69 +327,67 @@ main() {
                 printf "Create n8n folder structure in Git repository? (yes/no) [no]: "
                 read -r folder_structure_choice
                 if [[ "$folder_structure_choice" == "yes" || "$folder_structure_choice" == "y" ]]; then
-                    CONF_FOLDER_STRUCTURE="true"
+                    folder_structure=true
                     
                     # Prompt for n8n API credentials if not already configured
-                    if [[ -z "$CONF_N8N_BASE_URL" ]]; then
+                    if [[ -z "$n8n_base_url" ]]; then
                         printf "n8n base URL (e.g., http://localhost:5678): "
                         read -r n8n_url
                         if [[ -n "$n8n_url" ]]; then
-                            CONF_N8N_BASE_URL="$n8n_url"
+                            n8n_base_url="$n8n_url"
                         else
                             log ERROR "n8n base URL is required for folder structure"
                             exit 1
                         fi
                     fi
                     
-                    if [[ -z "$CONF_N8N_API_KEY" ]]; then
+                    if [[ -z "$n8n_api_key" ]]; then
                         printf "n8n API key (leave blank to use email/password login): "
-                        read -r -s n8n_api_key
+                        read -r -s n8n_api_key_input
                         echo  # Add newline after hidden input
-                        if [[ -n "$n8n_api_key" ]]; then
-                            CONF_N8N_API_KEY="$n8n_api_key"
+                        if [[ -n "$n8n_api_key_input" ]]; then
+                            n8n_api_key="$n8n_api_key_input"
                         else
                             log INFO "No API key provided - will use session authentication"
-                            CONF_N8N_API_KEY=""  # Explicitly set to empty
+                            n8n_api_key=""  # Explicitly set to empty
                         fi
                     fi
                     
                     # Validate API access immediately after configuration
-                    log INFO "Validating n8n API access..."
-                    if ! validate_n8n_api_access "$CONF_N8N_BASE_URL" "$CONF_N8N_API_KEY"; then
-                        log ERROR "❌ n8n API validation failed!"
-                        log ERROR "Authentication failed with all available methods."
-                        log ERROR "Cannot proceed with folder structure creation."
-                        log INFO "💡 Please verify:"
-                        log INFO "   1. n8n instance is running and accessible"
-                        log INFO "   2. Credentials (API key or email/password) are correct"
-                        log INFO "   3. No authentication barriers blocking access"
-                        exit 1
-                    fi
-                    
-                    log SUCCESS "✅ n8n API configuration validated successfully!"
-                    
-                    log INFO "✅ Folder structure enabled with n8n API integration"
-                else
-                    CONF_FOLDER_STRUCTURE="false"
+                log INFO "Validating n8n API access..."
+                if ! validate_n8n_api_access "$n8n_base_url" "$n8n_api_key"; then
+                    log ERROR "❌ n8n API validation failed!"
+                    log ERROR "Authentication failed with all available methods."
+                    log ERROR "Cannot proceed with folder structure creation."
+                    log INFO "💡 Please verify:"
+                    log INFO "   1. n8n instance is running and accessible"
+                    log INFO "   2. Credentials (API key or email/password) are correct"
+                    log INFO "   3. No authentication barriers blocking access"
+                    exit 1
                 fi
+                
+                log SUCCESS "✅ n8n API configuration validated successfully!"
+                
+                log INFO "✅ Folder structure enabled with n8n API integration"
+            fi
             fi
         fi
         
         # Get GitHub config only if needed
         if [[ "$action" == "restore" ]] || [[ "$workflows_storage" == "remote" ]] || [[ "$credentials_storage" == "remote" ]]; then
             get_github_config
-            github_token="$GITHUB_TOKEN"
-            github_repo="$GITHUB_REPO"
-            branch="$GITHUB_BRANCH"
+            github_token="$github_token"
+            github_repo="$github_repo"
+            github_branch="$github_branch"
         else
             log INFO "🏠 Local-only backup - no GitHub configuration needed"
             github_token=""
             github_repo=""
-            branch="main"
+            github_branch="main"
         fi
         
         # Interactive restore type selection
-        if [[ "$action" == "restore" ]] && [[ "$restore_type" == "all" ]] && ! grep -q "CONF_RESTORE_TYPE=" "${ARG_CONFIG_FILE:-$CONFIG_FILE_PATH}" 2>/dev/null; then
+        if [[ "$action" == "restore" ]] && [[ "$restore_type" == "all" ]] && ! grep -q "RESTORE_TYPE=" "${config_file:-$CONFIG_FILE_PATH}" 2>/dev/null; then
             select_restore_type
             restore_type="$SELECTED_RESTORE_TYPE"
         elif [[ "$action" == "restore" ]]; then
@@ -401,7 +396,7 @@ main() {
     fi
 
     # Final validation
-    if [ -z "$action" ] || [ -z "$container_id" ]; then
+    if [ -z "$action" ] || [ -z "$container" ]; then
         log ERROR "Missing required parameters (Action, Container). Exiting."
         exit 1
     fi
@@ -410,7 +405,7 @@ main() {
     local needs_github=false
     if [[ "$action" == "restore" ]] || [[ "$workflows_storage" == "remote" ]] || [[ "$credentials_storage" == "remote" ]]; then
         needs_github=true
-        if [ -z "$github_token" ] || [ -z "$github_repo" ] || [ -z "$branch" ]; then
+        if [ -z "$github_token" ] || [ -z "$github_repo" ] || [ -z "$github_branch" ]; then
             log ERROR "Missing required GitHub parameters (Token, Repo, Branch) for remote operations. Exiting."
             exit 1
         fi
@@ -418,7 +413,7 @@ main() {
 
     # Perform GitHub API pre-checks only when needed
     if $needs_github; then
-        if ! check_github_access "$github_token" "$github_repo" "$branch" "$action"; then
+        if ! check_github_access "$github_token" "$github_repo" "$github_branch" "$action"; then
             log ERROR "GitHub access pre-checks failed. Aborting."
             exit 1
         fi
@@ -430,7 +425,7 @@ main() {
     log INFO "Starting action: $action"
     case "$action" in
         backup)
-            if backup "$container_id" "$github_token" "$github_repo" "$branch" "$use_dated_backup" "$is_dry_run" "$workflows_storage" "$credentials_storage" "$local_backup_path" "$local_rotation_limit"; then
+            if backup "$container" "$github_token" "$github_repo" "$github_branch" "$dated_backups" "$dry_run" "$workflows_storage" "$credentials_storage" "$local_backup_path" "$local_rotation_limit"; then
                 log SUCCESS "Backup operation completed successfully."
             else
                 log ERROR "Backup operation failed."
@@ -438,7 +433,7 @@ main() {
             fi
             ;;
         restore)
-            if restore "$container_id" "$github_token" "$github_repo" "$branch" "$restore_type" "$is_dry_run"; then
+            if restore "$container" "$github_token" "$github_repo" "$github_branch" "$restore_type" "$dry_run"; then
                  log SUCCESS "Restore operation completed successfully."
             else
                  log ERROR "Restore operation failed."

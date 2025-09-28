@@ -270,9 +270,9 @@ show_restore_plan() {
 }
 
 get_github_config() {
-    local local_token="$ARG_TOKEN"
-    local local_repo="$ARG_REPO"
-    local local_branch="$ARG_BRANCH"
+    local local_token="$github_token"
+    local local_repo="$github_repo"
+    local local_branch="$github_branch"
 
     log HEADER "GitHub Configuration"
 
@@ -300,7 +300,7 @@ get_github_config() {
         log INFO "Using branch: $local_branch"
     fi
 
-    GITHUB_TOKEN="$local_token"
-    GITHUB_REPO="$local_repo"
-    GITHUB_BRANCH="$local_branch"
+    github_token="$local_token"
+    github_repo="$local_repo"
+    github_branch="$local_branch"
 }

@@ -66,7 +66,7 @@ log() {
     local message="$2"
     
     # Skip debug messages if verbose is not enabled
-    if [ "$level" = "DEBUG" ] && [ "$ARG_VERBOSE" != "true" ]; then 
+    if [ "$level" = "DEBUG" ] && [ "$verbose" != "true" ]; then 
         return 0;
     fi
     
@@ -113,8 +113,8 @@ log() {
     fi
     
     # Log to file if specified
-    if [ -n "$ARG_LOG_FILE" ]; then
-        echo "$plain" >> "$ARG_LOG_FILE"
+    if [ -n "$log_file" ]; then
+        echo "$plain" >> "$log_file"
     fi
     
     return 0
@@ -151,94 +151,81 @@ check_host_dependencies() {
 }
 
 load_config() {
-    local file_to_load="${ARG_CONFIG_FILE:-$CONFIG_FILE_PATH}"
+    local file_to_load="${config_file:-$CONFIG_FILE_PATH}"
     file_to_load="${file_to_load/#\~/$HOME}"
 
     if [ -f "$file_to_load" ]; then
         log INFO "Loading configuration from $file_to_load..."
         source <(grep -vE '^\s*(#|$)' "$file_to_load" 2>/dev/null || true)
         
-        ARG_TOKEN=${ARG_TOKEN:-${CONF_GITHUB_TOKEN:-}}
-        ARG_REPO=${ARG_REPO:-${CONF_GITHUB_REPO:-}}
-        ARG_BRANCH=${ARG_BRANCH:-${CONF_GITHUB_BRANCH:-main}}
-        ARG_CONTAINER=${ARG_CONTAINER:-${CONF_DEFAULT_CONTAINER:-}}
-        DEFAULT_CONTAINER=${CONF_DEFAULT_CONTAINER:-}
+        # Apply config values to runtime variables (only if not already set)
+        github_token=${github_token:-${CONF_GITHUB_TOKEN:-}}
+        github_repo=${github_repo:-${CONF_GITHUB_REPO:-}}
+        github_branch=${github_branch:-${CONF_GITHUB_BRANCH:-main}}
+        container=${container:-${CONF_DEFAULT_CONTAINER:-}}
+        default_container=${CONF_DEFAULT_CONTAINER:-}
         
-        if ! $ARG_DATED_BACKUPS; then 
+        # Handle boolean configs properly
+        if [[ "$dated_backups" != "true" ]]; then 
             CONF_DATED_BACKUPS_VAL=${CONF_DATED_BACKUPS:-false}
-            if [[ "$CONF_DATED_BACKUPS_VAL" == "true" ]]; then ARG_DATED_BACKUPS=true; fi
+            if [[ "$CONF_DATED_BACKUPS_VAL" == "true" ]]; then dated_backups=true; fi
         fi
         
-        if [[ "$ARG_CREDENTIALS_STORAGE" == "local" ]]; then 
-            CONF_CREDENTIALS_STORAGE_VAL=${CONF_CREDENTIALS_STORAGE:-"local"}
-            if [[ "$CONF_CREDENTIALS_STORAGE_VAL" == "remote" ]]; then ARG_CREDENTIALS_STORAGE="remote"; fi
-        fi
+        # Storage settings
+        workflows_storage=${workflows_storage:-${CONF_WORKFLOWS_STORAGE:-}}
+        credentials_storage=${credentials_storage:-${CONF_CREDENTIALS_STORAGE:-local}}
+        local_backup_path=${local_backup_path:-${CONF_LOCAL_BACKUP_PATH:-$HOME/n8n-backup}}
+        local_rotation_limit=${local_rotation_limit:-${CONF_LOCAL_ROTATION_LIMIT:-10}}
         
-        # Load workflows storage from config if not specified
-        if [[ -z "$ARG_WORKFLOWS_STORAGE" ]]; then
-            ARG_WORKFLOWS_STORAGE=${CONF_WORKFLOWS_STORAGE:-}
-        fi
-        
-        # Load local backup path from config if not specified  
-        if [[ -z "$ARG_LOCAL_BACKUP_PATH" ]]; then
-            ARG_LOCAL_BACKUP_PATH=${CONF_LOCAL_BACKUP_PATH:-}
-        fi
-        
-        # Load rotation limit from config if not specified
-        if [[ -z "$ARG_LOCAL_ROTATION_LIMIT" ]]; then
-            ARG_LOCAL_ROTATION_LIMIT=${CONF_LOCAL_ROTATION_LIMIT:-}
-        fi
-        
-        # Load folder structure options from config if not specified
-        if ! $ARG_FOLDER_STRUCTURE; then
+        # Folder structure settings
+        if [[ "$folder_structure" != "true" ]]; then
             CONF_FOLDER_STRUCTURE_VAL=${CONF_FOLDER_STRUCTURE:-false}
-            if [[ "$CONF_FOLDER_STRUCTURE_VAL" == "true" ]]; then ARG_FOLDER_STRUCTURE=true; fi
+            if [[ "$CONF_FOLDER_STRUCTURE_VAL" == "true" ]]; then folder_structure=true; fi
         fi
         
-        if [[ -z "$ARG_N8N_BASE_URL" ]]; then
-            ARG_N8N_BASE_URL=${CONF_N8N_BASE_URL:-}
-        fi
+        # n8n API settings
+        n8n_base_url=${n8n_base_url:-${CONF_N8N_BASE_URL:-}}
+        n8n_api_key=${n8n_api_key:-${CONF_N8N_API_KEY:-}}
+        n8n_email=${n8n_email:-${CONF_N8N_EMAIL:-}}
+        n8n_password=${n8n_password:-${CONF_N8N_PASSWORD:-}}
         
-        if [[ -z "$ARG_N8N_API_KEY" ]]; then
-            ARG_N8N_API_KEY=${CONF_N8N_API_KEY:-}
-        fi
+        # Other settings
+        restore_type=${restore_type:-${CONF_RESTORE_TYPE:-all}}
         
-        ARG_RESTORE_TYPE=${ARG_RESTORE_TYPE:-${CONF_RESTORE_TYPE:-all}}
-        
-        if ! $ARG_VERBOSE; then
+        if [[ "$verbose" != "true" ]]; then
             CONF_VERBOSE_VAL=${CONF_VERBOSE:-false}
-            if [[ "$CONF_VERBOSE_VAL" == "true" ]]; then ARG_VERBOSE=true; fi
+            if [[ "$CONF_VERBOSE_VAL" == "true" ]]; then verbose=true; fi
         fi
         
-        ARG_LOG_FILE=${ARG_LOG_FILE:-${CONF_LOG_FILE:-}}
+        log_file=${log_file:-${CONF_LOG_FILE:-}}
         
-    elif [ -n "$ARG_CONFIG_FILE" ]; then
+    elif [ -n "$config_file" ]; then
         log WARN "Configuration file specified but not found: $file_to_load"
     fi
     
-    if [ -n "$ARG_LOG_FILE" ] && [[ "$ARG_LOG_FILE" != /* ]]; then
-        log WARN "Log file path '$ARG_LOG_FILE' is not absolute. Prepending current directory."
-        ARG_LOG_FILE="$(pwd)/$ARG_LOG_FILE"
+    if [ -n "$log_file" ] && [[ "$log_file" != /* ]]; then
+        log WARN "Log file path '$log_file' is not absolute. Prepending current directory."
+        log_file="$(pwd)/$log_file"
     fi
     
-    if [ -n "$ARG_LOG_FILE" ]; then
-        log DEBUG "Ensuring log file exists and is writable: $ARG_LOG_FILE"
-        mkdir -p "$(dirname "$ARG_LOG_FILE")" || { log ERROR "Could not create directory for log file: $(dirname "$ARG_LOG_FILE")"; exit 1; }
-        touch "$ARG_LOG_FILE" || { log ERROR "Log file is not writable: $ARG_LOG_FILE"; exit 1; }
-        log INFO "Logging output also to: $ARG_LOG_FILE"
+    if [ -n "$log_file" ]; then
+        log DEBUG "Ensuring log file exists and is writable: $log_file"
+        mkdir -p "$(dirname "$log_file")" || { log ERROR "Could not create directory for log file: $(dirname "$log_file")"; exit 1; }
+        touch "$log_file" || { log ERROR "Log file is not writable: $log_file"; exit 1; }
+        log INFO "Logging output also to: $log_file"
     fi
     
     # Validate folder structure configuration
-    if $ARG_FOLDER_STRUCTURE; then
-        if [[ -z "$ARG_N8N_BASE_URL" ]]; then
-            log ERROR "Folder structure enabled but n8n URL not provided. Set CONF_N8N_BASE_URL or use --n8n-url"
+    if [[ "$folder_structure" == "true" ]]; then
+        if [[ -z "$n8n_base_url" ]]; then
+            log ERROR "Folder structure enabled but n8n URL not provided. Set n8n_base_url via --n8n-url or config file"
             exit 1
         fi
-        if [[ -z "$ARG_N8N_API_KEY" ]]; then
-            log ERROR "Folder structure enabled but n8n API key not provided. Set CONF_N8N_API_KEY or use --n8n-api-key"
+        if [[ -z "$n8n_api_key" ]]; then
+            log ERROR "Folder structure enabled but n8n API key not provided. Set n8n_api_key via --n8n-api-key or config file"
             exit 1
         fi
-        log INFO "Folder structure mirroring enabled with n8n instance: $ARG_N8N_BASE_URL"
+        log INFO "Folder structure mirroring enabled with n8n instance: $n8n_base_url"
     fi
 }
 
@@ -289,13 +276,13 @@ dockExec() {
         output=$(docker exec "$container_id" sh -c "$cmd" 2>&1) || exit_code=$?
         
         # Use explicit string comparison to avoid empty command errors
-        if [ "$ARG_VERBOSE" = "true" ] && [ -n "$output" ]; then
+        if [ "$verbose" = "true" ] && [ -n "$output" ]; then
             log DEBUG "Container output:\n$(echo "$output" | sed 's/^/  /')"
         fi
         
         if [ $exit_code -ne 0 ]; then
             log ERROR "Command failed in container (Exit Code: $exit_code): $cmd"
-            if [ "$ARG_VERBOSE" != "true" ] && [ -n "$output" ]; then
+            if [ "$verbose" != "true" ] && [ -n "$output" ]; then
                 log ERROR "Container output:\n$(echo "$output" | sed 's/^/  /')"
             fi
             return 1
