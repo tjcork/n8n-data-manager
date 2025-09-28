@@ -2,8 +2,15 @@
 # =========================================================
 # n8n-manager.sh - Interactive backup/restore for n8n
 # =========================================================
-# Main orchestrator for n8n backup and restore operations
-# Now modularized for better maintainability and organization
+# Flexible Backup System:
+# - Workflows: local files or Git repository (user choice)
+# - Credentials: local files or Git repository (user choice)
+# - Local storage with proper permissions (chmod 600)
+# - Archive rotation for local backups (5-10 backups)
+# - .gitignore management for Git repositories
+# - Version control: [New]/[Updated]/[Deleted] commit messages
+# - Folder mirroring: Git structure matches n8n interface
+# =========================================================
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -15,7 +22,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE_PATH="${XDG_CONFIG_HOME:-$HOME/.config}/n8n-manager/config"
 
 # --- Global Configuration Variables ---
-VERSION="4.1.0"  # Updated version for modular architecture
+VERSION="4.1.0"
 DEBUG_TRACE=${DEBUG_TRACE:-false}
 
 # Selected values from interactive mode
@@ -127,7 +134,7 @@ main() {
     load_config
 
     log HEADER "n8n Backup/Restore Manager v$VERSION"
-    log INFO "🏗️ Modular architecture - Flexible backup storage: local files or Git repository"
+    log INFO "🚀 Flexible backup storage: local files or Git repository"
     if [ "$ARG_DRY_RUN" = "true" ]; then log WARN "DRY RUN MODE ENABLED"; fi
     if [ "$ARG_VERBOSE" = "true" ]; then log DEBUG "Verbose mode enabled."; fi
     
@@ -387,7 +394,7 @@ main() {
         log INFO "✅ Local-only operation - skipping GitHub validation"
     fi
 
-    # Execute action using modular functions
+    # Execute the requested action
     log INFO "Starting action: $action"
     case "$action" in
         backup)

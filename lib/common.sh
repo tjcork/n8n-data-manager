@@ -276,8 +276,33 @@ check_github_access() {
 
 dockExec() {
     local container_id="$1"
-    shift
-    docker exec "$container_id" "$@"
+    local cmd="$2"
+    local is_dry_run=$3
+    local output=""
+    local exit_code=0
+
+    if $is_dry_run; then
+        log DRYRUN "Would execute in container $container_id: $cmd"
+        return 0
+    else
+        log DEBUG "Executing in container $container_id: $cmd"
+        output=$(docker exec "$container_id" sh -c "$cmd" 2>&1) || exit_code=$?
+        
+        # Use explicit string comparison to avoid empty command errors
+        if [ "$ARG_VERBOSE" = "true" ] && [ -n "$output" ]; then
+            log DEBUG "Container output:\n$(echo "$output" | sed 's/^/  /')"
+        fi
+        
+        if [ $exit_code -ne 0 ]; then
+            log ERROR "Command failed in container (Exit Code: $exit_code): $cmd"
+            if [ "$ARG_VERBOSE" != "true" ] && [ -n "$output" ]; then
+                log ERROR "Container output:\n$(echo "$output" | sed 's/^/  /')"
+            fi
+            return 1
+        fi
+        
+        return 0
+    fi
 }
 
 timestamp() {
