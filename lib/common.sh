@@ -163,139 +163,242 @@ check_host_dependencies() {
 
 load_config() {
     local file_to_load=""
+    local config_found=false
     
     # Priority: explicit config → local config → user config
-    if [ -n "$config_file" ]; then
+    if [[ -n "$config_file" ]]; then
         file_to_load="$config_file"
-    elif [ -f "$LOCAL_CONFIG_FILE" ]; then
+    elif [[ -f "$LOCAL_CONFIG_FILE" ]]; then
         file_to_load="$LOCAL_CONFIG_FILE"
-    elif [ -f "$USER_CONFIG_FILE" ]; then
+    elif [[ -f "$USER_CONFIG_FILE" ]]; then
         file_to_load="$USER_CONFIG_FILE"
     fi
     
     # Expand tilde if present
-    file_to_load="${file_to_load/#\~/$HOME}"
+    if [[ -n "$file_to_load" ]]; then
+        file_to_load="${file_to_load/#\~/$HOME}"
+    fi
 
-    if [ -f "$file_to_load" ]; then
-        log INFO "Loaded configuration from $file_to_load"
-        source <(grep -vE '^\s*(#|$)' "$file_to_load" 2>/dev/null || true)
+    # Load configuration file if it exists
+    if [[ -f "$file_to_load" ]]; then
+        config_found=true
+        log INFO "Loading configuration from: $file_to_load"
         
-        # Apply config values to runtime variables (only if not already set)
-        github_token=${github_token:-${GITHUB_TOKEN:-}}
-        github_repo=${github_repo:-${GITHUB_REPO:-}}
-        github_branch=${github_branch:-${GITHUB_BRANCH:-main}}
-        container=${container:-${DEFAULT_CONTAINER:-}}
-        default_container=${DEFAULT_CONTAINER:-}
+        # Source the config file safely (filter out comments and empty lines)
+        if ! source <(grep -vE '^\s*(#|$)' "$file_to_load" 2>/dev/null || true); then
+            log ERROR "Failed to load configuration from: $file_to_load"
+            return 1
+        fi
         
-        # Handle boolean configs properly - only set if config file has explicit value
-        if [[ -z "$dated_backups" ]] && [[ -n "${DATED_BACKUPS:-}" ]]; then 
-            case "${DATED_BACKUPS,,}" in  # Convert to lowercase for comparison
+        # === GITHUB SETTINGS ===
+        # Apply config values to global variables (use config file values if runtime vars not set)
+        if [[ -z "$github_token" && -n "${GITHUB_TOKEN:-}" ]]; then
+            github_token="$GITHUB_TOKEN"
+        fi
+        
+        if [[ -z "$github_repo" && -n "${GITHUB_REPO:-}" ]]; then
+            github_repo="$GITHUB_REPO"
+        fi
+        
+        if [[ -z "$github_branch" && -n "${GITHUB_BRANCH:-}" ]]; then
+            github_branch="$GITHUB_BRANCH"
+        else
+            github_branch="${github_branch:-main}"  # Set default if not configured anywhere
+        fi
+        
+        # === CONTAINER SETTINGS ===
+        if [[ -z "$container" && -n "${DEFAULT_CONTAINER:-}" ]]; then
+            container="$DEFAULT_CONTAINER"
+        fi
+        
+        # Keep reference to default container from config
+        if [[ -n "${DEFAULT_CONTAINER:-}" ]]; then
+            default_container="$DEFAULT_CONTAINER"
+        fi
+        
+        # === STORAGE SETTINGS ===
+        # Handle workflows storage with flexible input (numeric or descriptive)
+        if [[ -z "$workflows" && -n "${WORKFLOWS:-}" ]]; then
+            local workflows_config="$WORKFLOWS"
+            case "${workflows_config,,}" in  # Convert to lowercase
+                0|disabled) workflows=0 ;;
+                1|local) workflows=1 ;;
+                2|remote) workflows=2 ;;
+                *) 
+                    log WARN "Invalid WORKFLOWS value in config: '${workflows_config}'. Must be 0/disabled, 1/local, or 2/remote. Using default: 1 (local)"
+                    workflows=1
+                    ;;
+            esac
+        fi
+        
+        # Handle credentials storage with flexible input (numeric or descriptive)
+        if [[ -z "$credentials" && -n "${CREDENTIALS:-}" ]]; then
+            local credentials_config="$CREDENTIALS"
+            case "${credentials_config,,}" in  # Convert to lowercase
+                0|disabled) credentials=0 ;;
+                1|local) credentials=1 ;;
+                2|remote) credentials=2 ;;
+                *) 
+                    log WARN "Invalid CREDENTIALS value in config: '${credentials_config}'. Must be 0/disabled, 1/local, or 2/remote. Using default: 1 (local)"
+                    credentials=1
+                    ;;
+            esac
+        fi
+        
+        # === BOOLEAN SETTINGS ===
+        # Handle dated_backups boolean config
+        if [[ -z "$dated_backups" && -n "${DATED_BACKUPS:-}" ]]; then
+            local dated_backups_config="$DATED_BACKUPS"
+            case "${dated_backups_config,,}" in  # Convert to lowercase
                 true|1|yes|on) dated_backups=true ;;
                 false|0|no|off) dated_backups=false ;;
-                *) log WARN "Invalid DATED_BACKUPS value: '${DATED_BACKUPS}' in config. Using default: false"
-                   dated_backups=false ;;
+                *) 
+                    log WARN "Invalid DATED_BACKUPS value in config: '${dated_backups_config}'. Must be true/false. Using default: false"
+                    dated_backups=false
+                    ;;
             esac
         fi
-        
-        # Storage settings - flexible format: WORKFLOWS=0/1/2 or disabled/local/remote
-        # 0=disabled, 1=local storage, 2=remote Git repository
-        
-        # Load workflows configuration (default: 1=local)
-        workflows_raw=${workflows:-${WORKFLOWS:-1}}
-        case "${workflows_raw,,}" in  # Convert to lowercase
-            0|disabled) workflows=0 ;;
-            1|local) workflows=1 ;;
-            2|remote) workflows=2 ;;
-            *) log WARN "Invalid WORKFLOWS value: '$workflows_raw' in config. Using default: (1) local"
-               workflows=1 ;;
-        esac
-        
-        # Load credentials configuration (default: 1=local)
-        credentials_raw=${credentials:-${CREDENTIALS:-1}}
-        case "${credentials_raw,,}" in  # Convert to lowercase
-            0|disabled) credentials=0 ;;
-            1|local) credentials=1 ;;
-            2|remote) credentials=2 ;;
-            *) log WARN "Invalid CREDENTIALS value: '$credentials_raw' in config. Using default: (1) local"
-               credentials=1 ;;
-        esac
-        
-        local_backup_path=${local_backup_path:-${LOCAL_BACKUP_PATH:-$HOME/n8n-backup}}
-        local_rotation_limit=${local_rotation_limit:-${LOCAL_ROTATION_LIMIT:-10}}
-        
-        log DEBUG "Config loaded - workflows: ($workflows) $(format_storage_value $workflows), credentials: ($credentials) $(format_storage_value $credentials)"
         
         # Handle folder_structure boolean config
-        if [[ -z "$folder_structure" ]] && [[ -n "${FOLDER_STRUCTURE:-}" ]]; then
-            case "${FOLDER_STRUCTURE,,}" in  # Convert to lowercase for comparison
+        if [[ -z "$folder_structure" && -n "${FOLDER_STRUCTURE:-}" ]]; then
+            local folder_structure_config="$FOLDER_STRUCTURE"
+            case "${folder_structure_config,,}" in  # Convert to lowercase
                 true|1|yes|on) folder_structure=true ;;
                 false|0|no|off) folder_structure=false ;;
-                *) log WARN "Invalid FOLDER_STRUCTURE value: '${FOLDER_STRUCTURE}'. Using default: false"
-                   folder_structure=false ;;
+                *) 
+                    log WARN "Invalid FOLDER_STRUCTURE value in config: '${folder_structure_config}'. Must be true/false. Using default: false"
+                    folder_structure=false
+                    ;;
             esac
         fi
         
-        # n8n API settings
-        n8n_base_url=${n8n_base_url:-${N8N_BASE_URL:-}}
-        n8n_api_key=${n8n_api_key:-${N8N_API_KEY:-}}
-        n8n_email=${n8n_email:-${N8N_EMAIL:-}}
-        n8n_password=${n8n_password:-${N8N_PASSWORD:-}}
-        
-        # Other settings
-        restore_type=${restore_type:-${RESTORE_TYPE:-all}}
-        
         # Handle verbose boolean config
-        if [[ -z "$verbose" ]] && [[ -n "${VERBOSE:-}" ]]; then
-            case "${VERBOSE,,}" in  # Convert to lowercase for comparison
+        if [[ -z "$verbose" && -n "${VERBOSE:-}" ]]; then
+            local verbose_config="$VERBOSE"
+            case "${verbose_config,,}" in  # Convert to lowercase
                 true|1|yes|on) verbose=true ;;
                 false|0|no|off) verbose=false ;;
-                *) log WARN "Invalid VERBOSE value: '${VERBOSE}'. Using default: false"
-                   verbose=false ;;
+                *) 
+                    log WARN "Invalid VERBOSE value in config: '${verbose_config}'. Must be true/false. Using default: false"
+                    verbose=false
+                    ;;
             esac
         fi
         
         # Handle dry_run boolean config
-        if [[ -z "$dry_run" ]] && [[ -n "${DRY_RUN:-}" ]]; then
-            case "${DRY_RUN,,}" in  # Convert to lowercase for comparison
+        if [[ -z "$dry_run" && -n "${DRY_RUN:-}" ]]; then
+            local dry_run_config="$DRY_RUN"
+            case "${dry_run_config,,}" in  # Convert to lowercase
                 true|1|yes|on) dry_run=true ;;
                 false|0|no|off) dry_run=false ;;
-                *) log WARN "Invalid DRY_RUN value: '${DRY_RUN}'. Using default: false"
-                   dry_run=false ;;
+                *) 
+                    log WARN "Invalid DRY_RUN value in config: '${dry_run_config}'. Must be true/false. Using default: false"
+                    dry_run=false
+                    ;;
             esac
         fi
         
+        # === PATH SETTINGS ===
+        if [[ -z "$local_backup_path" && -n "${LOCAL_BACKUP_PATH:-}" ]]; then
+            local_backup_path="$LOCAL_BACKUP_PATH"
+        fi
         
-        log_file=${log_file:-${LOG_FILE:-}}
+        if [[ -z "$local_rotation_limit" && -n "${LOCAL_ROTATION_LIMIT:-}" ]]; then
+            local_rotation_limit="$LOCAL_ROTATION_LIMIT"
+        fi
         
-    elif [ -n "$config_file" ]; then
-        log WARN "Configuration file specified but not found: $config_file"
+        # === N8N API SETTINGS ===
+        if [[ -z "$n8n_base_url" && -n "${N8N_BASE_URL:-}" ]]; then
+            n8n_base_url="$N8N_BASE_URL"
+        fi
+        
+        if [[ -z "$n8n_api_key" && -n "${N8N_API_KEY:-}" ]]; then
+            n8n_api_key="$N8N_API_KEY"
+        fi
+        
+        if [[ -z "$n8n_email" && -n "${N8N_EMAIL:-}" ]]; then
+            n8n_email="$N8N_EMAIL"
+        fi
+        
+        if [[ -z "$n8n_password" && -n "${N8N_PASSWORD:-}" ]]; then
+            n8n_password="$N8N_PASSWORD"
+        fi
+        
+        # === OTHER SETTINGS ===
+        if [[ -z "$restore_type" && -n "${RESTORE_TYPE:-}" ]]; then
+            restore_type="$RESTORE_TYPE"
+        fi
+        
+        if [[ -z "$log_file" && -n "${LOG_FILE:-}" ]]; then
+            log_file="$LOG_FILE"
+        fi
+        
+    elif [[ -n "$config_file" ]]; then
+        log WARN "Configuration file specified but not found: '$config_file'"
     else
-        log DEBUG "No configuration file found (checked: local './.config' and '$USER_CONFIG_FILE')"
+        log DEBUG "No configuration file found. Checked: '$LOCAL_CONFIG_FILE' and '$USER_CONFIG_FILE'"
     fi
     
-    if [ -n "$log_file" ] && [[ "$log_file" != /* ]]; then
-        log WARN "Log file path '$log_file' is not absolute. Prepending current directory."
-        log_file="$(pwd)/$log_file"
+    # === SET DEFAULTS FOR UNSET VALUES ===
+    # Only set defaults if no value was provided via command line or config
+    
+    # Set storage defaults
+    if [[ -z "$workflows" ]]; then
+        workflows=1  # Default to local
     fi
     
-    if [ -n "$log_file" ]; then
-        log DEBUG "Ensuring log file exists and is writable: $log_file"
-        mkdir -p "$(dirname "$log_file")" || { log ERROR "Could not create directory for log file: $(dirname "$log_file")"; exit 1; }
-        touch "$log_file" || { log ERROR "Log file is not writable: $log_file"; exit 1; }
-        log INFO "Logging output also to: $log_file"
+    if [[ -z "$credentials" ]]; then
+        credentials=1  # Default to local
     fi
     
-    # Validate folder structure configuration
-    if [[ "${folder_structure_flag:-false}" == "true" ]] || [[ "$folder_structure" == "true" ]]; then
-        if [[ -z "$n8n_base_url" ]]; then
-            log ERROR "Folder structure enabled but n8n URL not provided. Set n8n_base_url via --n8n-url or config file"
+    # Set path defaults
+    if [[ -z "$local_backup_path" ]]; then
+        local_backup_path="$HOME/n8n-backup"
+    fi
+    
+    if [[ -z "$local_rotation_limit" ]]; then
+        local_rotation_limit="10"
+    fi
+    
+    # Set other defaults
+    if [[ -z "$restore_type" ]]; then
+        restore_type="all"
+    fi
+    
+    if [[ -z "$github_branch" ]]; then
+        github_branch="main"
+    fi
+    
+    # === LOG FILE VALIDATION ===
+    if [[ -n "$log_file" ]]; then
+        # Ensure log file path is absolute
+        if [[ "$log_file" != /* ]]; then
+            log WARN "Log file path '$log_file' is not absolute. Converting to absolute path."
+            log_file="$(pwd)/$log_file"
+        fi
+        
+        # Ensure log file directory exists and is writable
+        local log_dir
+        log_dir="$(dirname "$log_file")"
+        if ! mkdir -p "$log_dir" 2>/dev/null; then
+            log ERROR "Cannot create directory for log file: '$log_dir'"
             exit 1
         fi
-        if [[ -z "$n8n_api_key" ]]; then
-            log ERROR "Folder structure enabled but n8n API key not provided. Set n8n_api_key via --n8n-api-key or config file"
+        
+        if ! touch "$log_file" 2>/dev/null; then
+            log ERROR "Log file is not writable: '$log_file'"
             exit 1
         fi
-        log INFO "Folder structure mirroring enabled with n8n instance: $n8n_base_url"
+        
+        log INFO "Logging output to: $log_file"
+    fi
+    
+    # === DEBUG OUTPUT ===
+    if [[ "$config_found" == "true" ]]; then
+        log DEBUG "Configuration loaded successfully"
+        log DEBUG "Storage: workflows=($workflows) $(format_storage_value $workflows), credentials=($credentials) $(format_storage_value $credentials)"
+    else
+        log DEBUG "No configuration file loaded, using defaults"
     fi
 }
 
