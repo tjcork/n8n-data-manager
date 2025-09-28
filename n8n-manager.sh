@@ -172,8 +172,8 @@ main() {
     fi
 
     # Debug logging
-    log DEBUG "Action: $action, Container: $container_id, Repo: $github_repo"
-    log DEBUG "Branch: $branch, Workflows: $workflows_storage, Credentials: $credentials_storage"
+    log DEBUG "Action: $action, Container: $container, Repo: $github_repo"
+    log DEBUG "Branch: $github_branch, Workflows: $workflows_storage, Credentials: $credentials_storage"
     log DEBUG "Local Path: $local_backup_path, Rotation: $local_rotation_limit"
 
     # Check if running non-interactively
