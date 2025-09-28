@@ -176,10 +176,13 @@ load_config() {
         container=${container:-${DEFAULT_CONTAINER:-}}
         default_container=${DEFAULT_CONTAINER:-}
         
-        # Handle boolean configs properly
-        if [[ "$dated_backups" != "true" ]]; then 
-            DATED_BACKUPS_VAL=${DATED_BACKUPS:-false}
-            if [[ "$DATED_BACKUPS_VAL" == "true" ]]; then dated_backups=true; fi
+        # Handle boolean configs properly - only set if config file has explicit value
+        if [[ -z "$dated_backups" ]] && [[ -n "${DATED_BACKUPS:-}" ]]; then 
+            if [[ "${DATED_BACKUPS}" == "true" ]]; then 
+                dated_backups=true
+            elif [[ "${DATED_BACKUPS}" == "false" ]]; then 
+                dated_backups=false
+            fi
         fi
         
         # Storage settings
@@ -189,9 +192,13 @@ load_config() {
         local_rotation_limit=${local_rotation_limit:-${LOCAL_ROTATION_LIMIT:-10}}
         
         # Folder structure settings
-        if [[ "$folder_structure" != "true" ]]; then
-            FOLDER_STRUCTURE_VAL=${FOLDER_STRUCTURE:-false}
-            if [[ "$FOLDER_STRUCTURE_VAL" == "true" ]]; then folder_structure=true; fi
+        # Handle boolean configs properly - only set if config file has explicit value
+        if [[ -z "$folder_structure" ]] && [[ -n "${FOLDER_STRUCTURE:-}" ]]; then
+            if [[ "${FOLDER_STRUCTURE}" == "true" ]]; then
+                folder_structure=true
+            elif [[ "${FOLDER_STRUCTURE}" == "false" ]]; then
+                folder_structure=false
+            fi
         fi
         
         # n8n API settings
@@ -203,15 +210,22 @@ load_config() {
         # Other settings
         restore_type=${restore_type:-${RESTORE_TYPE:-all}}
         
-        if [[ "$verbose" != "true" ]]; then
-            VERBOSE_VAL=${VERBOSE:-false}
-            if [[ "$VERBOSE_VAL" == "true" ]]; then verbose=true; fi
+        # Handle verbose boolean config
+        if [[ -z "$verbose" ]] && [[ -n "${VERBOSE:-}" ]]; then
+            if [[ "${VERBOSE}" == "true" ]]; then
+                verbose=true
+            elif [[ "${VERBOSE}" == "false" ]]; then
+                verbose=false
+            fi
         fi
         
-        # Dry run mode (boolean)
-        if [[ "$dry_run" != "true" ]]; then
-            DRY_RUN_VAL=${DRY_RUN:-false}
-            if [[ "$DRY_RUN_VAL" == "true" ]]; then dry_run=true; fi
+        # Handle dry_run boolean config
+        if [[ -z "$dry_run" ]] && [[ -n "${DRY_RUN:-}" ]]; then
+            if [[ "${DRY_RUN}" == "true" ]]; then
+                dry_run=true
+            elif [[ "${DRY_RUN}" == "false" ]]; then
+                dry_run=false
+            fi
         fi
         
         log_file=${log_file:-${LOG_FILE:-}}

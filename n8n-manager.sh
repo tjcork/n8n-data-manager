@@ -46,14 +46,15 @@ SELECTED_RESTORE_TYPE="all"
 action=""
 container=""
 default_container=""           # Default container from config
-dry_run=false
-verbose=false
+# Control flags
+dry_run=""     # empty = unset, true/false = explicitly configured
+verbose=""     # empty = unset, true/false = explicitly configured
 
 # Git/GitHub settings  
 github_token=""
 github_repo=""
 github_branch="main"
-dated_backups=false
+dated_backups=""  # empty = unset, true/false = explicitly configured
 
 # Storage settings
 workflows_storage=""           # local|remote
@@ -62,7 +63,7 @@ local_backup_path="$HOME/n8n-backup"
 local_rotation_limit="10"
 
 # Advanced features
-folder_structure=false         # Enable n8n API folder structure
+folder_structure=""            # empty = unset, true/false = explicitly configured
 n8n_base_url=""               # Required if folder_structure=true
 n8n_api_key=""                # Optional - session auth used if empty
 n8n_email=""                  # Optional - for session auth
@@ -183,6 +184,12 @@ main() {
     if ! [ -t 0 ]; then
         log DEBUG "Running in non-interactive mode."
         
+        # Set defaults for boolean variables if still empty (not configured)
+        dated_backups=${dated_backups:-false}
+        folder_structure=${folder_structure:-false}
+        verbose=${verbose:-false}
+        dry_run=${dry_run:-false}
+        
         # Basic parameters are always required
         if [ -z "$action" ] || [ -z "$container" ]; then
             log ERROR "Running in non-interactive mode but required parameters are missing."
@@ -284,13 +291,15 @@ main() {
         fi
         log DEBUG "Container selected: $container"
         
-        # Interactive dated backup prompt
-        if [[ "$action" == "backup" ]] && [[ "$dated_backups" != "true" ]]; then
+        # Interactive dated backup prompt (only if not configured)
+        if [[ "$action" == "backup" ]] && [[ -z "$dated_backups" ]]; then
              printf "Create a dated backup (in a timestamped subdirectory)? (yes/no) [no]: "
              local confirm_dated
              read -r confirm_dated
              if [[ "$confirm_dated" == "yes" || "$confirm_dated" == "y" ]]; then
                  dated_backups=true
+             else
+                 dated_backups=false
              fi
         fi
         log DEBUG "Use Dated Backup: $dated_backups"
@@ -341,12 +350,13 @@ main() {
                 fi
             fi
             
-            # Ask about n8n folder structure if workflows are going to remote
-            if [[ "$workflows_storage" == "remote" ]]; then
+            # Ask about n8n folder structure if workflows are going to remote and not already configured
+            if [[ "$workflows_storage" == "remote" ]] && [[ "$folder_structure" == "false" ]]; then
                 printf "Create n8n folder structure in Git repository? (yes/no) [no]: "
                 read -r folder_structure_choice
                 if [[ "$folder_structure_choice" == "yes" || "$folder_structure_choice" == "y" ]]; then
                     folder_structure=true
+                fi
                     
                     # Prompt for n8n API credentials if not already configured
                     if [[ -z "$n8n_base_url" ]]; then
@@ -389,7 +399,6 @@ main() {
                 
                 log INFO "✅ Folder structure enabled with n8n API integration"
             fi
-            fi
         fi
         
         # Get GitHub config only if needed
@@ -409,6 +418,12 @@ main() {
         elif [[ "$action" == "restore" ]]; then
              log INFO "Using restore type: $restore_type"
         fi
+        
+        # Set defaults for any boolean variables still empty after interactive prompts
+        dated_backups=${dated_backups:-false}
+        folder_structure=${folder_structure:-false}
+        verbose=${verbose:-false}
+        dry_run=${dry_run:-false}
     fi
 
     # Final validation
