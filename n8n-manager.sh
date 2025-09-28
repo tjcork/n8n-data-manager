@@ -232,7 +232,11 @@ main() {
         # Sanitize container variable to remove any potential newlines or special chars
         container=$(echo "$container" | tr -d '\n\r' | xargs)
         local found_id
-        found_id=$(docker ps -q --filter "id=$container" --filter "name=$container" | head -n 1)
+        # Try to find container by ID first, then by name
+        found_id=$(docker ps -q --filter "id=$container" | head -n 1)
+        if [ -z "$found_id" ]; then
+            found_id=$(docker ps -q --filter "name=$container" | head -n 1)
+        fi
         if [ -z "$found_id" ]; then
              log ERROR "Specified container '${container}' not found or not running."
              log INFO "Please check that the container exists and is currently running."
@@ -261,7 +265,11 @@ main() {
             # Sanitize container variable to remove any potential newlines or special chars
             container=$(echo "$container" | tr -d '\n\r' | xargs)
             local found_id
-            found_id=$(docker ps -q --filter "id=$container" --filter "name=$container" | head -n 1)
+            # Try to find container by ID first, then by name
+            found_id=$(docker ps -q --filter "id=$container" | head -n 1)
+            if [ -z "$found_id" ]; then
+                found_id=$(docker ps -q --filter "name=$container" | head -n 1)
+            fi
             if [ -z "$found_id" ]; then
                  log ERROR "Specified container '${container}' not found or not running."
                  log INFO "The container may have been stopped or the name/ID may be incorrect."
