@@ -367,6 +367,7 @@ create_n8n_folder_structure() {
            projects_response=$(fetch_n8n_projects_session "$base_url"); then
             
             log SUCCESS "Successfully authenticated and fetched projects"
+            echo "[DEBUG] Raw projects response: $projects_response"
             
             # Extract project ID for workflows query
             local project_id
@@ -382,9 +383,35 @@ except:
     pass
 " 2>/dev/null)
             
+            echo "[DEBUG] Extracted project ID: '$project_id'"
+            
             # Fetch workflows with the project ID
             if workflows_response=$(fetch_workflows_with_folders_session "$base_url" "$project_id"); then
                 log SUCCESS "Successfully fetched workflows for project ID: $project_id"
+                echo "[DEBUG] Raw workflows response: $workflows_response"
+                
+                # Show structure of first few workflows for debugging
+                echo "[DEBUG] Workflow structure analysis:"
+                echo "$workflows_response" | python3 -c "
+import json
+import sys
+try:
+    data = json.load(sys.stdin)
+    workflows = data.get('data', [])
+    print(f'Total workflows in API response: {len(workflows)}')
+    for i, workflow in enumerate(workflows[:3]):  # Show first 3
+        print(f'Workflow {i+1}:')
+        print(f'  id: {workflow.get(\"id\", \"N/A\")}')
+        print(f'  name: {workflow.get(\"name\", \"N/A\")}')
+        print(f'  resource: {workflow.get(\"resource\", \"N/A\")}')
+        print(f'  homeProject: {workflow.get(\"homeProject\", {})}')
+        print(f'  parentFolder: {workflow.get(\"parentFolder\", \"N/A\")}')
+        print(f'  parentFolderId: {workflow.get(\"parentFolderId\", \"N/A\")}')
+        print('---')
+except Exception as e:
+    print(f'Error analyzing workflow structure: {e}')
+" 2>&1
+                
                 using_session_auth=true
             else
                 log ERROR "❌ Failed to fetch workflows even after successful authentication!"
@@ -424,6 +451,9 @@ except Exception as e:
     print(f'Error parsing workflows: {e}', file=sys.stderr)
     print('0')
 " 2>&1)
+    
+    echo "[DEBUG] Raw workflow count: $workflow_count"
+    echo "[DEBUG] Starting workflow processing and folder structure creation..."
     log DEBUG "Found $workflow_count workflows via API"
     
     # Parse projects to create project name mapping
@@ -449,9 +479,12 @@ except Exception as e:
     sys.exit(1)
 " 2>/dev/null)
     
+    echo "[DEBUG] Project mapping result: $project_mapping"
+    
     if [[ -z "$project_mapping" ]]; then
         log WARN "No project mapping found, using fallback structure"
         project_mapping="default|Personal"
+        echo "[DEBUG] Using fallback project mapping: $project_mapping"
     fi
     
     # Track existing workflows for deletion detection
@@ -468,9 +501,14 @@ except Exception as e:
     local new_count=0
     local updated_count=0
     
+    echo "[DEBUG] Starting workflow processing - combining Docker files with API folder structure"
+    echo "[DEBUG] Processing $(echo "$workflow_files" | wc -l) workflow files from Docker container"
+    
     # Process each workflow file
     while IFS= read -r workflow_file; do
         if [[ -z "$workflow_file" ]]; then continue; fi
+        
+        echo "[DEBUG] Processing Docker workflow file: $workflow_file"
         
         # Copy workflow file to temporary location for processing
         local temp_workflow="/tmp/temp_workflow.json"
@@ -501,6 +539,8 @@ except Exception as e:
         
         IFS='|' read -r workflow_id workflow_name <<< "$workflow_info"
         
+        echo "[DEBUG] Extracted from Docker file - ID: '$workflow_id', Name: '$workflow_name'"
+        
         if [[ "$workflow_id" == "ERROR" ]]; then
             log WARN "Failed to extract workflow info from: $workflow_file"
             rm -f "$temp_workflow"
@@ -519,20 +559,35 @@ try:
     workflows = data.get('data', data if isinstance(data, list) else [])
     for workflow in workflows:
         if workflow.get('id') == '$workflow_id':
-            project_id = workflow.get('projectId', 'default')
-            folder_id = workflow.get('folderId', None)
-            folder_name = workflow.get('folderName', None)
-            print(f'{project_id}|{folder_id or \"\"}|{folder_name or \"\"}')
+            # Extract project information
+            home_project = workflow.get('homeProject', {})
+            project_id = home_project.get('id', 'default')
+            
+            # Extract folder information  
+            folder_name = ''
+            if workflow.get('resource') == 'folder':
+                # This IS a folder, not a workflow in a folder
+                continue
+            elif 'parentFolder' in workflow and workflow['parentFolder']:
+                # Workflow is in a folder
+                folder_name = workflow['parentFolder'].get('name', '')
+            
+            parent_folder_id = workflow.get('parentFolderId', '')
+            print(f'{project_id}|{parent_folder_id}|{folder_name}')
             break
     else:
         # Workflow not found in API response, use default
         print('default||')
 except Exception as e:
     print('default||')
+    print(f'Error looking up workflow: {e}', file=sys.stderr)
 " 2>/dev/null)
+        
+        echo "[DEBUG] Workflow $workflow_id API folder info: '$folder_info'"
         
         if [[ -z "$folder_info" ]]; then
             folder_info="default||"
+            echo "[DEBUG] Using fallback folder info for workflow $workflow_id"
         fi
         
         IFS='|' read -r project_id folder_id folder_name <<< "$folder_info"
@@ -549,48 +604,65 @@ except Exception as e:
         # Build the target folder path: ProjectName/[FolderName]/workflow-id.json
         local folder_path="$target_dir/$project_folder_name"
         
+        echo "[DEBUG] Base folder path: '$folder_path'"
+        
         if [[ -n "$folder_name" && "$folder_name" != "" ]]; then
             # Sanitize folder name (remove invalid characters)
             local clean_folder_name=$(echo "$folder_name" | tr -d '[\/:*?"<>|]' | tr ' ' '_')
             folder_path="$folder_path/$clean_folder_name"
+            echo "[DEBUG] Added subfolder: '$clean_folder_name' -> Final path: '$folder_path'"
         fi
         
         # Create folder structure if it doesn't exist
+        echo "[DEBUG] Creating folder structure: '$folder_path'"
         if ! mkdir -p "$folder_path"; then
             log ERROR "Failed to create folder: $folder_path"
             rm -f "$temp_workflow"
             continue
         fi
+        echo "[DEBUG] Successfully created folder structure"
         
         # Determine target filename
         local target_file="$folder_path/${workflow_id}.json"
         local is_new=true
         
+        echo "[DEBUG] Target file: '$target_file'"
+        
         # Check if workflow already exists
         if [[ -f "$target_file" ]]; then
             is_new=false
+            echo "[DEBUG] File exists, checking for changes"
             # Compare files to see if there are actual changes
             if cmp -s "$temp_workflow" "$target_file" 2>/dev/null; then
+                echo "[DEBUG] Workflow $workflow_id unchanged: $workflow_name"
                 log DEBUG "Workflow $workflow_id unchanged: $workflow_name"
                 rm -f "$temp_workflow"
                 continue
             fi
+            echo "[DEBUG] File has changes, will update"
+        else
+            echo "[DEBUG] New file will be created"
         fi
         
         # Copy workflow to target location
+        echo "[DEBUG] Copying workflow from temp to target location"
         if cp "$temp_workflow" "$target_file"; then
             if $is_new; then
                 new_count=$((new_count + 1))
+                echo "[DEBUG] Successfully created new workflow file"
                 log SUCCESS "[New] Workflow $workflow_id: $workflow_name -> $target_file"
             else
                 updated_count=$((updated_count + 1))
+                echo "[DEBUG] Successfully updated existing workflow file"
                 log SUCCESS "[Updated] Workflow $workflow_id: $workflow_name -> $target_file"
             fi
         else
             log ERROR "Failed to copy workflow $workflow_id to: $target_file"
+            echo "[DEBUG] Failed to copy workflow file"
         fi
         
         rm -f "$temp_workflow"
+        echo "[DEBUG] Cleaned up temp file, finished processing workflow $workflow_id"
         
     done <<< "$workflow_files"
     
@@ -632,6 +704,25 @@ except Exception as e:
     log INFO "  • New workflows: $new_count"
     log INFO "  • Updated workflows: $updated_count" 
     log INFO "  • Deleted workflows: $deleted_count"
+    
+    # DEBUG: Show the created folder structure
+    echo "[DEBUG] Final folder structure created in $target_dir:"
+    if [[ -d "$target_dir" ]]; then
+        find "$target_dir" -type d | sort | while read -r dir; do
+            local relative_path="${dir#$target_dir}"
+            if [[ -n "$relative_path" ]]; then
+                echo "[DEBUG]   Folder: $relative_path"
+            fi
+        done
+        
+        echo "[DEBUG] Files created in folder structure:"
+        find "$target_dir" -name "*.json" | sort | while read -r file; do
+            local relative_path="${file#$target_dir}"
+            echo "[DEBUG]   File: $relative_path"
+        done
+    else
+        echo "[DEBUG] Target directory does not exist: $target_dir"
+    fi
     
     # Cleanup session if we used it
     if $using_session_auth; then
@@ -699,6 +790,16 @@ authenticate_n8n_session() {
         
         if [[ "$http_status" == "200" ]]; then
             log SUCCESS "Successfully authenticated with n8n session!"
+            
+            # DEBUG: Show what cookies we got
+            if [[ -f "$N8N_SESSION_COOKIE_FILE" ]]; then
+                echo "[DEBUG] Cookie file contents:"
+                cat "$N8N_SESSION_COOKIE_FILE"
+                echo "[DEBUG] End cookie file contents"
+            else
+                echo "[DEBUG] No cookie file found at: $N8N_SESSION_COOKIE_FILE"
+            fi
+            
             return 0
         elif [[ "$http_status" == "401" ]]; then
             log ERROR "Invalid credentials (HTTP 401) - attempt $attempt/$max_attempts"
@@ -756,9 +857,11 @@ fetch_n8n_projects_session() {
     
     if [[ "$http_status" != "200" ]]; then
         log ERROR "Failed to fetch projects via session (HTTP $http_status)"
+        echo "[DEBUG] Projects API Response Body: $response_body"
         return 1
     fi
     
+    echo "[DEBUG] Projects API Success - Response: $response_body"
     echo "$response_body"
     return 0
 }
@@ -804,9 +907,12 @@ fetch_workflows_with_folders_session() {
     
     if [[ "$http_status" != "200" ]]; then
         log ERROR "Failed to fetch workflows with folders via session (HTTP $http_status)"
+        echo "[DEBUG] Workflows API Response Body: $response_body"
+        echo "[DEBUG] Query URL was: $query_url"
         return 1
     fi
     
+    echo "[DEBUG] Workflows API Success - Response: $response_body"
     echo "$response_body"
     return 0
 }
