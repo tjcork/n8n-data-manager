@@ -811,13 +811,8 @@ EOF
                 log DEBUG "  Found: $file"
             done
             
-            # Always add the .gitignore
-            if ! git add .gitignore; then
-                log ERROR "Git add failed for .gitignore"
-                cd - > /dev/null || true
-                rm -rf "$tmp_dir"
-                return 1
-            fi
+            # NOTE: .gitignore is created but NOT added to Git repository
+            # This prevents sensitive data from being committed while keeping .gitignore local only
             
             if [ "$use_dated_backup" = "true" ]; then
                 # For dated backups, add the entire backup subdirectory with folder structure

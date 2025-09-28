@@ -364,12 +364,33 @@ create_n8n_folder_structure() {
         
         # Authenticate and fetch data using session
         if authenticate_n8n_session "$base_url" "$email" "$password" 3 && \
-           projects_response=$(fetch_n8n_projects_session "$base_url" 2>/dev/null) && \
-           workflows_response=$(fetch_workflows_with_folders_session "$base_url" 2>/dev/null); then
-            log SUCCESS "Successfully fetched data using session authentication"
-            log DEBUG "Projects session response received: $(echo "$projects_response" | wc -c) characters"
-            log DEBUG "Workflows session response received: $(echo "$workflows_response" | wc -c) characters"
-            using_session_auth=true
+           projects_response=$(fetch_n8n_projects_session "$base_url"); then
+            
+            log SUCCESS "Successfully authenticated and fetched projects"
+            
+            # Extract project ID for workflows query
+            local project_id
+            project_id=$(echo "$projects_response" | python3 -c "
+import json
+import sys
+try:
+    data = json.load(sys.stdin)
+    if isinstance(data, dict) and 'data' in data and data['data']:
+        project = data['data'][0]  # Get first project
+        print(project.get('id', ''))
+except:
+    pass
+" 2>/dev/null)
+            
+            # Fetch workflows with the project ID
+            if workflows_response=$(fetch_workflows_with_folders_session "$base_url" "$project_id"); then
+                log SUCCESS "Successfully fetched workflows for project ID: $project_id"
+                using_session_auth=true
+            else
+                log ERROR "❌ Failed to fetch workflows even after successful authentication!"
+                cleanup_n8n_session
+                return 1
+            fi
         else
             log ERROR "❌ Session authentication failed after multiple attempts!"
             log ERROR "Cannot proceed with folder structure creation."
@@ -642,7 +663,6 @@ authenticate_n8n_session() {
     local http_status
     
     while [[ $attempt -le $max_attempts ]]; do
-        log DEBUG "Authenticating with n8n session (attempt $attempt/$max_attempts)"
         
         # If this is a retry, prompt for new credentials
         if [[ $attempt -gt 1 ]]; then
@@ -654,12 +674,17 @@ authenticate_n8n_session() {
             echo  # Add newline after hidden input
         fi
         
-        # Attempt to login and get session cookie
+        # Attempt to login and get session cookie with proper browser headers
         if ! auth_response=$(curl -s -w "\n%{http_code}" -c "$N8N_SESSION_COOKIE_FILE" \
             -X POST \
             -H "Content-Type: application/json" \
+            -H "Accept: application/json, text/plain, */*" \
+            -H "Accept-Language: en" \
+            -H "Sec-Fetch-Dest: empty" \
+            -H "Sec-Fetch-Mode: cors" \
+            -H "Sec-Fetch-Site: same-origin" \
             -d "{\"emailOrLdapLoginId\":\"$email\",\"password\":\"$password\"}" \
-            "$base_url/rest/login" 2>/dev/null); then
+            "$base_url/rest/login"); then
             log ERROR "Failed to connect to n8n login endpoint (attempt $attempt/$max_attempts)"
             if [[ $attempt -eq $max_attempts ]]; then
                 log ERROR "Max attempts reached. Please check network connectivity and n8n server status."
@@ -689,7 +714,6 @@ authenticate_n8n_session() {
             return 1
         else
             log ERROR "Login failed with HTTP $http_status (attempt $attempt/$max_attempts)"
-            log DEBUG "Response: $response_body"
             if [[ $attempt -eq $max_attempts ]]; then
                 log ERROR "Max attempts reached. Server may be experiencing issues."
                 return 1
@@ -711,14 +735,18 @@ authenticate_n8n_session() {
 fetch_n8n_projects_session() {
     local base_url="$1"
     
-    log DEBUG "Fetching projects from n8n REST API using session..."
-    
     # Clean up URL
     base_url="${base_url%/}"
     
     local response
     local http_status
-    if ! response=$(curl -s -w "\n%{http_code}" -b "$N8N_SESSION_COOKIE_FILE" "$base_url/rest/projects" 2>/dev/null); then
+    if ! response=$(curl -s -w "\n%{http_code}" -b "$N8N_SESSION_COOKIE_FILE" \
+        -H "Accept: application/json, text/plain, */*" \
+        -H "Accept-Language: en" \
+        -H "Sec-Fetch-Dest: empty" \
+        -H "Sec-Fetch-Mode: cors" \
+        -H "Sec-Fetch-Site: same-origin" \
+        "$base_url/rest/projects"); then
         log ERROR "Failed to fetch projects from n8n REST API"
         return 1
     fi
@@ -738,15 +766,35 @@ fetch_n8n_projects_session() {
 # Fetch workflows with folders using session authentication (REST API)
 fetch_workflows_with_folders_session() {
     local base_url="$1"
-    
-    log DEBUG "Fetching workflows with folders from n8n REST API using session..."
+    local project_id="$2"
     
     # Clean up URL
     base_url="${base_url%/}"
     
+    # Construct the query URL with proper parameters (URL encoded)
+    local query_url="$base_url/rest/workflows?includeScopes=true&includeFolders=true"
+    
+    # Add project filter if provided, otherwise get all workflows
+    if [[ -n "$project_id" ]]; then
+        # Filter by specific project: isArchived=false, parentFolderId=0, projectId=<id>
+        query_url="${query_url}&filter=%7B%22isArchived%22%3Afalse%2C%22parentFolderId%22%3A%220%22%2C%22projectId%22%3A%22${project_id}%22%7D"
+    else
+        # Get all non-archived workflows
+        query_url="${query_url}&filter=%7B%22isArchived%22%3Afalse%7D"
+    fi
+    
+    # Add pagination and sorting
+    query_url="${query_url}&skip=0&take=1000&sortBy=updatedAt%3Adesc"
+    
     local response
     local http_status
-    if ! response=$(curl -s -w "\n%{http_code}" -b "$N8N_SESSION_COOKIE_FILE" "$base_url/rest/workflows?includeFolders=true" 2>/dev/null); then
+    if ! response=$(curl -s -w "\n%{http_code}" -b "$N8N_SESSION_COOKIE_FILE" \
+        -H "Accept: application/json, text/plain, */*" \
+        -H "Accept-Language: en" \
+        -H "Sec-Fetch-Dest: empty" \
+        -H "Sec-Fetch-Mode: cors" \
+        -H "Sec-Fetch-Site: same-origin" \
+        "$query_url"); then
         log ERROR "Failed to fetch workflows from n8n REST API"
         return 1
     fi
