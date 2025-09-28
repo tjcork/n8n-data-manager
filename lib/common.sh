@@ -45,6 +45,17 @@ git_push() {
     return $?
 }
 
+# --- Storage Value Formatting ---
+format_storage_value() {
+    local value="$1"
+    case "$value" in
+        0) echo "disabled" ;;
+        1) echo "local" ;;
+        2) echo "remote" ;;
+        *) echo "unknown" ;;
+    esac
+}
+
 # --- Debug/Trace Function ---
 trace_cmd() {
     if $DEBUG_TRACE; then
@@ -166,7 +177,7 @@ load_config() {
     file_to_load="${file_to_load/#\~/$HOME}"
 
     if [ -f "$file_to_load" ]; then
-        log INFO "Loading configuration from $file_to_load..."
+        log INFO "Loaded configuration from $file_to_load"
         source <(grep -vE '^\s*(#|$)' "$file_to_load" 2>/dev/null || true)
         
         # Apply config values to runtime variables (only if not already set)
@@ -181,15 +192,38 @@ load_config() {
             case "${DATED_BACKUPS,,}" in  # Convert to lowercase for comparison
                 true|1|yes|on) dated_backups=true ;;
                 false|0|no|off) dated_backups=false ;;
-                *) log WARN "Invalid DATED_BACKUPS value: ${DATED_BACKUPS}. Using false."; dated_backups=false ;;
+                *) log WARN "Invalid DATED_BACKUPS value: ${DATED_BACKUPS}. Using false."
+                   dated_backups=false ;;
             esac
         fi
         
-        # Storage settings
-        workflows_storage=${workflows_storage:-${WORKFLOWS_STORAGE:-}}
-        credentials_storage=${credentials_storage:-${CREDENTIALS_STORAGE:-local}}
+        # Storage settings - flexible format: WORKFLOWS=0/1/2 or disabled/local/remote
+        # 0=disabled, 1=local storage, 2=remote Git repository
+        
+        # Load workflows configuration (default: 1=local)
+        workflows_raw=${workflows:-${WORKFLOWS:-1}}
+        case "${workflows_raw,,}" in  # Convert to lowercase
+            0|disabled) workflows=0 ;;
+            1|local) workflows=1 ;;
+            2|remote) workflows=2 ;;
+            *) log WARN "Invalid workflows value: $workflows_raw. Using default (1) local"
+               workflows=1 ;;
+        esac
+        
+        # Load credentials configuration (default: 1=local)
+        credentials_raw=${credentials:-${CREDENTIALS:-1}}
+        case "${credentials_raw,,}" in  # Convert to lowercase
+            0|disabled) credentials=0 ;;
+            1|local) credentials=1 ;;
+            2|remote) credentials=2 ;;
+            *) log WARN "Invalid credentials value: $credentials_raw. Using default (1) local"
+               credentials=1 ;;
+        esac
+        
         local_backup_path=${local_backup_path:-${LOCAL_BACKUP_PATH:-$HOME/n8n-backup}}
         local_rotation_limit=${local_rotation_limit:-${LOCAL_ROTATION_LIMIT:-10}}
+        
+        log DEBUG "Config loaded - workflows: ($workflows) $(format_storage_value $workflows), credentials: ($credentials) $(format_storage_value $credentials)"
         
         # Folder structure settings
         # Handle boolean configs properly - only set if config file has explicit value
@@ -197,7 +231,8 @@ load_config() {
             case "${FOLDER_STRUCTURE,,}" in  # Convert to lowercase for comparison
                 true|1|yes|on) folder_structure=true ;;
                 false|0|no|off) folder_structure=false ;;
-                *) log WARN "Invalid FOLDER_STRUCTURE value: ${FOLDER_STRUCTURE}. Using false."; folder_structure=false ;;
+                *) log WARN "Invalid FOLDER_STRUCTURE value: ${FOLDER_STRUCTURE}. Using false."
+                   folder_structure=false ;;
             esac
         fi
         
@@ -215,7 +250,8 @@ load_config() {
             case "${VERBOSE,,}" in  # Convert to lowercase for comparison
                 true|1|yes|on) verbose=true ;;
                 false|0|no|off) verbose=false ;;
-                *) log WARN "Invalid VERBOSE value: ${VERBOSE}. Using false."; verbose=false ;;
+                *) log WARN "Invalid VERBOSE value: ${VERBOSE}. Using false."
+                   verbose=false ;;
             esac
         fi
         
@@ -224,14 +260,15 @@ load_config() {
             case "${DRY_RUN,,}" in  # Convert to lowercase for comparison
                 true|1|yes|on) dry_run=true ;;
                 false|0|no|off) dry_run=false ;;
-                *) log WARN "Invalid DRY_RUN value: ${DRY_RUN}. Using false."; dry_run=false ;;
+                *) log WARN "Invalid DRY_RUN value: ${DRY_RUN}. Using false."
+                   dry_run=false ;;
             esac
         fi
         
         log_file=${log_file:-${LOG_FILE:-}}
         
     elif [ -n "$config_file" ]; then
-        log WARN "Configuration file specified but not found: $file_to_load"
+        log WARN "Configuration file specified but not found: $config_file"
     else
         log DEBUG "No configuration file found (checked: local './.config' and '$USER_CONFIG_FILE')"
     fi
@@ -249,7 +286,7 @@ load_config() {
     fi
     
     # Validate folder structure configuration
-    if [[ "$folder_structure" == "true" ]]; then
+    if [[ "${folder_structure_flag:-false}" == "true" ]] || [[ "$folder_structure" == "true" ]]; then
         if [[ -z "$n8n_base_url" ]]; then
             log ERROR "Folder structure enabled but n8n URL not provided. Set n8n_base_url via --n8n-url or config file"
             exit 1

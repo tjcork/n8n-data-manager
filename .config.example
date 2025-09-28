@@ -27,11 +27,19 @@ GITHUB_BRANCH="main"
 # Create timestamped backup directories (true/false, defaults to false)
 DATED_BACKUPS=true
 
-# Workflows storage location: "local" or "remote" (Git repo)
-WORKFLOWS_STORAGE="local"
+# Workflows backup mode: 0/disabled, 1/local, or 2/remote
+# Both numeric (0/1/2) and descriptive (disabled/local/remote) values are supported
+# - 0/disabled: Skip workflow backup entirely
+# - 1/local: Store workflows in local secure storage only
+# - 2/remote: Store workflows in Git repository (shareable but less secure)
+WORKFLOWS=1
 
-# Credentials storage location: "local" (secure) or "remote" (Git repo)  
-CREDENTIALS_STORAGE="local"
+# Credentials backup mode: 0/disabled, 1/local, or 2/remote
+# Both numeric (0/1/2) and descriptive (disabled/local/remote) values are supported
+# - 0/disabled: Skip credential backup entirely  
+# - 1/local: Store credentials in local secure storage only (recommended)
+# - 2/remote: Store credentials in Git repository (use with caution for security)
+CREDENTIALS=1
 
 # === LOCAL BACKUP SETTINGS ===
 # Custom local backup directory path (defaults to ~/n8n-backup)

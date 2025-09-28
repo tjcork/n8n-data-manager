@@ -66,7 +66,7 @@ commit_individual_workflow() {
     
     # Determine commit prefix
     local prefix="updated"
-    if [[ "$is_new" == "true" ]]; then
+    if [[ $is_new == true ]]; then
         prefix="new"
     fi
     

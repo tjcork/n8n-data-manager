@@ -284,7 +284,7 @@ generate_workflow_commit_message() {
     # Count changes by examining Git status
     local new_files updated_files deleted_files
     
-    if [[ "$is_dry_run" == "true" ]]; then
+    if [[ $is_dry_run == true ]]; then
         echo "Backup workflow changes (dry run)"
         return 0
     fi
@@ -338,24 +338,51 @@ backup() {
     local github_token="$2"
     local github_repo="$3"
     local branch="$4"
-    local use_dated_backup=$5
-    local is_dry_run=$6
-    local workflows_storage="${7:-local}"  # Where to store workflows (default: local)
-    local credentials_storage="${8:-local}"  # Where to store credentials (default: local)
-    local local_backup_path="${9:-$HOME/n8n-backup}"  # Local backup path (default: ~/n8n-backup)
-    local local_rotation_limit="${10:-10}"  # Rotation limit (default: 10)
-
-    log HEADER "Performing Backup - Workflows: $workflows_storage, Credentials: $credentials_storage"
+    local use_dated_backup=$5      # Boolean: true/false instead of string
+    local is_dry_run=$6            # Boolean: true/false instead of string  
+    local workflows=$7             # Numeric: 0=disabled, 1=local, 2=remote
+    local credentials=$8           # Numeric: 0=disabled, 1=local, 2=remote
+    local folder_structure_flag=$9 # Boolean: true if folder structure enabled
+    local local_backup_path="${10:-$HOME/n8n-backup}"  # Local backup path (default: ~/n8n-backup)
+    local local_rotation_limit="${11:-10}"  # Local rotation limit (default: 10)
+    
+    # Derive storage descriptions for logging
+    local workflows_desc="disabled"
+    local credentials_desc="disabled"
+    case "$workflows" in
+        0) workflows_desc="disabled" ;;
+        1) workflows_desc="local" ;;
+        2) workflows_desc="remote" ;;
+    esac
+    case "$credentials" in
+        0) credentials_desc="disabled" ;;
+        1) credentials_desc="local" ;;
+        2) credentials_desc="remote" ;;
+    esac
+    
+    # Derive convenience boolean flags for easier logic
+    local workflows_enabled=$( [[ $workflows != 0 ]] && echo true || echo false )
+    local credentials_enabled=$( [[ $credentials != 0 ]] && echo true || echo false )
+    local needs_github=$( [[ $workflows == 2 ]] || [[ $credentials == 2 ]] && echo true || echo false )
+    local needs_local_path=$( [[ $workflows == 1 ]] || [[ $credentials == 1 ]] && echo true || echo false )
+    
+    log HEADER "Performing Backup - Workflows: $workflows_desc, Credentials: $credentials_desc"
     if $is_dry_run; then log WARN "DRY RUN MODE ENABLED - NO CHANGES WILL BE MADE"; fi
     
+    # Validate that at least one backup type is enabled
+    if [[ $workflows == 0 && $credentials == 0 ]]; then
+        log ERROR "Both workflows and credentials are disabled. Nothing to backup!"
+        return 1
+    fi
+    
     # Show security warnings
-    if [[ "$workflows_storage" == "remote" ]]; then
+    if [[ $workflows == 2 ]]; then
         log WARN "⚠️  Workflows will be stored in Git repository"
     fi
-    if [[ "$credentials_storage" == "remote" ]]; then
+    if [[ $credentials == 2 ]]; then
         log WARN "⚠️  SECURITY WARNING: Credentials will be pushed to Git repository!"
     fi
-    if [[ "$workflows_storage" == "local" && "$credentials_storage" == "local" ]]; then
+    if [[ $workflows == 1 && $credentials == 1 ]]; then
         log INFO "🔒 Security: Both workflows and credentials stored locally only"
     fi
 
@@ -364,7 +391,7 @@ backup() {
     local local_backup_dir="$base_backup_dir"
     
     # Apply timestamping to local storage if requested
-    if [[ "$use_dated_backup" == "true" ]] && [[ "$workflows_storage" == "local" || "$credentials_storage" == "local" ]]; then
+    if [[ $use_dated_backup == true ]] && [[ $needs_local_path == true ]]; then
         local backup_timestamp=$(date +"%Y-%m-%d_%H-%M-%S")
         local_backup_dir="$base_backup_dir/$backup_timestamp"
         log INFO "📅 Using timestamped local backup directory: $backup_timestamp"
@@ -439,9 +466,9 @@ backup() {
     local export_failed=false
     local no_data_found=false
 
-    # Export workflows using individual file method for Git restructuring
+    # Export workflows based on storage mode
     local container_workflows_dir="/tmp/workflows"
-    if [[ "$workflows_storage" == "remote" ]]; then
+    if [[ $workflows == 2 ]]; then
         log INFO "Exporting individual workflow files for Git folder structure..."
         if ! dockExec "$container_id" "mkdir -p $container_workflows_dir" false; then
             log ERROR "Failed to create workflows directory in container"
@@ -456,7 +483,7 @@ backup() {
                 export_failed=true
             fi
         fi
-    else
+    elif [[ $workflows == 1 ]]; then
         log INFO "Exporting workflows as single file for local storage..."
         if ! dockExec "$container_id" "n8n export:workflow --all --output=$container_workflows" false; then 
             # Check if the error is due to no workflows existing
@@ -468,11 +495,13 @@ backup() {
                 export_failed=true
             fi
         fi
+    else
+        log INFO "Workflows backup disabled - skipping workflow export"
     fi
 
-    # Export credentials
-    if [[ "$credentials_storage" == "local" || "$credentials_storage" == "remote" ]]; then
-        log INFO "Exporting credentials for $credentials_storage storage..."
+    # Export credentials based on storage mode
+    if [[ $credentials != 0 ]]; then
+        log INFO "Exporting credentials for $credentials_desc storage..."
         if ! dockExec "$container_id" "n8n export:credentials --all --decrypted --output=$container_credentials" false; then 
             # Check if the error is due to no credentials existing
             if docker exec "$container_id" n8n list credentials 2>&1 | grep -q "No credentials found"; then
@@ -484,7 +513,7 @@ backup() {
             fi
         fi
     else
-        log INFO "Credentials export skipped (not requested)"
+        log INFO "Credentials backup disabled - skipping credentials export"
     fi
 
     if $export_failed; then
@@ -503,7 +532,7 @@ backup() {
     log HEADER "Storing Data Locally"
     
     # Handle workflows locally if requested
-    if [[ "$workflows_storage" == "local" ]] && docker exec "$container_id" test -f "$container_workflows"; then
+    if [[ $workflows == 1 ]] && docker exec "$container_id" test -f "$container_workflows"; then
         log INFO "Saving workflows to local storage..."
         if $is_dry_run; then
             log DRYRUN "Would copy workflows from container to local storage: $local_workflows_file"
@@ -528,7 +557,7 @@ backup() {
                 return 1
             fi
         fi
-    elif [[ "$workflows_storage" == "local" ]]; then
+    elif [[ $workflows == 1 ]]; then
         log INFO "No workflows file found in container"
         if $no_data_found; then
             if ! $is_dry_run; then
@@ -542,7 +571,7 @@ backup() {
     fi
     
     # Handle credentials locally  
-    if [[ "$credentials_storage" == "local" ]] && docker exec "$container_id" test -f "$container_credentials"; then
+    if [[ $credentials == 1 ]] && docker exec "$container_id" test -f "$container_credentials"; then
         log INFO "Saving credentials to local secure storage..."
         if $is_dry_run; then
             log DRYRUN "Would copy credentials from container to local storage: $local_credentials_file"
@@ -566,7 +595,7 @@ backup() {
                 return 1
             fi
         fi
-    elif [[ "$credentials_storage" == "local" ]]; then
+    elif [[ $credentials == 1 ]]; then
         log INFO "No credentials file found in container"
         if $no_data_found; then
             if ! $is_dry_run; then
@@ -600,7 +629,7 @@ backup() {
     log SUCCESS "Local backup operations completed successfully"
     
     # --- Git Repository Backup (Conditional) ---
-    if [[ "$workflows_storage" == "remote" ]] || [[ "$credentials_storage" == "remote" ]]; then
+    if [[ $workflows == 2 ]] || [[ $credentials == 2 ]]; then
         local tmp_dir="/tmp/n8n-backup-git-$$"
         if $is_dry_run; then
             log DRYRUN "Would create temporary Git directory: $tmp_dir"
@@ -631,7 +660,7 @@ backup() {
 
         # Determine target directory structure
         local target_dir="$tmp_dir"
-        if [ "$use_dated_backup" = "true" ]; then
+        if [[ $use_dated_backup == true ]]; then
             target_dir="$tmp_dir/$backup_timestamp"
             if ! $is_dry_run; then
                 mkdir -p "$target_dir"
@@ -644,11 +673,11 @@ backup() {
         local copy_status="success"
         
         # Handle workflows for remote storage
-        if [[ "$workflows_storage" == "remote" ]] && docker exec "$container_id" test -f "$container_workflows"; then
+        if [[ $workflows == 2 ]] && docker exec "$container_id" test -f "$container_workflows"; then
             log INFO "Preparing workflows for Git repository..."
-            if [[ "$folder_structure" == "true" ]]; then
+            if [[ $folder_structure_flag == true ]]; then
                 # Create folder structure in Git repo
-                if $is_dry_run; then
+                if [[ $is_dry_run == true ]]; then
                     log DRYRUN "Would create n8n folder structure in Git repository"
                 else
                     echo "[DEBUG] Creating n8n folder structure using API..."
@@ -688,7 +717,7 @@ backup() {
         fi
 
         # Handle credentials for remote storage
-        if [[ "$credentials_storage" == "remote" ]] && docker exec "$container_id" test -f "$container_credentials"; then
+        if [[ $credentials == 2 ]] && docker exec "$container_id" test -f "$container_credentials"; then
             log WARN "⚠️ Storing credentials in Git repository (less secure option)"
             if $is_dry_run; then
                 log DRYRUN "Would copy credentials to Git repository: $target_dir/credentials.json"
@@ -707,7 +736,7 @@ backup() {
         if $is_dry_run; then
             log DRYRUN "Would create .gitignore file"
         else
-            if [[ "$credentials_storage" == "remote" ]]; then
+            if [[ $credentials == 2 ]]; then
                 # Credential-inclusive mode: allow credentials but exclude environment
                 cat > "$gitignore_file" << 'EOF'
 # n8n Environment Security - Exclude sensitive environment data
@@ -771,7 +800,7 @@ EOF
         dockExec "$container_id" "rm -f $container_workflows $container_credentials $container_env" "$is_dry_run" || log WARN "Could not clean up temporary files in container."
 
         # Git Commit and Push
-        if [[ "$credentials_storage" == "remote" ]]; then
+        if [[ $credentials == 2 ]]; then
             log HEADER "Committing Workflows and Credentials to Git"
         else
             log HEADER "Committing Workflows to Git (Credentials Excluded)"
@@ -780,7 +809,7 @@ EOF
         
         if $is_dry_run; then
             log DRYRUN "Would add workflow folder structure and files to Git index"
-            if [[ "$credentials_storage" == "remote" ]]; then
+            if [[ $credentials == 2 ]]; then
                 log DRYRUN "Would also add credentials file to Git index"
             fi
         else
@@ -800,7 +829,7 @@ EOF
             # NOTE: .gitignore is created but NOT added to Git repository
             # This prevents sensitive data from being committed while keeping .gitignore local only
             
-            if [ "$use_dated_backup" = "true" ]; then
+            if [[ $use_dated_backup == true ]]; then
                 # For dated backups, add the entire backup subdirectory with folder structure
                 if [ -d "$backup_timestamp" ]; then
                     log DEBUG "Adding dated backup directory with folder structure: $backup_timestamp"
@@ -816,7 +845,7 @@ EOF
                 fi
             else
                 # Standard repo-root backup - add workflow files and folders specifically
-                if [[ "$workflows_storage" == "remote" ]]; then
+                if [[ $workflows == 2 ]]; then
                     log DEBUG "Adding workflow folder structure to repository root"
                     
                     # Add workflow folders and JSON files specifically
@@ -841,7 +870,7 @@ EOF
                 fi
                 
                 # Handle credentials separately if needed
-                if [[ "$credentials_storage" == "remote" ]] && [ -f "credentials.json" ]; then
+                if [[ $credentials == 2 ]] && [ -f "credentials.json" ]; then
                     log DEBUG "Adding credentials file to Git"
                     if ! git add credentials.json; then
                         log ERROR "Git add failed for credentials file"
@@ -853,9 +882,9 @@ EOF
             fi
             
             # Success message
-            if [[ "$workflows_storage" == "remote" && "$credentials_storage" == "remote" ]]; then
+            if [[ $workflows == 2 && $credentials == 2 ]]; then
                 log SUCCESS "Workflow folder structure and credentials added to Git successfully"
-            elif [[ "$workflows_storage" == "remote" ]]; then
+            elif [[ $workflows == 2 ]]; then
                 log SUCCESS "Workflow folder structure added to Git successfully (credentials excluded)"
             else
                 log SUCCESS "Files added to Git successfully"
@@ -868,10 +897,10 @@ EOF
 
         # Generate smart commit message
         local commit_msg
-        if [[ "$workflows_storage" == "remote" ]]; then
+        if [[ $workflows == 2 ]]; then
             local workflow_changes
             workflow_changes=$(generate_workflow_commit_message "$target_dir" "$is_dry_run")
-            if [[ "$credentials_storage" == "remote" ]]; then
+            if [[ $credentials == 2 ]]; then
                 commit_msg="$workflow_changes + credentials"
             else
                 commit_msg="$workflow_changes"
@@ -886,7 +915,7 @@ EOF
         n8n_ver=$(docker exec "$container_id" n8n --version 2>/dev/null | grep -o 'n8n@[0-9.]*' | cut -d'@' -f2 || echo "unknown")
         commit_msg="$commit_msg (n8n v$n8n_ver)"
         
-        if [ "$use_dated_backup" = "true" ]; then
+        if [[ $use_dated_backup == true ]]; then
             commit_msg="$commit_msg [$backup_timestamp]"
         fi
         
@@ -937,19 +966,19 @@ EOF
     # --- Final Summary ---
     log HEADER "Backup Summary"
     
-    if [[ "$workflows_storage" == "remote" && "$credentials_storage" == "remote" ]]; then
+    if [[ $workflows == 2 && $credentials == 2 ]]; then
         log SUCCESS "✅ Complete backup successful!"
         log SUCCESS "📄 Workflows: Stored in GitHub repository with folder structure"
         log SUCCESS "🔒 Credentials: Stored in GitHub repository (less secure)"
-    elif [[ "$workflows_storage" == "remote" && "$credentials_storage" == "local" ]]; then
+    elif [[ $workflows == 2 && $credentials == 1 ]]; then
         log SUCCESS "✅ Hybrid backup successful!"
         log SUCCESS "📄 Workflows: Stored in GitHub repository with folder structure"
         log SUCCESS "🔒 Credentials: Stored securely in local storage ($local_credentials_file)"
-    elif [[ "$workflows_storage" == "local" && "$credentials_storage" == "local" ]]; then
+    elif [[ $workflows == 1 && $credentials == 1 ]]; then
         log SUCCESS "✅ Local backup successful!"
         log SUCCESS "📄 Workflows: Stored securely in local storage ($local_workflows_file)"
         log SUCCESS "🔒 Credentials: Stored securely in local storage ($local_credentials_file)"
-    elif [[ "$workflows_storage" == "local" && "$credentials_storage" == "remote" ]]; then
+    elif [[ $workflows == 1 && $credentials == 2 ]]; then
         log SUCCESS "✅ Mixed backup successful!"
         log SUCCESS "📄 Workflows: Stored securely in local storage ($local_workflows_file)"
         log SUCCESS "🔒 Credentials: Stored in GitHub repository (less secure)"
@@ -962,7 +991,7 @@ EOF
     fi
     
     # Display rotation information for local backups
-    if [[ "$workflows_storage" == "local" ]] || [[ "$credentials_storage" == "local" ]]; then
+    if [[ $workflows == 1 ]] || [[ $credentials == 1 ]]; then
         if [[ "$local_rotation_limit" == "0" ]]; then
             log INFO "🔄 Rotation: Disabled (current backup overwrites previous)"
         elif [[ "$local_rotation_limit" == "unlimited" ]]; then

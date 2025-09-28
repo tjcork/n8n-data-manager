@@ -8,6 +8,64 @@
 # Source common utilities
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
+show_config_summary() {
+    log INFO "📋 Current Configuration:"
+    
+    # Backup configuration - use numeric system if available
+    local workflows_desc="not set"
+    local credentials_desc="not set"
+    
+    # Determine workflows description from numeric value
+    if [[ -n "${workflows:-}" ]]; then
+        case "$workflows" in
+            0) workflows_desc="disabled" ;;
+            1) workflows_desc="local secure storage" ;;
+            2) 
+                if [[ "${folder_structure_flag:-false}" == "true" ]] || [[ "$folder_structure" == "true" ]]; then
+                    workflows_desc="remote Git repository (with n8n folder structure)"
+                else
+                    workflows_desc="remote Git repository"
+                fi
+                ;;
+        esac
+    fi
+    
+    # Determine credentials description from numeric value  
+    if [[ -n "${credentials:-}" ]]; then
+        case "$credentials" in
+            0) credentials_desc="disabled" ;;
+            1) credentials_desc="local secure storage (recommended)" ;;
+            2) credentials_desc="remote Git repository (security risk!)" ;;
+        esac
+    fi
+    
+    log INFO "   📄 Workflows: $workflows_desc"
+    log INFO "   🔒 Credentials: $credentials_desc"
+    
+    if [[ -n "$github_repo" ]]; then
+        log INFO "   📚 GitHub: $github_repo (branch: ${github_branch:-main})"
+    fi
+    
+    if [[ "${dated_backups_flag:-false}" == "true" ]] || [[ "$dated_backups" == "true" ]]; then
+        log INFO "   📅 Timestamped backups: enabled"
+    else
+        log INFO "   📅 Timestamped backups: disabled"
+    fi
+    
+    # Check if local storage is needed (when workflows=1 or credentials=1)
+    if [[ "${needs_local_path:-}" == "true" ]] || [[ "$workflows" == "1" ]] || [[ "$credentials" == "1" ]]; then
+        log INFO "   💾 Local path: $local_backup_path"
+        if [[ "$local_rotation_limit" == "0" ]]; then
+            log INFO "   🔄 Local rotation: overwrite mode"
+        elif [[ "$local_rotation_limit" == "unlimited" ]]; then
+            log INFO "   🔄 Local rotation: keep all"
+        else
+            log INFO "   🔄 Local rotation: keep $local_rotation_limit most recent"
+        fi
+    fi
+    echo
+}
+
 show_help() {
     cat << EOF
 Usage: $(basename "$0") [OPTIONS]
@@ -22,8 +80,8 @@ Options:
   --repo <user/repo>    GitHub repository (e.g., 'myuser/n8n-backup').
   --branch <branch>     GitHub branch to use (defaults to 'main').
   --dated               Create timestamped subdirectory for backups (e.g., YYYY-MM-DD_HH-MM-SS/).
-  --workflows [mode]    Include workflows in backup. Mode: 'local' (default) or 'remote' (Git repo).
-  --credentials [mode]  Include credentials in backup. Mode: 'local' (default) or 'remote' (Git repo).
+  --workflows [mode]    Include workflows in backup. Mode: 0 (disabled), 1 (local, default), 2 (remote Git repo).
+  --credentials [mode]  Include credentials in backup. Mode: 0 (disabled), 1 (local, default), 2 (remote Git repo).
   --path <path>         Local backup directory path (defaults to '~/n8n-backup').
   --rotation <limit>    Local backup rotation: '0' (overwrite), number (keep N most recent), 'unlimited' (keep all).
   --folder-structure    Enable n8n folder structure mirroring in Git (requires API access).
@@ -61,11 +119,11 @@ Configuration Files (checked in order):
     # Create timestamped backup directories (true/false, defaults to false)
     DATED_BACKUPS=true
     
-    # Workflows storage location: "local" or "remote" (Git repo)
-    WORKFLOWS_STORAGE="local"
+    # Workflows storage: 0=disabled, 1=local, 2=remote (Git repo)
+    WORKFLOWS=1
     
-    # Credentials storage location: "local" (secure) or "remote" (Git repo)
-    CREDENTIALS_STORAGE="local"
+    # Credentials storage: 0=disabled, 1=local (secure), 2=remote (Git repo)
+    CREDENTIALS=1
     
     # === LOCAL BACKUP SETTINGS ===
     # Custom local backup directory path (defaults to ~/n8n-backup)
@@ -189,19 +247,25 @@ select_container() {
 
 select_action() {
     log HEADER "Choose Action"
-    echo "1) Backup n8n - Local or to GitHub"
-    echo "2) Restore n8n - Local or from GitHub"
-    echo "3) Quit"
+    
+    # Show current configuration summary
+    show_config_summary
+    
+    echo "1) Backup n8n - Use current configuration"
+    echo "2) Restore n8n - Use current configuration" 
+    echo "3) Reconfigure - Reset and configure interactively"
+    echo "4) Quit"
 
     local choice
     while true; do
-        printf "\nSelect an option (1-3): "
+        printf "\nSelect an option (1-4): "
         read -r choice
         case "$choice" in
             1) SELECTED_ACTION="backup"; return ;; 
-            2) SELECTED_ACTION="restore"; return ;; 
-            3) log INFO "Exiting..."; exit 0 ;; 
-            *) log ERROR "Invalid option. Please select 1, 2, or 3." ;; 
+            2) SELECTED_ACTION="restore"; return ;;
+            3) SELECTED_ACTION="reconfigure"; return ;;
+            4) log INFO "Exiting..."; exit 0 ;; 
+            *) log ERROR "Invalid option. Please select 1, 2, 3, or 4." ;; 
         esac
     done
 }
@@ -352,4 +416,65 @@ get_github_config() {
     github_token="$local_token"
     github_repo="$local_repo"
     github_branch="$local_branch"
+}
+
+# Select workflows backup mode (0=disabled, 1=local, 2=remote)
+select_workflows_storage() {
+    log HEADER "Choose Workflows Backup Mode"
+    echo "0) Disabled - Skip workflow backup entirely"
+    echo "1) Local Storage - Store workflows in secure local storage (recommended)"
+    echo "2) Remote Storage - Store workflows in Git repository (shareable but less secure)"
+    echo
+    
+    local choice
+    while true; do
+        printf "Select workflows backup mode (0-2) [default: 1]: "
+        read -r choice
+        choice=${choice:-1}
+        case "$choice" in
+            0) workflows=0; log INFO "Workflows backup: (0) disabled"; return ;;
+            1) workflows=1; log INFO "Workflows backup: (1) local"; return ;;
+            2) workflows=2; log INFO "Workflows backup: (2) remote"; return ;;
+            *) echo "Invalid choice. Please enter 0, 1, or 2." ;;
+        esac
+    done
+}
+
+# Select credentials backup mode (0=disabled, 1=local, 2=remote)  
+select_credentials_storage() {
+    log HEADER "Choose Credentials Backup Mode"
+    echo "0) Disabled - Skip credential backup entirely"
+    echo "1) Local Storage - Store credentials in secure local storage (RECOMMENDED)"
+    echo "2) Remote Storage - Store credentials in Git repository (NOT RECOMMENDED - security risk)"
+    echo
+    echo "⚠️  WARNING: Option 2 stores sensitive credentials in Git repository!"
+    echo "   This may expose passwords, API keys, and other secrets."
+    echo "   Only use option 2 if you understand and accept this security risk."
+    echo
+    
+    local choice
+    while true; do
+        printf "Select credentials backup mode (0-2) [default: 1]: "
+        read -r choice
+        choice=${choice:-1}
+        case "$choice" in
+            0) credentials=0; log INFO "Credentials backup: (0) disabled"; return ;;
+            1) credentials=1; log INFO "Credentials backup: (1) local"; return ;;
+            2) 
+                log WARN "You selected REMOTE STORAGE for credentials!"
+                printf "Are you sure you want to store credentials in Git? (y/N): "
+                read -r confirm
+                if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                    credentials=2
+                    log WARN "Credentials backup: (2) remote (less secure)"
+                    return
+                else
+                    log INFO "Staying with secure local storage."
+                    credentials=1
+                    return
+                fi
+                ;;
+            *) echo "Invalid choice. Please enter 0, 1, or 2." ;;
+        esac
+    done
 }

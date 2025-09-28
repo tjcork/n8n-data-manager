@@ -395,7 +395,7 @@ restore() {
     
     # Copy workflow file if needed
     if [[ "$restore_type" == "all" || "$restore_type" == "workflows" ]]; then
-        if [ "$is_dry_run" = "true" ]; then
+        if [[ $is_dry_run == true ]]; then
             log DRYRUN "Would copy $repo_workflows to ${container_id}:${container_import_workflows}"
         else
             if docker cp "$repo_workflows" "${container_id}:${container_import_workflows}"; then
@@ -409,7 +409,7 @@ restore() {
     
     # Copy credentials file if needed
     if [[ "$restore_type" == "all" || "$restore_type" == "credentials" ]]; then
-        if [ "$is_dry_run" = "true" ]; then
+        if [[ $is_dry_run == true ]]; then
             log DRYRUN "Would copy $repo_credentials to ${container_id}:${container_import_credentials}"
         else
             if docker cp "$repo_credentials" "${container_id}:${container_import_credentials}"; then
@@ -434,7 +434,7 @@ restore() {
     
     # Import workflows if needed
     if [[ "$restore_type" == "all" || "$restore_type" == "workflows" ]]; then
-        if [ "$is_dry_run" = "true" ]; then
+        if [[ $is_dry_run == true ]]; then
             log DRYRUN "Would run: n8n import:workflow --input=$container_import_workflows"
         else
             log INFO "Importing workflows..."
@@ -455,7 +455,7 @@ restore() {
     
     # Import credentials if needed
     if [[ "$restore_type" == "all" || "$restore_type" == "credentials" ]]; then
-        if [ "$is_dry_run" = "true" ]; then
+        if [[ $is_dry_run == true ]]; then
             log DRYRUN "Would run: n8n import:credentials --input=$container_import_credentials"
         else
             log INFO "Importing credentials..."

@@ -56,9 +56,7 @@ github_repo=""
 github_branch="main"
 dated_backups=""  # empty = unset, true/false = explicitly configured
 
-# Storage settings
-workflows_storage=""           # local|remote
-credentials_storage="local"    # local|remote (default secure)
+# Storage settings (handled by numeric config)
 local_backup_path="$HOME/n8n-backup"
 local_rotation_limit="10"
 
@@ -94,19 +92,23 @@ main() {
             --branch) github_branch="$2"; shift 2 ;; 
             --config) config_file="$2"; shift 2 ;; 
             --dated) dated_backups=true; shift 1 ;;
-            --workflows)
-                if [[ -n "$2" && "$2" != -* ]]; then
-                    workflows_storage="$2"; shift 2
-                else
-                    workflows_storage="local"; shift 1
-                fi
+                        --workflows)
+                case "${2,,}" in  # Convert to lowercase
+                    0|disabled) workflows=0; shift 2 ;;
+                    1|local) workflows=1; shift 2 ;;
+                    2|remote) workflows=2; shift 2 ;;
+                    *) log ERROR "Invalid workflows value: $2. Must be 0/disabled, 1/local, or 2/remote"
+                       exit 1 ;;
+                esac
                 ;;
             --credentials)
-                if [[ -n "$2" && "$2" != -* ]]; then
-                    credentials_storage="$2"; shift 2
-                else
-                    credentials_storage="local"; shift 1
-                fi
+                case "${2,,}" in  # Convert to lowercase
+                    0|disabled) credentials=0; shift 2 ;;
+                    1|local) credentials=1; shift 2 ;;
+                    2|remote) credentials=2; shift 2 ;;
+                    *) log ERROR "Invalid credentials value: $2. Must be 0/disabled, 1/local, or 2/remote"
+                       exit 1 ;;
+                esac
                 ;;
             --path) local_backup_path="$2"; shift 2 ;;
             --rotation)
@@ -146,38 +148,44 @@ main() {
 
     log HEADER "n8n Backup/Restore Manager v$VERSION"
     log INFO "🚀 Flexible backup storage: local files or Git repository"
-    if [ "$dry_run" = "true" ]; then log WARN "DRY RUN MODE ENABLED"; fi
-    if [ "$verbose" = "true" ]; then log DEBUG "Verbose mode enabled."; fi
+    if [[ $dry_run_flag == true ]]; then log WARN "DRY RUN MODE ENABLED"; fi
+    if [[ $verbose_flag == true ]]; then log DEBUG "Verbose mode enabled."; fi
     
     check_host_dependencies
 
     # Runtime variables are now lowercase and used directly
     log DEBUG "Action: $action, Container: $container, Repo: $github_repo"
-    log DEBUG "Branch: $github_branch, Workflows: $workflows_storage, Credentials: $credentials_storage"
+    log DEBUG "Branch: $github_branch, Workflows: ($workflows) $(format_storage_value $workflows), Credentials: ($credentials) $(format_storage_value $credentials)"
     log DEBUG "Local Path: $local_backup_path, Rotation: $local_rotation_limit"
     
     # Set intelligent defaults for backup
     if [[ "$action" == "backup" ]]; then
-        if [[ -z "$workflows_storage" && -z "$credentials_storage" ]]; then
-            log ERROR "No storage options specified. Please specify --workflows and/or --credentials with 'local' or 'remote'"
-            log INFO "Examples:"
-            log INFO "  --workflows remote --credentials local    (workflows to Git, credentials local)"
-            log INFO "  --workflows local --credentials local     (both local only)"
-            log INFO "  --workflows remote                        (workflows to Git only)"
-            log INFO "  --credentials local                       (credentials local only)"
+        if [[ "$workflows" == "0" && "$credentials" == "0" ]]; then
+            log ERROR "Both workflows and credentials are disabled. Nothing to backup!"
+            log INFO "Please specify backup options:"
+            log INFO "  --workflows 1 --credentials 1     (both stored locally - secure)"
+            log INFO "  --workflows 2 --credentials 1     (workflows to Git, credentials local)"
+            log INFO "  --workflows 1 --credentials 2     (workflows local, credentials to Git)"
+            log INFO "  --workflows 2 --credentials 2     (both to Git - less secure)"
+            log INFO "  --workflows 1                     (workflows local only, skip credentials)"
+            log INFO "  --credentials 1                   (credentials local only, skip workflows)"
             exit 1
-        elif [[ -z "$workflows_storage" ]]; then
-            workflows_storage="remote"
+        elif [[ -z "$workflows" && -z "$credentials" ]]; then
+            workflows=1  # Default to local
+            credentials=1  # Default to local
+            log INFO "No storage options specified - defaulting to local storage for both workflows and credentials"
+        elif [[ -z "$workflows" ]]; then
+            workflows=2  # Default to remote if only credentials specified
             log INFO "Workflows storage not specified - defaulting to remote (Git repository)"
-        elif [[ -z "$credentials_storage" ]]; then
-            credentials_storage="local"
+        elif [[ -z "$credentials" ]]; then
+            credentials=1  # Default to local (secure)
             log INFO "Credentials storage not specified - defaulting to local (secure)"
         fi
     fi
 
     # Debug logging
     log DEBUG "Action: $action, Container: $container, Repo: $github_repo"
-    log DEBUG "Branch: $github_branch, Workflows: $workflows_storage, Credentials: $credentials_storage"
+    log DEBUG "Branch: $github_branch, Workflows: ($workflows) $(format_storage_value $workflows), Credentials: ($credentials) $(format_storage_value $credentials)"
     log DEBUG "Local Path: $local_backup_path, Rotation: $local_rotation_limit"
 
     # Check if running non-interactively
@@ -199,7 +207,7 @@ main() {
         fi
         
         # GitHub parameters only required for remote operations or restore
-        if [[ "$action" == "restore" ]] || [[ "$workflows_storage" == "remote" ]] || [[ "$credentials_storage" == "remote" ]]; then
+        if [[ $needs_github == true ]]; then
             if [ -z "$github_token" ] || [ -z "$github_repo" ]; then
                 log ERROR "GitHub token and repository are required for remote operations or restore."
                 log INFO "Please provide --token and --repo via arguments or config file."
@@ -263,6 +271,30 @@ main() {
         fi
         log DEBUG "Action selected: $action"
         
+        # Handle reconfigure action
+        if [[ "$action" == "reconfigure" ]]; then
+            log INFO "🔄 Reconfiguring - resetting all configuration values..."
+            
+            # Clear all configuration variables to force interactive prompts
+            workflows=0
+            credentials=0
+            dated_backups=""
+            folder_structure=""
+            github_token=""
+            github_repo=""
+            github_branch="main"
+            local_backup_path="$HOME/n8n-backup"
+            local_rotation_limit="10"
+            n8n_base_url=""
+            n8n_api_key=""
+            restore_type="all"
+            
+            # Select new action after clearing config
+            select_action
+            action="$SELECTED_ACTION"
+            log INFO "✅ Configuration cleared. Proceeding with $action in interactive mode..."
+        fi
+        
         # Interactive container selection
         if [ -z "$container" ]; then
             select_container
@@ -304,41 +336,18 @@ main() {
         fi
         log DEBUG "Use Dated Backup: $dated_backups"
         
-        # Interactive storage configuration
-        if [[ "$action" == "backup" ]] && [[ -z "$workflows_storage" && -z "$credentials_storage" ]]; then
+        # Interactive storage configuration using new selection functions
+        if [[ "$action" == "backup" ]] && [[ "$workflows" == "0" && "$credentials" == "0" ]]; then
             log INFO "Configure backup storage locations:"
             
-            # Ask about workflows storage
-            echo "Workflows storage:"
-            echo "1) Local (secure, private)"
-            echo "2) Remote (Git repository, shareable)"
-            printf "Where to store workflows? (1-2) [1]: "
-            read -r workflow_choice
-            workflow_choice=${workflow_choice:-1}
-            case "$workflow_choice" in
-                1) workflows_storage="local" ;;
-                2) workflows_storage="remote" ;;
-                *) workflows_storage="local"; log WARN "Invalid choice, defaulting to local" ;;
-            esac
+            # Use new interactive storage selection functions
+            select_workflows_storage
+            select_credentials_storage
             
-            # Ask about credentials storage  
-            echo "Credentials storage:"
-            echo "1) Local (secure, recommended)"
-            echo "2) Remote (Git repository, less secure)"
-            printf "Where to store credentials? (1-2) [1]: "
-            read -r credential_choice
-            credential_choice=${credential_choice:-1}
-            case "$credential_choice" in
-                1) credentials_storage="local" ;;
-                2) credentials_storage="remote"
-                   log WARN "⚠️  You chose to store credentials in Git (less secure)" ;;
-                *) credentials_storage="local"; log WARN "Invalid choice, defaulting to local" ;;
-            esac
+            log INFO "Selected: Workflows=($workflows) $(format_storage_value $workflows), Credentials=($credentials) $(format_storage_value $credentials)"
             
-            log INFO "Selected: Workflows -> $workflows_storage, Credentials -> $credentials_storage"
-            
-            # Ask for local backup directory if either storage option is local
-            if [[ "$workflows_storage" == "local" || "$credentials_storage" == "local" ]]; then
+            # Ask for local backup directory if local storage is needed
+            if [[ "$workflows" == "1" || "$credentials" == "1" ]]; then
                 printf "Local backup directory [~/n8n-backup]: "
                 read -r custom_backup_path
                 if [[ -n "$custom_backup_path" ]]; then
@@ -350,8 +359,8 @@ main() {
                 fi
             fi
             
-            # Ask about n8n folder structure if workflows are going to remote and not already configured
-            if [[ "$workflows_storage" == "remote" ]] && [[ -z "$folder_structure" ]]; then
+            # Ask about n8n folder structure if workflows are going to remote
+            if [[ "$workflows" == "2" ]] && [[ -z "$folder_structure" ]]; then
                 printf "Create n8n folder structure in Git repository? (yes/no) [no]: "
                 read -r folder_structure_choice
                 if [[ "$folder_structure_choice" == "yes" || "$folder_structure_choice" == "y" ]]; then
@@ -360,31 +369,31 @@ main() {
                     folder_structure=false
                 fi
                     
-                    # Prompt for n8n API credentials if not already configured
-                    if [[ -z "$n8n_base_url" ]]; then
-                        printf "n8n base URL (e.g., http://localhost:5678): "
-                        read -r n8n_url
-                        if [[ -n "$n8n_url" ]]; then
-                            n8n_base_url="$n8n_url"
-                        else
-                            log ERROR "n8n base URL is required for folder structure"
-                            exit 1
-                        fi
+                # Prompt for n8n API credentials if not already configured
+                if [[ -z "$n8n_base_url" ]]; then
+                    printf "n8n base URL (e.g., http://localhost:5678): "
+                    read -r n8n_url
+                    if [[ -n "$n8n_url" ]]; then
+                        n8n_base_url="$n8n_url"
+                    else
+                        log ERROR "n8n base URL is required for folder structure"
+                        exit 1
                     fi
-                    
-                    if [[ -z "$n8n_api_key" ]]; then
-                        printf "n8n API key (leave blank to use email/password login): "
-                        read -r -s n8n_api_key_input
-                        echo  # Add newline after hidden input
-                        if [[ -n "$n8n_api_key_input" ]]; then
-                            n8n_api_key="$n8n_api_key_input"
-                        else
-                            log INFO "No API key provided - will use session authentication"
-                            n8n_api_key=""  # Explicitly set to empty
-                        fi
+                fi
+                
+                if [[ -z "$n8n_api_key" ]]; then
+                    printf "n8n API key (leave blank to use email/password login): "
+                    read -r -s n8n_api_key_input
+                    echo  # Add newline after hidden input
+                    if [[ -n "$n8n_api_key_input" ]]; then
+                        n8n_api_key="$n8n_api_key_input"
+                    else
+                        log INFO "No API key provided - will use session authentication"
+                        n8n_api_key=""  # Explicitly set to empty
                     fi
-                    
-                    # Validate API access immediately after configuration
+                fi
+                
+                # Validate API access immediately after configuration
                 log INFO "Validating n8n API access..."
                 if ! validate_n8n_api_access "$n8n_base_url" "$n8n_api_key"; then
                     log ERROR "❌ n8n API validation failed!"
@@ -404,7 +413,7 @@ main() {
         fi
         
         # Get GitHub config only if needed
-        if [[ "$action" == "restore" ]] || [[ "$workflows_storage" == "remote" ]] || [[ "$credentials_storage" == "remote" ]]; then
+        if [[ $needs_github == true ]]; then
             get_github_config
         else
             log INFO "🏠 Local-only backup - no GitHub configuration needed"
@@ -426,6 +435,37 @@ main() {
         folder_structure=${folder_structure:-false}
         verbose=${verbose:-false}
         dry_run=${dry_run:-false}
+        
+        # Derive convenience flags from numeric storage settings (avoid repeated comparisons)
+        needs_github=false
+        needs_local_path=false
+        
+        # Check if GitHub access is needed (for restore or any remote storage)
+        if [[ "$action" == "restore" ]] || [[ "$workflows" == "2" ]] || [[ "$credentials" == "2" ]]; then 
+            needs_github=true 
+        fi
+        
+        # Check if local path is needed (for any local storage)
+        if [[ "$workflows" == "1" ]] || [[ "$credentials" == "1" ]]; then 
+            needs_local_path=true 
+        fi
+        
+        # Convert remaining string boolean variables to boolean flags (avoid repeated string comparisons)
+        use_dated_backup_flag=false
+        dry_run_flag=false
+        folder_structure_flag=false
+        dated_backups_flag=false
+        verbose_flag=false
+        
+        if [[ "$dated_backups" == "true" ]]; then dated_backups_flag=true; fi
+        if [[ "$dry_run" == "true" ]]; then dry_run_flag=true; fi
+        if [[ "$folder_structure" == "true" ]]; then folder_structure_flag=true; fi
+        if [[ "$verbose" == "true" ]]; then verbose_flag=true; fi
+        # use_dated_backup is derived from dated_backups in this context
+        use_dated_backup_flag=$dated_backups_flag
+        
+        log DEBUG "Storage settings - workflows: ($workflows) $(format_storage_value $workflows), credentials: ($credentials) $(format_storage_value $credentials), needs_github: $needs_github"
+        log DEBUG "Boolean flags - dated_backups: $dated_backups_flag, dry_run: $dry_run_flag, folder_structure: $folder_structure_flag"
     fi
 
     # Final validation
@@ -435,9 +475,7 @@ main() {
     fi
     
     # For remote operations, GitHub parameters are required
-    local needs_github=false
-    if [[ "$action" == "restore" ]] || [[ "$workflows_storage" == "remote" ]] || [[ "$credentials_storage" == "remote" ]]; then
-        needs_github=true
+    if [[ $needs_github == true ]]; then
         if [ -z "$github_token" ] || [ -z "$github_repo" ] || [ -z "$github_branch" ]; then
             log ERROR "Missing required GitHub parameters (Token, Repo, Branch) for remote operations. Exiting."
             exit 1
@@ -458,7 +496,7 @@ main() {
     log INFO "Starting action: $action"
     case "$action" in
         backup)
-            if backup "$container" "$github_token" "$github_repo" "$github_branch" "$dated_backups" "$dry_run" "$workflows_storage" "$credentials_storage" "$local_backup_path" "$local_rotation_limit"; then
+            if backup "$container" "$github_token" "$github_repo" "$github_branch" "$dated_backups_flag" "$dry_run_flag" "$workflows" "$credentials" "$folder_structure_flag" "$local_backup_path" "$local_rotation_limit"; then
                 log SUCCESS "Backup operation completed successfully."
             else
                 log ERROR "Backup operation failed."
@@ -466,7 +504,7 @@ main() {
             fi
             ;;
         restore)
-            if restore "$container" "$github_token" "$github_repo" "$github_branch" "$restore_type" "$dry_run"; then
+            if restore "$container" "$github_token" "$github_repo" "$github_branch" "$restore_type" "$dry_run_flag"; then
                  log SUCCESS "Restore operation completed successfully."
             else
                  log ERROR "Restore operation failed."
