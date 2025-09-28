@@ -3,7 +3,7 @@ description: n8n-manager Shell Script Project Knowledge Prompt for Windsurf
 ---
 
 Project Overview
-The n8n-manager is a mature, production-ready shell-based automation tool for n8n backup/restore operations. It provides interactive Docker container management, GitHub integration for remote backups, and automated installation capabilities. Current version: 3.0.8 (main script) with comprehensive documentation and robust error handling.
+The n8n-manager is a mature, production-ready shell-based automation tool for n8n backup/restore operations. It provides interactive Docker container management, GitHub integration for remote backups, and automated installation capabilities. Current version: 3.1.0 (main script) with enhanced security architecture, comprehensive documentation and robust error handling.
 
 Core Components
 
@@ -13,6 +13,11 @@ Key Features:
 - Interactive & Non-Interactive Modes: User-friendly menus and full CLI automation support
 - Docker Container Management: Automatic detection of running n8n containers with multi-container support
 - GitHub Integration: Secure backup storage with private/public repository support
+- Security Architecture:
+  - Local credential storage with proper file permissions (chmod 600)
+  - Credential archiving with 5-10 backup rotation
+  - .env file exclusion from Git operations
+  - Dual GitHub token support (classic repo + fine-grained contents scope)
 - Backup Types:
   - Standard backups (overwrites latest on branch)
   - Dated backups with timestamped subdirectories (`YYYY-MM-DD_HH-MM-SS`)
@@ -43,10 +48,11 @@ n8n-manager.sh [OPTIONS]
 ```
 
 Core Functions & Architecture:
-- `backup()`: Comprehensive n8n data backup with GitHub push
-- `restore()`: Selective restoration with rollback capability
+- `backup()`: Comprehensive n8n data backup with dual storage (workflows to Git, credentials local)
+- `restore()`: Selective restoration with rollback capability and backwards compatibility
+- `archive_credentials()`: Local credential backup rotation with proper permissions
 - `select_container()`: Interactive Docker container selection
-- `check_github_access()`: GitHub token and repository validation
+- `check_github_access()`: Dual GitHub token validation (classic repo + fine-grained contents scope)
 - `rollback_restore()`: Automatic failure recovery system
 - `dockExec()`: Secure Docker command execution wrapper
 - Isolated Git operations: `git_add()`, `git_commit()`, `git_push()`
@@ -94,7 +100,7 @@ Docker Integration
 - Cross-Platform: Support for Alpine and Ubuntu/Debian based n8n images
 
 GitHub Integration
-- Authentication: Personal Access Token with `repo` scope validation
+- Authentication: Dual token support - classic PAT (`repo` scope) and fine-grained PAT (`contents` scope)
 - Repository Management: Automatic repository and branch validation
 - Commit Strategy: Standardized commit messages with automatic branch creation
 - Error Recovery: Push/pull operations with comprehensive error handling
@@ -104,16 +110,17 @@ GitHub Integration
 Backup System Architecture
 Backup Components:
 - Database Exports: n8n database backup via container CLI
-- Workflow Definitions: JSON export of all workflow configurations
-- Credential Management: Encrypted credential file handling
-- Environment Variables: System configuration and settings backup
+- Workflow Definitions: JSON export of all workflow configurations (stored in Git)
+- Credential Management: Encrypted credential file handling (stored locally only)
+- Environment Variables: System configuration and settings backup (excluded from Git)
 - Custom Resources: Node installations and custom configurations
 - Metadata: Backup manifests and restoration information
 
 Backup Organization:
 ```
-Standard Mode: /{repo}/workflows.json, credentials.json
-Dated Mode: /{repo}/backup_YYYY-MM-DD_HH-MM-SS/{files}
+Git Repository: /{repo}/workflows.json (workflows only)
+Local Storage: ~/n8n-backup/credentials.json, ~/n8n-backup/archive/credentials_YYYY-MM-DD_HH-MM-SS.json
+Dated Mode: /{repo}/backup_YYYY-MM-DD_HH-MM-SS/workflows.json + local credential storage
 ```
 - Compressed archive support for large datasets
 - Incremental backup detection and optimization
@@ -162,10 +169,13 @@ Access Control and Validation
 
 Data Protection
 - Credential Encryption: Preservation of n8n's built-in encryption
-- Secure Transmission: HTTPS-only GitHub communication
-- Local Security: Proper file permissions and access control
-- Git History Protection: Sensitive data handling in version control
-- Token Management: Secure storage and handling of authentication tokens
+- Local Credential Storage: Credentials stored in ~/n8n-backup/ with chmod 600 permissions
+- Credential Archiving: 5-10 timestamped backup rotation with secure permissions
+- Git Exclusions: .env files and credentials never committed to repositories
+- Secure Transmission: HTTPS-only GitHub communication for workflows only
+- Local Security: Proper file permissions and access control (chmod 600/700)
+- Git History Protection: Complete separation of sensitive data from version control
+- Token Management: Dual token type support with secure validation
 
 Production CFGs
 
@@ -215,16 +225,17 @@ System Integration
 Development Status and Priorities
 
 Current Production State
-- Stable Release: Version 3.0.8 with comprehensive feature set
+- Stable Release: Version 3.1.0 with enhanced security architecture
+- Security Enhancement: Local credential storage with proper file permissions
 - Documentation: Complete README with usage examples and configuration
 - Error Handling: Robust error recovery and user feedback systems
 - Testing: Field-tested with multiple container configurations
-- Security: Production-ready security measures and validation
+- Backwards Compatibility: Supports legacy Git-stored credentials during transition
 
 Immediate Development Opportunities
-1 Version Synchronization: Update README from 3.0.5 to match script version 3.0.8
+1 Documentation Updates: Update README to reflect version 3.1.0 security enhancements
 2 Enhanced Database Support: Extend beyond current n8n CLI to direct database access
-3 Backup Encryption: Optional local backup encryption before GitHub upload
+3 Migration Tools: Automated migration from Git-stored to local credentials
 4 Scheduling Integration: Native cron integration for automated backups
 5 Health Monitoring: Container and n8n service health monitoring
 

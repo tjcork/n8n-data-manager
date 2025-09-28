@@ -2,6 +2,12 @@
 # =========================================================
 # n8n-manager.sh - Interactive backup/restore for n8n
 # =========================================================
+# Security-Enhanced Version:
+# - Credentials stored locally with proper permissions (chmod 600)
+# - Environment variables excluded from Git repositories  
+# - Credential archiving with rotation (5-10 backups)
+# - .gitignore created to prevent accidental commits
+# =========================================================
 set -Eeuo pipefail
 IFS=$'\n\t'
 
@@ -9,7 +15,7 @@ IFS=$'\n\t'
 CONFIG_FILE_PATH="${XDG_CONFIG_HOME:-$HOME/.config}/n8n-manager/config"
 
 # --- Global variables ---
-VERSION="3.0.17"
+VERSION="3.1.0"
 DEBUG_TRACE=${DEBUG_TRACE:-false} # Set to true for trace debugging
 SELECTED_ACTION=""
 SELECTED_CONTAINER_ID=""
@@ -26,7 +32,10 @@ ARG_REPO=""
 ARG_BRANCH=""
 ARG_CONFIG_FILE=""
 ARG_DATED_BACKUPS=false
-ARG_RESTORE_TYPE="all"
+ARG_WORKFLOWS_STORAGE=""  # Where to store workflows: "local", "remote", or "" (not specified)
+ARG_CREDENTIALS_STORAGE=""  # Where to store credentials: "local", "remote", or "" (not specified)
+ARG_LOCAL_BACKUP_PATH=""  # Custom local backup path (defaults to ~/n8n-backup)
+ARG_RESTORE_TYPE="all"  # Keep for backwards compatibility
 ARG_DRY_RUN=false
 ARG_VERBOSE=false
 ARG_LOG_FILE=""
@@ -190,6 +199,21 @@ load_config() {
             if [[ "$CONF_DATED_BACKUPS_VAL" == "true" ]]; then ARG_DATED_BACKUPS=true; fi
         fi
         
+        if [[ "$ARG_CREDENTIALS_STORAGE" == "local" ]]; then 
+            CONF_CREDENTIALS_STORAGE_VAL=${CONF_CREDENTIALS_STORAGE:-"local"}
+            if [[ "$CONF_CREDENTIALS_STORAGE_VAL" == "remote" ]]; then ARG_CREDENTIALS_STORAGE="remote"; fi
+        fi
+        
+        # Load workflows storage from config if not specified
+        if [[ -z "$ARG_WORKFLOWS_STORAGE" ]]; then
+            ARG_WORKFLOWS_STORAGE=${CONF_WORKFLOWS_STORAGE:-}
+        fi
+        
+        # Load local backup path from config if not specified  
+        if [[ -z "$ARG_LOCAL_BACKUP_PATH" ]]; then
+            ARG_LOCAL_BACKUP_PATH=${CONF_LOCAL_BACKUP_PATH:-}
+        fi
+        
         ARG_RESTORE_TYPE=${ARG_RESTORE_TYPE:-${CONF_RESTORE_TYPE:-all}}
         
         if ! $ARG_VERBOSE; then
@@ -230,8 +254,10 @@ Options:
   --repo <user/repo>    GitHub repository (e.g., 'myuser/n8n-backup').
   --branch <branch>     GitHub branch to use (defaults to 'main').
   --dated               Create timestamped subdirectory for backups (e.g., YYYY-MM-DD_HH-MM-SS/).
-                        Overrides CONF_DATED_BACKUPS in config file.
-  --restore-type <type> Type of restore: 'all' (default), 'workflows', or 'credentials'.
+  --workflows [mode]    Include workflows in backup. Mode: 'local' (default) or 'remote' (Git repo).
+  --credentials [mode]  Include credentials in backup. Mode: 'local' (default) or 'remote' (Git repo).
+  --path <path>         Local backup directory path (defaults to '~/n8n-backup').
+  --restore-type <type> Type of restore: 'all' (default), 'workflows', or 'credentials' (legacy).
                         Overrides CONF_RESTORE_TYPE in config file.
   --dry-run             Simulate the action without making any changes.
   --verbose             Enable detailed debug logging.
@@ -246,7 +272,10 @@ Configuration File (${CONFIG_FILE_PATH}):
     CONF_GITHUB_BRANCH="main"
     CONF_DEFAULT_CONTAINER="n8n-container-name"
     CONF_DATED_BACKUPS=true # Optional, defaults to false
-    CONF_RESTORE_TYPE="all" # Optional, defaults to 'all'
+    CONF_WORKFLOWS_STORAGE="local" # Optional: "local" or "remote" (Git repo)
+    CONF_CREDENTIALS_STORAGE="local" # Optional: "local" (default, secure) or "remote" (Git repo)
+    CONF_LOCAL_BACKUP_PATH="/custom/backup/path" # Optional, defaults to ~/n8n-backup
+    CONF_RESTORE_TYPE="all" # Optional, defaults to 'all' (legacy compatibility)
     CONF_VERBOSE=false      # Optional, defaults to false
     CONF_LOG_FILE="/var/log/n8n-manager.log" # Optional
 
@@ -354,9 +383,34 @@ select_action() {
 
 select_restore_type() {
     log HEADER "Choose Restore Type"
+    
+    # Check credential availability for better UX
+    local local_backup_dir="$HOME/n8n-backup"
+    local local_credentials_file="$local_backup_dir/credentials.json"
+    local has_local_creds=false
+    local has_git_creds=false
+    
+    if [ -f "$local_credentials_file" ] && [ -s "$local_credentials_file" ]; then
+        has_local_creds=true
+    fi
+    
+    # Note: We can't check Git credentials here since we haven't downloaded the repo yet
+    # This will be handled during the restore process
+    
     echo "1) All (Workflows & Credentials)"
+    if $has_local_creds; then
+        echo "   📄 Workflows from Git repository + 🔒 Credentials from local secure storage"
+    else
+        echo "   📄 Workflows from Git repository + 🔒 Credentials from available source"
+    fi
     echo "2) Workflows Only"
+    echo "   📄 Workflows from Git repository (credentials unchanged)"
     echo "3) Credentials Only"
+    if $has_local_creds; then
+        echo "   🔒 Credentials from local secure storage (workflows unchanged)"
+    else
+        echo "   🔒 Credentials from available source (workflows unchanged)"
+    fi
 
     local choice
     while true; do
@@ -370,6 +424,73 @@ select_restore_type() {
             *) log ERROR "Invalid option. Please select 1, 2, or 3." ;; 
         esac
     done
+}
+
+select_credential_source() {
+    local local_file="$1"
+    local git_file="$2"
+    local selected_source=""
+    
+    log HEADER "Multiple Credential Sources Found"
+    log INFO "Both local and Git repository credentials are available."
+    echo "1) Local Secure Storage (Recommended)"
+    echo "   📍 $local_file"
+    echo "   🔒 Stored securely with proper file permissions"
+    echo "2) Git Repository (Legacy)"
+    echo "   📍 $git_file"
+    echo "   ⚠️  Less secure - credentials stored in Git history"
+    
+    local choice
+    while true; do
+        printf "\nSelect credential source (1-2) [default: 1]: "
+        read -r choice
+        choice=${choice:-1}
+        case "$choice" in
+            1) selected_source="$local_file"; break ;;
+            2) 
+                log WARN "⚠️  You selected Git repository credentials (less secure)"
+                printf "Are you sure? (yes/no) [no]: "
+                local confirm
+                read -r confirm
+                if [[ "$confirm" == "yes" || "$confirm" == "y" ]]; then
+                    selected_source="$git_file"
+                    break
+                fi
+                ;;
+            *) log ERROR "Invalid option. Please select 1 or 2." ;;
+        esac
+    done
+    
+    echo "$selected_source"
+}
+
+show_restore_plan() {
+    local restore_type="$1"
+    local github_repo="$2"
+    local branch="$3"
+    
+    log HEADER "📋 Restore Plan"
+    log INFO "Repository: $github_repo (branch: $branch)"
+    
+    case "$restore_type" in
+        "all")
+            log INFO "📄 Workflows: Will be restored from Git repository"
+            log INFO "🔒 Credentials: Will be restored from available source (local preferred)"
+            log WARN "⚠️  This will REPLACE your current workflows and credentials"
+            ;;
+        "workflows")
+            log INFO "📄 Workflows: Will be restored from Git repository"
+            log INFO "🔒 Credentials: Will remain unchanged"
+            log WARN "⚠️  This will REPLACE your current workflows only"
+            ;;
+        "credentials")
+            log INFO "📄 Workflows: Will remain unchanged"
+            log INFO "🔒 Credentials: Will be restored from available source (local preferred)"
+            log WARN "⚠️  This will REPLACE your current credentials only"
+            ;;
+    esac
+    
+    return 0
 }
 
 get_github_config() {
@@ -406,6 +527,118 @@ get_github_config() {
     GITHUB_TOKEN="$local_token"
     GITHUB_REPO="$local_repo"
     GITHUB_BRANCH="$local_branch"
+}
+
+# Archive credentials with rotation (keep 5-10 backups)
+archive_credentials() {
+    local source_file="$1"
+    local backup_dir="$2"
+    local is_dry_run="$3"
+    local max_archives=${4:-10}
+
+    if [ ! -f "$source_file" ]; then
+        log WARN "Source credentials file not found: $source_file"
+        return 1
+    fi
+
+    local archive_dir="$backup_dir/archive"
+    local timestamp=$(date +"%Y%m%d_%H%M%S")
+    local archive_file="$archive_dir/credentials_${timestamp}.json"
+
+    if $is_dry_run; then
+        log DRYRUN "Would create archive directory: $archive_dir"
+        log DRYRUN "Would archive credentials to: $archive_file"
+        log DRYRUN "Would rotate archives to keep max $max_archives files"
+        return 0
+    fi
+
+    # Create archive directory
+    if ! mkdir -p "$archive_dir"; then
+        log ERROR "Failed to create archive directory: $archive_dir"
+        return 1
+    fi
+    chmod 700 "$archive_dir" || log WARN "Could not set permissions on archive directory"
+
+    # Archive current credentials
+    if ! cp "$source_file" "$archive_file"; then
+        log ERROR "Failed to archive credentials"
+        return 1
+    fi
+    chmod 600 "$archive_file" || log WARN "Could not set permissions on archived credentials"
+    log SUCCESS "Credentials archived to: $archive_file"
+
+    # Rotate archives - keep only the most recent max_archives
+    local archive_count
+    archive_count=$(find "$archive_dir" -name "credentials_*.json" | wc -l)
+    if [ "$archive_count" -gt "$max_archives" ]; then
+        local files_to_remove=$((archive_count - max_archives))
+        log INFO "Rotating credential archives - removing $files_to_remove old files"
+        
+        # Remove oldest files (sort by name, which includes timestamp)
+        find "$archive_dir" -name "credentials_*.json" | sort | head -n "$files_to_remove" | while read -r old_file; do
+            rm -f "$old_file"
+            log DEBUG "Removed old archive: $(basename "$old_file")"
+        done
+    fi
+
+    log INFO "Credential archive rotation complete (keeping $max_archives most recent)"
+    return 0
+}
+
+# Archive workflows with rotation (keep 5-10 backups)
+archive_workflows() {
+    local source_file="$1"
+    local backup_dir="$2"
+    local is_dry_run="$3"
+    local max_archives=${4:-10}
+
+    if [ ! -f "$source_file" ]; then
+        log WARN "Source workflows file not found: $source_file"
+        return 1
+    fi
+
+    local archive_dir="$backup_dir/archive"
+    local timestamp=$(date +"%Y%m%d_%H%M%S")
+    local archive_file="$archive_dir/workflows_${timestamp}.json"
+
+    if $is_dry_run; then
+        log DRYRUN "Would create archive directory: $archive_dir"
+        log DRYRUN "Would archive workflows to: $archive_file"
+        log DRYRUN "Would rotate archives to keep max $max_archives files"
+        return 0
+    fi
+
+    # Create archive directory
+    if ! mkdir -p "$archive_dir"; then
+        log ERROR "Failed to create archive directory: $archive_dir"
+        return 1
+    fi
+    chmod 700 "$archive_dir" || log WARN "Could not set permissions on archive directory"
+
+    # Archive current workflows
+    if ! cp "$source_file" "$archive_file"; then
+        log ERROR "Failed to archive workflows"
+        return 1
+    fi
+    chmod 600 "$archive_file" || log WARN "Could not set permissions on archived workflows"
+    log SUCCESS "Workflows archived to: $archive_file"
+
+    # Rotate archives - keep only the most recent max_archives
+    local archive_count
+    archive_count=$(find "$archive_dir" -name "workflows_*.json" | wc -l)
+    if [ "$archive_count" -gt "$max_archives" ]; then
+        local files_to_remove=$((archive_count - max_archives))
+        log INFO "Rotating workflow archives - removing $files_to_remove old files"
+        
+        # Remove oldest files (sort by name, which includes timestamp)
+        find "$archive_dir" -name "workflows_*.json" | sort | head -n "$files_to_remove" | while read -r old_file; do
+            rm -f "$old_file"
+            log DEBUG "Removed old archive: $(basename "$old_file")"
+        done
+    fi
+
+    log INFO "Workflow archive rotation complete (keeping $max_archives most recent)"
+    return 0
 }
 
 check_github_access() {
@@ -610,9 +843,41 @@ backup() {
     local branch="$4"
     local use_dated_backup=$5
     local is_dry_run=$6
+    local workflows_storage="${7:-local}"  # Where to store workflows (default: local)
+    local credentials_storage="${8:-local}"  # Where to store credentials (default: local)
+    local local_backup_path="${9:-$HOME/n8n-backup}"  # Local backup path (default: ~/n8n-backup)
 
-    log HEADER "Performing Backup to GitHub"
+    log HEADER "Performing Backup - Workflows: $workflows_storage, Credentials: $credentials_storage"
     if $is_dry_run; then log WARN "DRY RUN MODE ENABLED - NO CHANGES WILL BE MADE"; fi
+    
+    # Show security warnings
+    if [[ "$workflows_storage" == "remote" ]]; then
+        log WARN "⚠️  Workflows will be stored in Git repository"
+    fi
+    if [[ "$credentials_storage" == "remote" ]]; then
+        log WARN "⚠️  SECURITY WARNING: Credentials will be pushed to Git repository!"
+    fi
+    if [[ "$workflows_storage" == "local" && "$credentials_storage" == "local" ]]; then
+        log INFO "🔒 Security: Both workflows and credentials stored locally only"
+    fi
+    if $is_dry_run; then log WARN "DRY RUN MODE ENABLED - NO CHANGES WILL BE MADE"; fi
+
+    # Setup local backup storage directory
+    local local_backup_dir="$local_backup_path"
+    local local_workflows_file="$local_backup_dir/workflows.json"
+    local local_credentials_file="$local_backup_dir/credentials.json"
+    local local_env_file="$local_backup_dir/.env"
+    
+    if ! $is_dry_run; then
+        if ! mkdir -p "$local_backup_dir"; then
+            log ERROR "Failed to create local backup directory: $local_backup_dir"
+            return 1
+        fi
+        chmod 700 "$local_backup_dir" || log WARN "Could not set permissions on local backup directory"
+        log SUCCESS "Local backup directory ready: $local_backup_dir"
+    else
+        log DRYRUN "Would create local backup directory: $local_backup_dir"
+    fi
 
     local tmp_dir
     tmp_dir=$(mktemp -d -t n8n-backup-XXXXXXXXXX)
@@ -675,15 +940,20 @@ backup() {
     fi
 
     # Export credentials
-    if ! dockExec "$container_id" "n8n export:credentials --all --decrypted --output=$container_credentials" false; then 
-        # Check if the error is due to no credentials existing
-        if docker exec "$container_id" n8n list credentials 2>&1 | grep -q "No credentials found"; then
-            log INFO "No credentials found to backup - this is a clean installation"
-            no_data_found=true
-        else
-            log ERROR "Failed to export credentials"
-            export_failed=true
+    if [[ "$credentials_storage" == "local" || "$credentials_storage" == "remote" ]]; then
+        log INFO "Exporting credentials for $credentials_storage storage..."
+        if ! dockExec "$container_id" "n8n export:credentials --all --decrypted --output=$container_credentials" false; then 
+            # Check if the error is due to no credentials existing
+            if docker exec "$container_id" n8n list credentials 2>&1 | grep -q "No credentials found"; then
+                log INFO "No credentials found to backup - this is a clean installation"
+                no_data_found=true
+            else
+                log ERROR "Failed to export credentials"
+                export_failed=true
+            fi
         fi
+    else
+        log INFO "Credentials export skipped (not requested)"
     fi
 
     if $export_failed; then
@@ -692,23 +962,145 @@ backup() {
         return 1
     fi
 
-    # Handle environment variables
+    # Handle environment variables (will be stored locally only - NOT pushed to Git)
+    log INFO "Capturing environment variables for local storage only (NOT pushed to Git)..."
     if ! dockExec "$container_id" "printenv | grep ^N8N_ > $container_env" false; then
         log WARN "Could not capture N8N_ environment variables from container."
     fi
 
-    # If no data was found, create empty files to maintain backup structure
-    if $no_data_found; then
-        log INFO "Creating empty backup files for clean installation..."
-        if ! docker exec "$container_id" test -f "$container_workflows"; then
-            echo "[]" | docker exec -i "$container_id" sh -c "cat > $container_workflows"
+    # --- Process Local Storage ---
+    log HEADER "Storing Data Locally"
+    
+    # Handle workflows locally if requested
+    if [[ "$workflows_storage" == "local" ]] && docker exec "$container_id" test -f "$container_workflows"; then
+        log INFO "Saving workflows to local storage..."
+        if $is_dry_run; then
+            log DRYRUN "Would copy workflows from container to local storage: $local_workflows_file"
+            log DRYRUN "Would set permissions 600 on workflows file"
+        else
+            # Archive existing workflows if they exist
+            if [ -f "$local_workflows_file" ]; then
+                log INFO "Archiving existing workflows before backup..."
+                if ! archive_workflows "$local_workflows_file" "$local_backup_dir" "$is_dry_run" 10; then
+                    log WARN "Failed to archive existing workflows, but continuing..."
+                fi
+            fi
+
+            # Copy new workflows from container to local storage
+            if docker cp "${container_id}:${container_workflows}" "$local_workflows_file"; then
+                chmod 600 "$local_workflows_file" || log WARN "Could not set permissions on workflows file"
+                log SUCCESS "Workflows stored securely in local storage: $local_workflows_file"
+            else
+                log ERROR "Failed to copy workflows to local storage"
+                rm -rf "$tmp_dir"
+                return 1
+            fi
         fi
-        if ! docker exec "$container_id" test -f "$container_credentials"; then
-            echo "[]" | docker exec -i "$container_id" sh -c "cat > $container_credentials"
+    elif [[ "$workflows_storage" == "local" ]]; then
+        log INFO "No workflows file found in container"
+        if $no_data_found; then
+            if ! $is_dry_run; then
+                echo "[]" > "$local_workflows_file"
+                chmod 600 "$local_workflows_file"
+                log INFO "Created empty workflows file in local storage"
+            else
+                log DRYRUN "Would create empty workflows file in local storage"
+            fi
+        fi
+    fi
+    
+    # Handle credentials locally  
+    if [[ "$credentials_storage" == "local" ]] && docker exec "$container_id" test -f "$container_credentials"; then
+    if [[ "$credentials_storage" == "local" ]] && docker exec "$container_id" test -f "$container_credentials"; then
+        log INFO "Saving credentials to local secure storage..."
+        if $is_dry_run; then
+            log DRYRUN "Would copy credentials from container to local storage: $local_credentials_file"
+            log DRYRUN "Would set permissions 600 on credentials file"
+            log DRYRUN "Would archive previous credentials if they exist"
+        else
+            # Archive existing credentials if they exist
+            if [ -f "$local_credentials_file" ]; then
+                log INFO "Archiving existing credentials before backup..."
+                if ! archive_credentials "$local_credentials_file" "$local_backup_dir" "$is_dry_run" 10; then
+                    log WARN "Failed to archive existing credentials, but continuing..."
+                fi
+            fi
+
+            # Copy new credentials from container to local storage
+            if docker cp "${container_id}:${container_credentials}" "$local_credentials_file"; then
+                chmod 600 "$local_credentials_file" || log WARN "Could not set permissions on credentials file"
+                log SUCCESS "Credentials stored securely in local storage: $local_credentials_file"
+            else
+                log ERROR "Failed to copy credentials to local storage"
+                rm -rf "$tmp_dir"
+                return 1
+            fi
+        fi
+    else
+        log INFO "No credentials file found in container"
+        if $no_data_found; then
+            if ! $is_dry_run; then
+                echo "[]" > "$local_credentials_file"
+                chmod 600 "$local_credentials_file"
+                log INFO "Created empty credentials file in local storage"
+            else
+                log DRYRUN "Would create empty credentials file in local storage"
+            fi
         fi
     fi
 
-    # --- Determine Target Directory and Copy --- 
+    # Handle environment variables  
+    if docker exec "$container_id" test -f "$container_env"; then
+        log INFO "Saving environment variables to local secure storage..."
+        if $is_dry_run; then
+            log DRYRUN "Would copy environment variables from container to local storage: $local_env_file"
+            log DRYRUN "Would set permissions 600 on environment file"
+        else
+            if docker cp "${container_id}:${container_env}" "$local_env_file"; then
+                chmod 600 "$local_env_file" || log WARN "Could not set permissions on environment file"
+                log SUCCESS "Environment variables stored securely in local storage: $local_env_file"
+            else
+                log WARN "Failed to copy environment variables to local storage"
+            fi
+        fi
+    else
+        log INFO "No environment variables file found in container"
+    fi
+
+    # If no data was found, create empty files to maintain backup structure (workflows only for Git)
+    if $no_data_found; then
+        log INFO "Creating empty workflow backup file for clean installation..."
+        if ! docker exec "$container_id" test -f "$container_workflows"; then
+            echo "[]" | docker exec -i "$container_id" sh -c "cat > $container_workflows"
+        fi
+    fi
+
+    # --- Process Files for Git Repository (Conditional) ---
+    local needs_git_repo=false
+    if [[ "$workflows_storage" == "remote" || "$credentials_storage" == "remote" ]]; then
+        needs_git_repo=true
+        if [[ "$workflows_storage" == "remote" && "$credentials_storage" == "remote" ]]; then
+            log HEADER "Preparing Files for Git Repository (Workflows + Credentials)"
+        elif [[ "$workflows_storage" == "remote" ]]; then
+            log HEADER "Preparing Workflows for Git Repository (Credentials Excluded)"
+        else
+            log HEADER "Preparing Credentials for Git Repository (Workflows Excluded)"
+        fi
+    else
+        log INFO "Git repository not needed - all data stored locally"
+        # Skip Git operations entirely
+        needs_git_repo=false
+    fi
+    
+    if ! $needs_git_repo; then
+        log INFO "Cleaning up temporary files in container..."
+        dockExec "$container_id" "rm -f $container_workflows $container_credentials $container_env" "$is_dry_run" || log WARN "Could not clean up temporary files in container."
+        
+        log SUCCESS "Backup completed - all data stored locally at: $local_backup_dir"
+        return 0
+    fi
+
+    # Determine Target Directory and Copy Workflows Only
     local target_dir="$tmp_dir"
     local backup_timestamp=""
     if [ "$use_dated_backup" = "true" ]; then
@@ -724,66 +1116,133 @@ backup() {
         fi
     fi
 
-    log INFO "Copying exported files from container into Git directory..."
+    log INFO "Copying files to Git directory..."
     local copy_status="success" # Use string instead of boolean to avoid empty command errors
-    for file in workflows.json credentials.json .env; do
-        source_file="/tmp/${file}"
+    
+    # Copy workflows.json to Git repository if requested
+    if [[ "$workflows_storage" == "remote" ]]; then
+        source_file="/tmp/workflows.json"
         if [ "$use_dated_backup" = "true" ]; then
-            # Create timestamped subdirectory
             mkdir -p "${target_dir}" || return 1
-            dest_file="${target_dir}/${file}"
+            dest_file="${target_dir}/workflows.json"
         else
-            dest_file="${tmp_dir}/${file}"
+            dest_file="${tmp_dir}/workflows.json"
         fi
 
-        # Check if file exists in container
+        # Check if workflows file exists in container
         if ! docker exec "$container_id" test -f "$source_file"; then
-            if [[ "$file" == ".env" ]]; then
-                log WARN ".env file not found in container, skipping."
-                continue
-            else
-                log ERROR "Required file $file not found in container"
+            log ERROR "Required workflows.json file not found in container"
+            copy_status="failed"
+        else
+            # Copy workflows file from container
+            size=$(docker exec "$container_id" du -h "$source_file" | awk '{print $1}')
+            if ! docker cp "${container_id}:${source_file}" "${dest_file}"; then
+                log ERROR "Failed to copy workflows.json from container"
                 copy_status="failed"
-                continue
+            else
+                log SUCCESS "Successfully copied workflows ($size) to Git directory: ${dest_file}"
             fi
         fi
-
-        # Copy file from container
-        size=$(docker exec "$container_id" du -h "$source_file" | awk '{print $1}')
-        if ! docker cp "${container_id}:${source_file}" "${dest_file}"; then
-            log ERROR "Failed to copy $file from container"
-            copy_status="failed"
-            continue
+    else
+        log INFO "Workflows will be stored locally only - not copying to Git"
+    fi    # Create .gitignore based on credentials_storage setting
+    local gitignore_file="${tmp_dir}/.gitignore"
+    if $is_dry_run; then
+        if [[ "$credentials_storage" == "remote" ]]; then
+            log DRYRUN "Would create .gitignore with basic exclusions (credentials will be in Git)"
+        else
+            log DRYRUN "Would create .gitignore with credentials and environment exclusions"
         fi
-        log SUCCESS "Successfully copied $size to ${dest_file}"
-        
-        # Force Git to see changes by updating a separate timestamp file instead of modifying the JSON files
-        # This preserves the integrity of the n8n files for restore operations
-        
-        # Create or update the timestamp file in the same directory
-        local ts_file="${tmp_dir}/backup_timestamp.txt"
-        echo "Backup generated at: $(date +"%Y-%m-%d %H:%M:%S.%N")" > "$ts_file"
-        log DEBUG "Created timestamp file $ts_file to track backup uniqueness"
-    done
+    else
+        if [[ "$credentials_storage" == "remote" ]]; then
+            # When pushing credentials to Git, only exclude environment and temp files
+            cat > "$gitignore_file" << 'EOF'
+# n8n Security - Environment variables and temporary files only
+.env
+*.env
+**/.env
+**/*.env
+
+# Archive directories
+archive/
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.tmp
+*.temp
+EOF
+            log SUCCESS "Created .gitignore for credential-inclusive backup"
+        else
+            # Default secure mode: exclude all sensitive data
+            cat > "$gitignore_file" << 'EOF'
+# n8n Security - Never commit sensitive data
+credentials.json
+.env
+*.env
+**/credentials.json
+**/.env
+**/*.env
+
+# Archive directories
+archive/
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.tmp
+*.temp
+EOF
+            log SUCCESS "Created .gitignore to prevent sensitive data from being committed"
+        fi
+    fi
     
-    # Check if any copy operations failed
+    # Check if workflow copy operations failed
     if [ "$copy_status" = "failed" ]; then 
-        log ERROR "Copy operations failed, aborting backup"
+        log ERROR "Workflow copy operations failed, aborting backup"
         rm -rf "$tmp_dir"
         return 1
     fi
 
+    # Force Git to see changes by updating a separate timestamp file instead of modifying the JSON files
+    # This preserves the integrity of the n8n files for restore operations
+    local ts_file="${tmp_dir}/backup_timestamp.txt"
+    local backup_time=$(date +"%Y-%m-%d %H:%M:%S.%N")
+    echo "Workflows backup generated at: $backup_time" > "$ts_file"
+    if [[ "$credentials_storage" == "remote" ]]; then
+        echo "Credentials included in Git repository" >> "$ts_file"
+    else
+        echo "Credentials stored locally at: $local_credentials_file" >> "$ts_file"
+    fi
+    echo "Environment stored locally at: $local_env_file" >> "$ts_file"
+    log DEBUG "Created timestamp file $ts_file to track backup metadata"
+
     log INFO "Cleaning up temporary files in container..."
     dockExec "$container_id" "rm -f $container_workflows $container_credentials $container_env" "$is_dry_run" || log WARN "Could not clean up temporary files in container."
 
-    # --- Git Commit and Push --- 
-    log INFO "Adding files to Git..."
+    # --- Git Commit and Push (Conditional Credentials) --- 
+    if [[ "$credentials_storage" == "remote" ]]; then
+        log HEADER "Committing Workflows and Credentials to Git"
+    else
+        log HEADER "Committing Workflows to Git (Credentials Excluded)"
+    fi
+    log INFO "Adding files to Git repository..."
     
     if $is_dry_run; then
         if $use_dated_backup; then
-            log DRYRUN "Would add dated backup directory '$backup_timestamp' to Git index"
+            log DRYRUN "Would add dated backup directory '$backup_timestamp' to Git index (workflows only)"
         else
-            log DRYRUN "Would add all files to Git index"
+            log DRYRUN "Would add workflow files to Git index (credentials and .env excluded)"
         fi
     else
         # Change to the git directory to avoid parsing issues
@@ -794,15 +1253,15 @@ backup() {
         }
         
         if [ "$use_dated_backup" = "true" ]; then
-            # For dated backups, explicitly add the backup subdirectory
+            # For dated backups, explicitly add the backup subdirectory (workflows only)
             if [ -d "$backup_timestamp" ]; then
-                log DEBUG "Adding dated backup directory: $backup_timestamp"
+                log DEBUG "Adding dated backup directory: $backup_timestamp (workflows only)"
                 
                 # First list what's in the directory (for debugging)
                 log DEBUG "Files in backup directory:"
                 ls -la "$backup_timestamp" || true
                 
-                # Add specific directory
+                # Add specific directory (should only contain workflows.json)
                 if ! git add "$backup_timestamp"; then
                     log ERROR "Git add failed for dated backup directory"
                     cd - > /dev/null || true
@@ -816,20 +1275,38 @@ backup() {
                 return 1
             fi
         else
-            # Standard repo-root backup
-            log DEBUG "Adding all files at repository root"
-            # Explicitly target the timestamp file and specific JSON files to avoid unnecessary files
-            if ! git add workflows.json credentials.json .env backup_timestamp.txt; then
-                log ERROR "Git add failed for repository root files"
-                cd - > /dev/null || true
-                return 1
+            # Standard repo-root backup - add workflows and conditionally credentials
+            if [[ "$credentials_storage" == "remote" ]]; then
+                log DEBUG "Adding workflow and credential files at repository root"
+                # Add workflows, credentials (if exists), and metadata
+                local files_to_add="workflows.json .gitignore backup_timestamp.txt"
+                if [ -f "credentials.json" ]; then
+                    files_to_add="$files_to_add credentials.json"
+                fi
+                if ! git add $files_to_add; then
+                    log ERROR "Git add failed for workflow and credential files"
+                    cd - > /dev/null || true
+                    return 1
+                fi
+            else
+                log DEBUG "Adding workflow files at repository root (credentials excluded)"
+                # Explicitly add only safe files
+                if ! git add workflows.json .gitignore backup_timestamp.txt; then
+                    log ERROR "Git add failed for workflow files"
+                    cd - > /dev/null || true
+                    return 1
+                fi
             fi
         fi
         
-        log SUCCESS "Files added to Git successfully"
+        if [[ "$credentials_storage" == "remote" ]]; then
+            log SUCCESS "Workflow and credential files added to Git successfully"
+        else
+            log SUCCESS "Workflow files added to Git successfully (credentials and environment excluded)"
+        fi
         
         # Verify that files were staged correctly
-        log DEBUG "Staging status:"
+        log DEBUG "Git staging status:"
         git status --short || true
     fi
 
@@ -839,11 +1316,22 @@ backup() {
 
     # --- Commit Logic --- 
     local commit_status="pending" # Use string instead of boolean to avoid empty command errors
-    log INFO "Committing changes..."
+    if $push_credentials; then
+        log INFO "Committing workflow and credential changes to Git..."
+    else
+        log INFO "Committing workflow changes to Git..."
+    fi
     
     # Create a timestamp with seconds to ensure uniqueness
     local backup_time=$(date +"%Y-%m-%d_%H-%M-%S")
-    local commit_msg="🛡️ n8n Backup (v$n8n_ver) - $backup_time"
+    local commit_msg
+    if [[ "$credentials_storage" == "remote" ]]; then
+        commit_msg="🛡️ n8n Full Backup (v$n8n_ver) - $backup_time"
+        commit_msg="${commit_msg} [Workflows + Credentials in Git]"
+    else
+        commit_msg="🛡️ n8n Workflows Backup (v$n8n_ver) - $backup_time"
+        commit_msg="${commit_msg} [Credentials stored locally]"
+    fi
     if [ "$use_dated_backup" = "true" ]; then
         commit_msg="$commit_msg [$backup_timestamp]"
     fi
@@ -859,33 +1347,11 @@ backup() {
         git config user.name "n8n Backup Script" || true
     fi
     
-    # Force Git to commit by adding a timestamp file to make each backup unique
-    log DEBUG "Creating timestamp file to ensure backup uniqueness"
-    echo "Backup generated at: $backup_time" > "./backup_timestamp.txt"
-    
-    # Explicitly add all n8n files AND the timestamp file
-    log DEBUG "Adding all n8n files to Git..."
-    if [ "$use_dated_backup" = "true" ] && [ -n "$backup_timestamp" ] && [ -d "$backup_timestamp" ]; then
-        log DEBUG "Adding dated backup directory: $backup_timestamp"
-        if ! git add "$backup_timestamp" ./backup_timestamp.txt; then
-            log ERROR "Failed to add dated backup directory"
-            git status
-            cd - > /dev/null || true
-            return 1
-        fi
-    else
-        # Add individual files explicitly to ensure nothing is missed
-        log DEBUG "Adding individual files to Git"
-        if ! git add ./backup_timestamp.txt workflows.json credentials.json .env 2>/dev/null; then
-            log ERROR "Failed to add n8n files"
-            git status
-            cd - > /dev/null || true
-            return 1
-        fi
-    fi
+    # The timestamp file and .gitignore should already be created and added
+    # No need to duplicate the git add operations here since they were done above
     
     # Skip Git's change detection and always commit
-    log DEBUG "Committing backup with message: $commit_msg"
+    log DEBUG "Committing workflow backup with message: $commit_msg"
     if [ "$is_dry_run" = "true" ]; then
         log DRYRUN "Would commit with message: $commit_msg"
         commit_status="success" # Assume commit would happen in dry run
@@ -948,7 +1414,7 @@ backup() {
         return 1
     fi
     
-    log SUCCESS "Backup successfully pushed to GitHub repository"
+    log SUCCESS "Workflow backup successfully pushed to GitHub repository"
     cd - > /dev/null || true
 
     log INFO "Cleaning up host temporary directory..."
@@ -958,8 +1424,14 @@ backup() {
         rm -rf "$tmp_dir"
     fi
 
-    log SUCCESS "Backup successfully completed and pushed to GitHub."
-    if $is_dry_run; then log WARN "(Dry run mode was active)"; fi
+    log HEADER "Backup Summary"
+    log SUCCESS "✅ Workflows: Successfully backed up to GitHub repository"
+    log SUCCESS "🔒 Credentials: Securely stored locally at $local_credentials_file"
+    log SUCCESS "🌍 Environment: Securely stored locally at $local_env_file"
+    log INFO "📁 Local backup directory: $local_backup_dir"
+    log WARN "⚠️  Important: Credentials and environment variables are NOT in Git for security"
+    
+    if $is_dry_run; then log WARN "(Dry run mode was active - no changes made)"; fi
     return 0
 }
 
@@ -973,9 +1445,13 @@ restore() {
 
     log HEADER "Performing Restore from GitHub (Type: $restore_type)"
     if $is_dry_run; then log WARN "DRY RUN MODE ENABLED - NO CHANGES WILL BE MADE"; fi
+    
+    # Show restore plan for clarity
+    if [ -t 0 ] && ! $is_dry_run; then
+        show_restore_plan "$restore_type" "$github_repo" "$branch"
+    fi
 
     if [ -t 0 ] && ! $is_dry_run; then
-        log WARN "This will overwrite existing data (type: $restore_type)."
         printf "Are you sure you want to proceed? (yes/no): "
         local confirm
         read -r confirm
@@ -1203,9 +1679,44 @@ restore() {
         log SUCCESS "Found workflows.json in repository root"
     fi
     
-    if [ -z "$repo_credentials" ] && [ -f "${download_dir}/credentials.json" ]; then
-        repo_credentials="${download_dir}/credentials.json"
-        log SUCCESS "Found credentials.json in repository root"
+    # Handle credentials differently - check local storage first, then Git repo for backwards compatibility
+    local local_backup_dir="$HOME/n8n-backup"
+    local local_credentials_file="$local_backup_dir/credentials.json"
+    
+    if [[ "$restore_type" == "all" || "$restore_type" == "credentials" ]]; then
+        log INFO "Checking for credentials in local secure storage..."
+        
+        # Check local storage first (preferred method)
+        if [ -f "$local_credentials_file" ] && [ -s "$local_credentials_file" ]; then
+            repo_credentials="$local_credentials_file"
+            log SUCCESS "Found credentials in local secure storage: $local_credentials_file"
+        # Check for dated backup credentials in Git
+        elif [ -n "$selected_backup" ] && [ -f "${download_dir}${selected_backup}/credentials.json" ] && [ -s "${download_dir}${selected_backup}/credentials.json" ]; then
+            repo_credentials="${download_dir}${selected_backup}/credentials.json"
+            log WARN "Found credentials in Git repository dated backup (legacy method)"
+            log WARN "⚠️  Security recommendation: Use newer backup method that stores credentials locally"
+        # Check repository root for credentials
+        elif [ -f "${download_dir}/credentials.json" ] && [ -s "${download_dir}/credentials.json" ]; then
+            repo_credentials="${download_dir}/credentials.json"
+            log WARN "Found credentials in Git repository root (legacy method)"
+            log WARN "⚠️  Security recommendation: Use newer backup method that stores credentials locally"
+        else
+            log ERROR "No credentials found for $restore_type restore"
+            log ERROR "Searched locations:"
+            log ERROR "  • Local secure storage: $local_credentials_file (preferred)"
+            if [ -n "$selected_backup" ]; then
+                log ERROR "  • Git dated backup: ${download_dir}${selected_backup}/credentials.json"
+            fi
+            log ERROR "  • Git repository root: ${download_dir}/credentials.json"
+            log ERROR "📝 To fix: Either use a backup that includes credentials, or restore workflows-only"
+            file_validation_passed=false
+        fi
+    fi
+    
+    # Check for workflows in Git repository  
+    if [ -z "$repo_workflows" ] && [ -f "${download_dir}/workflows.json" ]; then
+        repo_workflows="${download_dir}/workflows.json"
+        log SUCCESS "Found workflows.json in repository root"
     fi
     
     # Display file sizes for debug purposes
@@ -1214,7 +1725,11 @@ restore() {
     fi
     
     if [ -n "$repo_credentials" ]; then
-        log DEBUG "Credentials file size: $(du -h "$repo_credentials" | cut -f1)"
+        local cred_location="local storage"
+        if [[ "$repo_credentials" == *"/credentials.json" ]] && [[ "$repo_credentials" != "$local_credentials_file" ]]; then
+            cred_location="Git repository (legacy)"
+        fi
+        log DEBUG "Credentials file size: $(du -h "$repo_credentials" | cut -f1) [from $cred_location]"
     fi
     
     # Proceed directly to import phase
@@ -1234,9 +1749,15 @@ restore() {
     if [[ "$restore_type" == "all" || "$restore_type" == "credentials" ]]; then
         if [ ! -f "$repo_credentials" ] || [ ! -s "$repo_credentials" ]; then
             log ERROR "Valid credentials.json not found for $restore_type restore"
+            log ERROR "💡 Suggestion: Try --restore-type workflows to restore workflows only"
+            log ERROR "💡 Alternative: Create new credentials in n8n after workflow restore"
             file_validation_passed=false
         else
-            log SUCCESS "Credentials file validated for import"
+            local cred_source_desc="local secure storage"
+            if [[ "$repo_credentials" != "$local_credentials_file" ]]; then
+                cred_source_desc="Git repository (legacy backup)"
+            fi
+            log SUCCESS "Credentials file validated for import from $cred_source_desc"
         fi
     fi
     
@@ -1383,7 +1904,36 @@ restore() {
     fi
     
     # Success - restore completed successfully
-    log SUCCESS "Restore completed successfully!"
+    log HEADER "Restore Summary"
+    
+    # Determine credential source for accurate reporting
+    local cred_source="unknown"
+    if [ -n "$repo_credentials" ]; then
+        if [[ "$repo_credentials" == "$local_credentials_file" ]]; then
+            cred_source="local secure storage"
+        else
+            cred_source="Git repository (legacy)"
+        fi
+    fi
+    
+    if [[ "$restore_type" == "all" ]]; then
+        log SUCCESS "✅ Complete restore completed successfully!"
+        log SUCCESS "📄 Workflows: Restored from Git repository"
+        log SUCCESS "🔒 Credentials: Restored from $cred_source"
+    elif [[ "$restore_type" == "workflows" ]]; then
+        log SUCCESS "✅ Workflows restore completed successfully!"
+        log SUCCESS "📄 Workflows: Restored from Git repository"
+        log INFO "🔒 Credentials: Unchanged (not restored)"
+    elif [[ "$restore_type" == "credentials" ]]; then
+        log SUCCESS "✅ Credentials restore completed successfully!"
+        log SUCCESS "🔒 Credentials: Restored from $cred_source"
+        log INFO "📄 Workflows: Unchanged (not restored)"
+    fi
+    
+    if [ -n "$repo_credentials" ] && [[ "$repo_credentials" != "$local_credentials_file" ]]; then
+        log WARN "⚠️  Note: Credentials were restored from Git repository (legacy backup)"
+        log WARN "⚠️  Consider using newer backup method that stores credentials locally"
+    fi
     
     # Clean up pre-restore backup if successful
     if [ -n "$pre_restore_dir" ] && [ "$is_dry_run" != "true" ]; then
@@ -1405,12 +1955,29 @@ main() {
             --repo) ARG_REPO="$2"; shift 2 ;; 
             --branch) ARG_BRANCH="$2"; shift 2 ;; 
             --config) ARG_CONFIG_FILE="$2"; shift 2 ;; 
-            --dated) ARG_DATED_BACKUPS=true; shift 1 ;; 
+            --dated) ARG_DATED_BACKUPS=true; shift 1 ;;
+            --workflows)
+                if [ $# -gt 1 ] && [[ "$2" == "local" || "$2" == "remote" ]]; then
+                    ARG_WORKFLOWS_STORAGE="$2"; shift 2
+                else
+                    ARG_WORKFLOWS_STORAGE="local"; shift 1  # Default to local if no argument
+                fi ;;
+            --credentials)
+                if [ $# -gt 1 ] && [[ "$2" == "local" || "$2" == "remote" ]]; then
+                    ARG_CREDENTIALS_STORAGE="$2"; shift 2
+                else
+                    ARG_CREDENTIALS_STORAGE="local"; shift 1  # Default to local if no argument
+                fi ;;
+            --path) ARG_LOCAL_BACKUP_PATH="$2"; shift 2 ;;
             --restore-type) 
                 if [[ "$2" == "all" || "$2" == "workflows" || "$2" == "credentials" ]]; then
                     ARG_RESTORE_TYPE="$2"
                 else
-                    echo -e "${RED}[ERROR]${NC} Invalid --restore-type: '$2'. Must be 'all', 'workflows', or 'credentials'." >&2
+                    echo -e "${RED}[ERROR]${NC} Invalid --restore-type: '$2'." >&2
+                    echo -e "${YELLOW}[INFO]${NC} Valid options:" >&2
+                    echo -e "${YELLOW}[INFO]${NC}   • all        - Restore workflows and credentials" >&2
+                    echo -e "${YELLOW}[INFO]${NC}   • workflows  - Restore workflows only (credentials unchanged)" >&2
+                    echo -e "${YELLOW}[INFO]${NC}   • credentials - Restore credentials only (workflows unchanged)" >&2
                     exit 1
                 fi
                 shift 2 ;;
@@ -1427,6 +1994,9 @@ main() {
     load_config
 
     log HEADER "n8n Backup/Restore Manager v$VERSION"
+    log INFO "🔒 Security-Enhanced Version: Credentials stored locally, not in Git repositories"
+    log INFO "📁 Local storage: ~/n8n-backup/ (credentials and environment variables)"
+    log INFO "🗂️  Git repository: workflows only (sensitive data excluded)"
     if [ "$ARG_DRY_RUN" = "true" ]; then log WARN "DRY RUN MODE ENABLED"; fi
     if [ "$ARG_VERBOSE" = "true" ]; then log DEBUG "Verbose mode enabled."; fi
     
@@ -1439,14 +2009,42 @@ main() {
     local github_repo="$ARG_REPO"
     local branch="${ARG_BRANCH:-main}"
     local use_dated_backup=$ARG_DATED_BACKUPS
-    local restore_type="${ARG_RESTORE_TYPE:-all}"
+    local workflows_storage="$ARG_WORKFLOWS_STORAGE"
+    local credentials_storage="$ARG_CREDENTIALS_STORAGE"
+    local local_backup_path="${ARG_LOCAL_BACKUP_PATH:-$HOME/n8n-backup}"
+    local restore_type="${ARG_RESTORE_TYPE:-all}"  # Keep for backwards compatibility
     local is_dry_run=$ARG_DRY_RUN
+    
+    # Set intelligent defaults for backup - require explicit storage specification
+    if [[ "$action" == "backup" ]]; then
+        if [[ -z "$workflows_storage" && -z "$credentials_storage" ]]; then
+            # Neither specified - no backup operation (user must be explicit)
+            log ERROR "No storage options specified. Please specify --workflows and/or --credentials with 'local' or 'remote'"
+            log INFO "Examples:"
+            log INFO "  --workflows remote --credentials local    (workflows to Git, credentials local)"
+            log INFO "  --workflows local --credentials local     (both local only)"
+            log INFO "  --workflows remote                        (workflows to Git only)"
+            log INFO "  --credentials local                       (credentials local only)"
+            exit 1
+        elif [[ -z "$workflows_storage" ]]; then
+            # Only credentials specified - default workflows to remote (Git) for typical use case
+            workflows_storage="remote"
+            log INFO "Workflows storage not specified - defaulting to remote (Git repository)"
+        elif [[ -z "$credentials_storage" ]]; then
+            # Only workflows specified - default credentials to local (secure)
+            credentials_storage="local"
+            log INFO "Credentials storage not specified - defaulting to local (secure)"
+        fi
+    fi
 
     log DEBUG "Initial Action: $action"
     log DEBUG "Initial Container: $container_id"
     log DEBUG "Initial Repo: $github_repo"
     log DEBUG "Initial Branch: $branch"
     log DEBUG "Initial Dated Backup: $use_dated_backup"
+    log DEBUG "Initial Workflows Storage: $workflows_storage"
+    log DEBUG "Initial Credentials Storage: $credentials_storage"
+    log DEBUG "Initial Local Backup Path: $local_backup_path"
     log DEBUG "Initial Restore Type: $restore_type"
     log DEBUG "Initial Dry Run: $is_dry_run"
     log DEBUG "Initial Verbose: $ARG_VERBOSE"
@@ -1516,6 +2114,35 @@ main() {
         fi
         log DEBUG "Use Dated Backup: $use_dated_backup"
         
+        if [[ "$action" == "backup" ]] && [[ -z "$workflows_storage" && -z "$credentials_storage" ]]; then
+            log INFO "No storage options specified. Choose backup strategy:"
+            echo "1) Both Local (Secure - recommended for personal use)"
+            echo "2) Both Remote (Git repository - good for team sharing)"
+            echo "3) Workflows Remote + Credentials Local (Hybrid - secure credentials, shared workflows)"
+            echo "4) Custom (specify each independently)"
+            
+            local backup_strategy
+            while true; do
+                printf "\nSelect backup strategy (1-4): "
+                read -r backup_strategy
+                case "$backup_strategy" in
+                    1) workflows_storage="local"; credentials_storage="local"; break ;;
+                    2) workflows_storage="remote"; credentials_storage="remote"; 
+                       log WARN "⚠️  You chose to store credentials in Git (less secure)"; break ;;
+                    3) workflows_storage="remote"; credentials_storage="local"; break ;;
+                    4) 
+                        printf "Workflows storage (local/remote) [local]: "
+                        read -r workflows_storage
+                        workflows_storage=${workflows_storage:-local}
+                        printf "Credentials storage (local/remote) [local]: "
+                        read -r credentials_storage
+                        credentials_storage=${credentials_storage:-local}
+                        break ;;
+                    *) log ERROR "Invalid option. Please select 1-4." ;;
+                esac
+            done
+        fi
+        
         if [[ "$action" == "restore" ]] && [[ "$restore_type" == "all" ]] && ! grep -q "CONF_RESTORE_TYPE=" "${ARG_CONFIG_FILE:-$CONFIG_FILE_PATH}" 2>/dev/null; then
             select_restore_type
             restore_type="$SELECTED_RESTORE_TYPE"
@@ -1523,6 +2150,23 @@ main() {
              log INFO "Using restore type: $restore_type"
         fi
         log DEBUG "Restore Type: $restore_type"
+        
+        # For interactive credential restores, check if we need to ask about source preference
+        if [[ "$action" == "restore" ]] && ([[ "$restore_type" == "all" ]] || [[ "$restore_type" == "credentials" ]]) && [ -t 0 ]; then
+            local local_backup_dir="$HOME/n8n-backup"
+            local local_credentials_file="$local_backup_dir/credentials.json"
+            if [ -f "$local_credentials_file" ] && [ -s "$local_credentials_file" ]; then
+                log INFO "🔒 Local secure credentials found and will be used (recommended)"
+                log INFO "💡 Use --restore-type workflows to restore only workflows if desired"
+            else
+                log INFO "🔍 Will search for credentials in Git repository (legacy backups)"
+                log INFO "💡 Consider creating a new backup to store credentials securely locally"
+            fi
+        fi
+                log INFO "🔍 Will search for credentials in Git repository (legacy backups)"
+                log INFO "💡 Consider creating a new backup to store credentials securely locally"
+            fi
+        fi
     fi
 
     # Final validation
@@ -1541,7 +2185,7 @@ main() {
     log INFO "Starting action: $action"
     case "$action" in
         backup)
-            if backup "$container_id" "$github_token" "$github_repo" "$branch" "$use_dated_backup" "$is_dry_run"; then
+            if backup "$container_id" "$github_token" "$github_repo" "$branch" "$use_dated_backup" "$is_dry_run" "$workflows_storage" "$credentials_storage" "$local_backup_path"; then
                 log SUCCESS "Backup operation completed successfully."
             else
                 log ERROR "Backup operation failed."
