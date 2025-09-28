@@ -351,11 +351,13 @@ main() {
             fi
             
             # Ask about n8n folder structure if workflows are going to remote and not already configured
-            if [[ "$workflows_storage" == "remote" ]] && [[ "$folder_structure" == "false" ]]; then
+            if [[ "$workflows_storage" == "remote" ]] && [[ -z "$folder_structure" ]]; then
                 printf "Create n8n folder structure in Git repository? (yes/no) [no]: "
                 read -r folder_structure_choice
                 if [[ "$folder_structure_choice" == "yes" || "$folder_structure_choice" == "y" ]]; then
                     folder_structure=true
+                else
+                    folder_structure=false
                 fi
                     
                     # Prompt for n8n API credentials if not already configured
