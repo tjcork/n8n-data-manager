@@ -209,6 +209,17 @@ main() {
                 show_help
                 exit 1
             fi
+            
+            # Validate API access
+            log INFO "Validating n8n API access..."
+            if ! validate_n8n_api_access "$CONF_N8N_BASE_URL" "$CONF_N8N_API_KEY"; then
+                log ERROR "❌ n8n API validation failed!"
+                log ERROR "Please check your URL and API key configuration."
+                log INFO "💡 Tip: You can test your API manually with:"
+                log INFO "   curl -H \"X-N8N-API-KEY: your_key\" \"$CONF_N8N_BASE_URL/rest/workflows?limit=1\""
+                exit 1
+            fi
+            log SUCCESS "✅ n8n API configuration validated successfully!"
         fi
 
         # Validate container
@@ -339,6 +350,18 @@ main() {
                             exit 1
                         fi
                     fi
+                    
+                    # Validate API access immediately after configuration
+                    log INFO "Validating n8n API access..."
+                    if ! validate_n8n_api_access "$CONF_N8N_BASE_URL" "$CONF_N8N_API_KEY"; then
+                        log ERROR "❌ n8n API validation failed!"
+                        log ERROR "Please check your URL and API key, then try again."
+                        log INFO "💡 Tip: You can test your API manually with:"
+                        log INFO "   curl -H \"X-N8N-API-KEY: your_key\" \"$CONF_N8N_BASE_URL/rest/workflows?limit=1\""
+                        exit 1
+                    fi
+                    
+                    log SUCCESS "✅ n8n API configuration validated successfully!"
                     
                     log INFO "✅ Folder structure enabled with n8n API integration"
                 else

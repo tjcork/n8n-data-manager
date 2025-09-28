@@ -45,6 +45,89 @@ test_n8n_api_connection() {
     return 0
 }
 
+# Comprehensive API validation - tests all required endpoints
+validate_n8n_api_access() {
+    local base_url="$1"
+    local api_key="$2"
+    
+    log INFO "🔍 Validating n8n API access and permissions..."
+    
+    # Test basic connection first
+    if ! test_n8n_api_connection "$base_url" "$api_key" "true"; then
+        return 1
+    fi
+    
+    # Clean up URL
+    base_url="${base_url%/}"
+    
+    # Test projects endpoint
+    log DEBUG "Testing projects API endpoint..."
+    local projects_response
+    local projects_status
+    if ! projects_response=$(curl -s -w "\n%{http_code}" -H "X-N8N-API-KEY: $api_key" "$base_url/rest/projects" 2>/dev/null); then
+        log WARN "Projects endpoint test failed - continuing with fallback"
+    else
+        projects_status=$(echo "$projects_response" | tail -n1)
+        if [[ "$projects_status" == "200" ]]; then
+            local project_count
+            project_count=$(echo "$projects_response" | head -n -1 | python3 -c "
+import json
+import sys
+try:
+    data = json.load(sys.stdin)
+    if isinstance(data, dict) and 'data' in data:
+        print(len(data['data']))
+    elif isinstance(data, list):
+        print(len(data))
+    else:
+        print('0')
+except:
+    print('0')
+" 2>/dev/null)
+            log SUCCESS "✅ Projects endpoint: $project_count projects found"
+        else
+            log WARN "⚠️  Projects endpoint returned HTTP $projects_status - folder structure may be limited"
+        fi
+    fi
+    
+    # Test workflows with folders endpoint
+    log DEBUG "Testing workflows with folders endpoint..."
+    local workflows_response
+    local workflows_status
+    if ! workflows_response=$(curl -s -w "\n%{http_code}" -H "X-N8N-API-KEY: $api_key" "$base_url/rest/workflows?includeFolders=true&limit=5" 2>/dev/null); then
+        log ERROR "Failed to test workflows endpoint"
+        return 1
+    fi
+    
+    workflows_status=$(echo "$workflows_response" | tail -n1)
+    if [[ "$workflows_status" == "200" ]]; then
+        local workflow_count
+        workflow_count=$(echo "$workflows_response" | head -n -1 | python3 -c "
+import json
+import sys
+try:
+    data = json.load(sys.stdin)
+    if isinstance(data, dict) and 'data' in data:
+        print(len(data['data']))
+    elif isinstance(data, list):
+        print(len(data))
+    else:
+        print('0')
+except:
+    print('0')
+" 2>/dev/null)
+        log SUCCESS "✅ Workflows endpoint: $workflow_count workflows accessible"
+    else
+        log ERROR "❌ Workflows endpoint failed with HTTP $workflows_status"
+        return 1
+    fi
+    
+    # Final validation summary
+    log SUCCESS "🎉 n8n API validation completed successfully!"
+    log INFO "Your API configuration is working correctly."
+    return 0
+}
+
 # Fetch all projects from n8n instance
 fetch_n8n_projects() {
     local base_url="$1"
@@ -160,8 +243,8 @@ create_n8n_folder_structure() {
         return 1
     fi
     
-    # Test API connection first
-    if ! test_n8n_api_connection "$base_url" "$api_key"; then
+    # Test API connection first (non-verbose since we validated earlier)
+    if ! test_n8n_api_connection "$base_url" "$api_key" "false"; then
         log ERROR "Cannot proceed with folder structure creation - API connection failed"
         return 1
     fi
@@ -185,12 +268,34 @@ create_n8n_folder_structure() {
         log ERROR "Failed to fetch projects from n8n API"
         return 1
     fi
+    log DEBUG "Projects API response received: $(echo "$projects_response" | wc -c) characters"
     
     local workflows_response  
     if ! workflows_response=$(fetch_workflows_with_folders "$base_url" "$api_key"); then
         log ERROR "Failed to fetch workflows with folder information"
         return 1
     fi
+    log DEBUG "Workflows API response received: $(echo "$workflows_response" | wc -c) characters"
+    
+    # Show sample of workflow data for debugging
+    local workflow_count
+    workflow_count=$(echo "$workflows_response" | python3 -c "
+import json
+import sys
+try:
+    data = json.load(sys.stdin)
+    if isinstance(data, dict) and 'data' in data:
+        workflows = data['data']
+        print(len(workflows))
+        if workflows:
+            print(f'First workflow: id={workflows[0].get(\"id\", \"unknown\")}, name={workflows[0].get(\"name\", \"unnamed\")}', file=sys.stderr)
+    else:
+        print('0')
+except Exception as e:
+    print(f'Error parsing workflows: {e}', file=sys.stderr)
+    print('0')
+" 2>&1)
+    log DEBUG "Found $workflow_count workflows via API"
     
     # Parse projects to create project name mapping
     local project_mapping
