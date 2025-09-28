@@ -93,16 +93,16 @@ test_n8n_api_connection() {
 validate_n8n_api_access() {
     local base_url="$1"
     local api_key="$2"
-    local email="$3"      # Optional: for session auth fallback
-    local password="$4"   # Optional: for session auth fallback
+    local email="${3:-}"      # Optional: for session auth fallback
+    local password="${4:-}"   # Optional: for session auth fallback
     
     log INFO "🔍 Validating n8n API access and permissions..."
     
     # Clean up URL
     base_url="${base_url%/}"
     
-    # First try API key authentication with /api/v1/ endpoint
-    if [[ -n "$api_key" ]]; then
+    # If API key is blank or empty, skip API key authentication and go straight to session auth
+    if [[ -n "$api_key" && "$api_key" != "" ]]; then
         log DEBUG "Testing API key authentication on /api/v1/ endpoints..."
         local api_response
         local api_status
@@ -126,19 +126,25 @@ except:
                 log INFO "Found $workflow_count workflows accessible via API key (/api/v1/)"
                 return 0
             else
-                log WARN "⚠️ API key authentication failed (HTTP $api_status)"
+                log WARN "⚠️ API key authentication failed (HTTP $api_status), trying session auth..."
             fi
         else
-            log WARN "⚠️ API key authentication request failed"
+            log WARN "⚠️ API key authentication request failed, trying session auth..."
         fi
+    else
+        log INFO "No API key provided - using session-based authentication for REST API"
     fi
     
-    # If API key failed, try session authentication for REST API endpoints
-    log DEBUG "Trying session authentication for /rest/ endpoints..."
+    # Try session-based authentication for REST API endpoints
+    log DEBUG "Using session authentication for /rest/ endpoints..."
     
     # If no email/password provided, prompt for them
     if [[ -z "$email" || -z "$password" ]]; then
-        log INFO "API key authentication failed. Trying session-based authentication for REST API..."
+        if [[ -n "$api_key" && "$api_key" != "" ]]; then
+            log INFO "API key authentication failed. Trying session-based authentication for REST API..."
+        else
+            log INFO "Using session-based authentication for REST API access..."
+        fi
         if [[ -z "$email" ]]; then
             printf "n8n email or LDAP login ID: "
             read -r email
@@ -156,22 +162,26 @@ except:
             log INFO "REST API endpoints are accessible via session authentication"
             return 0
         else
-            log ERROR "❌ Session authentication also failed"
+            log ERROR "❌ Session authentication failed"
         fi
+    else
+        log ERROR "❌ No valid credentials provided for session authentication"
     fi
     
     # If we get here, all authentication methods failed
     log ERROR "❌ n8n API validation failed with all available methods!"
-    log ERROR "Please check:"
-    if [[ -n "$api_key" ]]; then
+    log ERROR "Cannot proceed without valid authentication. Please check:"
+    if [[ -n "$api_key" && "$api_key" != "" ]]; then
         log ERROR "  1. API key is correct and active"
-        log ERROR "  2. Try /api/v1/ endpoints: curl -H \"X-N8N-API-KEY: $api_key\" \"$base_url/api/v1/workflows?limit=1\""
+        log ERROR "  2. Try manually: curl -H \"X-N8N-API-KEY: $api_key\" \"$base_url/api/v1/workflows?limit=1\""
     fi
     if [[ -n "$email" && -n "$password" ]]; then
         log ERROR "  3. Email/LDAP login ID and password are correct"
         log ERROR "  4. n8n instance allows password authentication"
+        log ERROR "  5. No additional authentication barriers (like Cloudflare Access)"
     fi
-    log ERROR "  5. n8n instance is properly configured and accessible"
+    log ERROR "  6. n8n instance is properly configured and accessible"
+    log ERROR "  7. Network connectivity to n8n server"
     
     return 1
 }
@@ -315,15 +325,24 @@ create_n8n_folder_structure() {
     local workflows_response
     local using_session_auth=false
     
-    # First try API key authentication
-    if projects_response=$(fetch_n8n_projects "$base_url" "$api_key" 2>/dev/null) && \
-       workflows_response=$(fetch_workflows_with_folders "$base_url" "$api_key" 2>/dev/null); then
-        log DEBUG "Successfully fetched data using API key authentication"
-        log DEBUG "Projects API response received: $(echo "$projects_response" | wc -c) characters"
-        log DEBUG "Workflows API response received: $(echo "$workflows_response" | wc -c) characters"
+    # Skip API key authentication if key is blank - go straight to session auth
+    if [[ -n "$api_key" && "$api_key" != "" ]]; then
+        log DEBUG "Trying API key authentication first..."
+        if projects_response=$(fetch_n8n_projects "$base_url" "$api_key" 2>/dev/null) && \
+           workflows_response=$(fetch_workflows_with_folders "$base_url" "$api_key" 2>/dev/null); then
+            log DEBUG "Successfully fetched data using API key authentication"
+            log DEBUG "Projects API response received: $(echo "$projects_response" | wc -c) characters"
+            log DEBUG "Workflows API response received: $(echo "$workflows_response" | wc -c) characters"
+        else
+            log WARN "API key authentication failed for REST endpoints, trying session authentication..."
+            api_key=""  # Clear API key to force session auth
+        fi
     else
-        log WARN "API key authentication failed for REST endpoints, trying session authentication..."
-        
+        log INFO "No API key provided - using session authentication for REST API"
+    fi
+    
+    # Use session authentication if API key is blank or failed
+    if [[ -z "$api_key" || "$api_key" == "" ]]; then
         # Try to get email/password for session auth
         local email password
         if [[ -n "$CONF_N8N_EMAIL" && -n "$CONF_N8N_PASSWORD" ]]; then
@@ -347,8 +366,16 @@ create_n8n_folder_structure() {
             log DEBUG "Workflows session response received: $(echo "$workflows_response" | wc -c) characters"
             using_session_auth=true
         else
-            log ERROR "Both API key and session authentication failed"
-            log ERROR "Cannot proceed with folder structure creation"
+            log ERROR "❌ Both API key and session authentication failed!"
+            log ERROR "Cannot proceed with folder structure creation."
+            log ERROR "Please verify:"
+            log ERROR "  1. n8n instance is running and accessible"
+            log ERROR "  2. Credentials are correct"
+            log ERROR "  3. No authentication barriers (Cloudflare, etc.)"
+            log ERROR "  4. n8n API is properly configured"
+            
+            # Cleanup any session files
+            cleanup_n8n_session
             return 1
         fi
     fi

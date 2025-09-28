@@ -201,11 +201,12 @@ main() {
             fi
         fi
         
-        # n8n API credentials required when folder structure is enabled
+        # n8n base URL required when folder structure is enabled
         if [[ "$CONF_FOLDER_STRUCTURE" == "true" ]]; then
-            if [[ -z "$CONF_N8N_BASE_URL" ]] || [[ -z "$CONF_N8N_API_KEY" ]]; then
-                log ERROR "n8n API credentials are required when folder structure is enabled."
-                log INFO "Please provide --n8n-url and --n8n-api-key via arguments or config file."
+            if [[ -z "$CONF_N8N_BASE_URL" ]]; then
+                log ERROR "n8n base URL is required when folder structure is enabled."
+                log INFO "Please provide --n8n-url via arguments or config file."
+                log INFO "API key (--n8n-api-key) is optional - if not provided, will use session authentication."
                 show_help
                 exit 1
             fi
@@ -214,9 +215,13 @@ main() {
             log INFO "Validating n8n API access..."
             if ! validate_n8n_api_access "$CONF_N8N_BASE_URL" "$CONF_N8N_API_KEY"; then
                 log ERROR "❌ n8n API validation failed!"
-                log ERROR "Please check your URL and API key configuration."
-                log INFO "💡 Tip: You can test your API manually with:"
-                log INFO "   curl -H \"X-N8N-API-KEY: your_key\" \"$CONF_N8N_BASE_URL/rest/workflows?limit=1\""
+                log ERROR "Please check your URL and credentials."
+                log INFO "💡 Tip: You can test manually with:"
+                if [[ -n "$CONF_N8N_API_KEY" ]]; then
+                    log INFO "   curl -H \"X-N8N-API-KEY: your_key\" \"$CONF_N8N_BASE_URL/api/v1/workflows?limit=1\""
+                else
+                    log INFO "   Session authentication will be used with email/password login"
+                fi
                 exit 1
             fi
             log SUCCESS "✅ n8n API configuration validated successfully!"
@@ -340,14 +345,14 @@ main() {
                     fi
                     
                     if [[ -z "$CONF_N8N_API_KEY" ]]; then
-                        printf "n8n API key: "
+                        printf "n8n API key (leave blank to use email/password login): "
                         read -r -s n8n_api_key
                         echo  # Add newline after hidden input
                         if [[ -n "$n8n_api_key" ]]; then
                             CONF_N8N_API_KEY="$n8n_api_key"
                         else
-                            log ERROR "n8n API key is required for folder structure"
-                            exit 1
+                            log INFO "No API key provided - will use session authentication"
+                            CONF_N8N_API_KEY=""  # Explicitly set to empty
                         fi
                     fi
                     
@@ -355,9 +360,12 @@ main() {
                     log INFO "Validating n8n API access..."
                     if ! validate_n8n_api_access "$CONF_N8N_BASE_URL" "$CONF_N8N_API_KEY"; then
                         log ERROR "❌ n8n API validation failed!"
-                        log ERROR "Please check your URL and API key, then try again."
-                        log INFO "💡 Tip: You can test your API manually with:"
-                        log INFO "   curl -H \"X-N8N-API-KEY: your_key\" \"$CONF_N8N_BASE_URL/rest/workflows?limit=1\""
+                        log ERROR "Authentication failed with all available methods."
+                        log ERROR "Cannot proceed with folder structure creation."
+                        log INFO "💡 Please verify:"
+                        log INFO "   1. n8n instance is running and accessible"
+                        log INFO "   2. Credentials (API key or email/password) are correct"
+                        log INFO "   3. No authentication barriers blocking access"
                         exit 1
                     fi
                     
