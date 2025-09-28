@@ -7,6 +7,84 @@
 # Source required modules
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/n8n-api.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/git.sh"
+
+# Orchestrate folder structure creation with Git operations
+create_folder_structure_with_git() {
+    local backup_dir="$1"
+    local git_dir="$2"
+    local is_dry_run="$3"
+    
+    if [[ -z "$backup_dir" || -z "$git_dir" ]]; then
+        log "ERROR" "Missing required parameters for folder structure with Git operations"
+        return 1
+    fi
+    
+    if $is_dry_run; then
+        log "DRYRUN" "Would create n8n folder structure with individual Git commits"
+        return 0
+    fi
+    
+    # Initialize Git repository if needed
+    if ! init_git_repo "$git_dir"; then
+        log "ERROR" "Failed to initialize Git repository"
+        return 1
+    fi
+    
+    # Create folder structure using pure n8n API operations
+    if ! create_n8n_folder_structure "$backup_dir"; then
+        log "ERROR" "Failed to create n8n folder structure"
+        return 1
+    fi
+    
+    # Now handle Git operations for all the files that were created
+    cd "$git_dir" || {
+        log "ERROR" "Failed to change to git directory: $git_dir"
+        return 1
+    }
+    
+    # Find all workflow JSON files and commit them individually
+    local commit_count=0
+    while IFS= read -r -d '' workflow_file; do
+        if [[ -f "$workflow_file" ]]; then
+            # Extract workflow name from file for commit message
+            local workflow_name
+            workflow_name=$(python3 -c "
+import json
+import sys
+try:
+    with open('$workflow_file', 'r') as f:
+        data = json.load(f)
+    print(data.get('name', 'Unnamed Workflow'))
+except:
+    print('Unnamed Workflow')
+" 2>/dev/null)
+            
+            # Determine if it's new or updated by checking git status
+            local is_new="true"
+            if git ls-files --error-unmatch "$(realpath --relative-to="$git_dir" "$workflow_file")" >/dev/null 2>&1; then
+                is_new="false"
+            fi
+            
+            # Get relative path for Git operations
+            local relative_path
+            relative_path=$(realpath --relative-to="$git_dir" "$workflow_file")
+            
+            # Commit the individual workflow
+            if commit_individual_workflow "$relative_path" "$workflow_name" "$git_dir" "$is_new"; then
+                commit_count=$((commit_count + 1))
+            fi
+        fi
+    done < <(find "$backup_dir" -name "*.json" -type f -print0)
+    
+    # Commit credentials if present
+    if [[ -f "$git_dir/credentials.json" ]]; then
+        commit_credentials "$git_dir"
+    fi
+    
+    log "SUCCESS" "Created folder structure with $commit_count individual workflow commits"
+    return 0
+}
 
 # Archive credentials with rotation (keep 5-10 backups)
 archive_credentials() {
@@ -573,11 +651,23 @@ backup() {
                 if $is_dry_run; then
                     log DRYRUN "Would create n8n folder structure in Git repository"
                 else
-                    if create_n8n_folder_structure "$container_id" "$target_dir"; then
-                        log SUCCESS "n8n folder structure created in repository"
+                    log DEBUG "Creating folder structure with API credentials: URL=$CONF_N8N_BASE_URL, API Key=${CONF_N8N_API_KEY:0:8}..."
+                    if create_folder_structure_with_git "$target_dir" "$tmp_dir" "$is_dry_run"; then
+                        log SUCCESS "n8n folder structure created in repository with individual commits"
+                        # Debug: Show what files were created
+                        log DEBUG "Files created by folder structure:"
+                        find "$target_dir" -name "*.json" | head -10 | while read -r file; do
+                            log DEBUG "  Created: $file"
+                        done
                     else
                         log ERROR "Failed to create folder structure, falling back to flat structure"
-                        copy_status="failed"
+                        # Fallback to flat structure
+                        if docker cp "${container_id}:${container_workflows}" "$target_dir/workflows.json"; then
+                            log SUCCESS "Workflows copied to Git repository (flat structure fallback)"
+                        else
+                            log ERROR "Failed to copy workflows to Git repository"
+                            copy_status="failed"
+                        fi
                     fi
                 fi
             else
@@ -715,12 +805,15 @@ EOF
                 return 1; 
             }
             
-            # Create backup timestamp file
-            date +"%Y-%m-%d %H:%M:%S" > backup_timestamp.txt
+            # Debug: Show what files exist in the target directory
+            log DEBUG "Files in target directory before Git add:"
+            find . -type f | head -20 | while read -r file; do
+                log DEBUG "  Found: $file"
+            done
             
-            # Always add the .gitignore and timestamp
-            if ! git add .gitignore backup_timestamp.txt; then
-                log ERROR "Git add failed for basic files"
+            # Always add the .gitignore
+            if ! git add .gitignore; then
+                log ERROR "Git add failed for .gitignore"
                 cd - > /dev/null || true
                 rm -rf "$tmp_dir"
                 return 1
@@ -741,23 +834,29 @@ EOF
                     log WARN "Backup directory not found: $backup_timestamp (may be empty)"
                 fi
             else
-                # Standard repo-root backup - add all workflow folders and files
+                # Standard repo-root backup - add workflow files and folders specifically
                 if [[ "$workflows_storage" == "remote" ]]; then
                     log DEBUG "Adding workflow folder structure to repository root"
                     
-                    # Add all workflow files and folders (but not hidden files except .gitignore)
-                    if ! git add --all .; then
-                        log ERROR "Git add failed for workflow folder structure"
-                        cd - > /dev/null || true
-                        rm -rf "$tmp_dir"
-                        return 1
-                    fi
+                    # Add workflow folders and JSON files specifically
+                    local files_added=0
+                    # Find all workflow JSON files and add them
+                    find . -name "*.json" -type f | while read -r json_file; do
+                        if [[ "$json_file" != "./credentials.json" ]]; then
+                            log DEBUG "Adding workflow file: $json_file"
+                            git add "$json_file"
+                            files_added=$((files_added + 1))
+                        fi
+                    done
                     
-                    # Remove any accidentally added sensitive files if credentials not in remote
-                    if [[ "$credentials_storage" != "remote" ]]; then
-                        git reset HEAD credentials.json 2>/dev/null || true
-                        git reset HEAD .env 2>/dev/null || true
-                    fi
+                    # Also add any directories that were created
+                    find . -type d -not -path "./.git*" -not -path "." | while read -r dir; do
+                        log DEBUG "Adding directory: $dir"
+                        git add "$dir/.gitkeep" 2>/dev/null || true  # Add .gitkeep if it exists
+                    done
+                    
+                    log DEBUG "Git status before commit:"
+                    git status --short
                 fi
                 
                 # Handle credentials separately if needed

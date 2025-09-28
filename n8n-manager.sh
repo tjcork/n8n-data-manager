@@ -67,6 +67,7 @@ CONF_N8N_API_KEY=""
 source "$SCRIPT_DIR/lib/common.sh"
 source "$SCRIPT_DIR/lib/interactive.sh" 
 source "$SCRIPT_DIR/lib/n8n-api.sh"
+source "$SCRIPT_DIR/lib/git.sh"
 source "$SCRIPT_DIR/lib/backup.sh"
 source "$SCRIPT_DIR/lib/restore.sh"
 

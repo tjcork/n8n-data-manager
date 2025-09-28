@@ -140,9 +140,14 @@ fetch_workflows_with_folders() {
 }
 
 # Build folder structure based on n8n's actual folder hierarchy (replaces tag-based logic)
+# Create n8n folder structure mirroring the API structure
 create_n8n_folder_structure() {
-    local container_id="$1"
-    local target_dir="$2"
+    local backup_dir="$1"
+    
+    if [[ -z "$backup_dir" ]]; then
+        log "ERROR" "Backup directory not specified for folder structure creation"
+        return 1
+    fi
     
     log INFO "Creating folder structure based on n8n's actual folders (not tags)..."
     
@@ -326,12 +331,10 @@ except Exception as e:
         # Determine target filename
         local target_file="$folder_path/${workflow_id}.json"
         local is_new=true
-        local commit_type="[New]"
         
         # Check if workflow already exists
         if [[ -f "$target_file" ]]; then
             is_new=false
-            commit_type="[Updated]"
             # Compare files to see if there are actual changes
             if cmp -s "$temp_workflow" "$target_file" 2>/dev/null; then
                 log DEBUG "Workflow $workflow_id unchanged: $workflow_name"
@@ -344,10 +347,10 @@ except Exception as e:
         if cp "$temp_workflow" "$target_file"; then
             if $is_new; then
                 new_count=$((new_count + 1))
-                log SUCCESS "$commit_type Workflow $workflow_id: $workflow_name -> $target_file"
+                log SUCCESS "[New] Workflow $workflow_id: $workflow_name -> $target_file"
             else
                 updated_count=$((updated_count + 1))
-                log SUCCESS "$commit_type Workflow $workflow_id: $workflow_name -> $target_file"
+                log SUCCESS "[Updated] Workflow $workflow_id: $workflow_name -> $target_file"
             fi
         else
             log ERROR "Failed to copy workflow $workflow_id to: $target_file"
