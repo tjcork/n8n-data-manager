@@ -192,7 +192,7 @@ load_config() {
             case "${DATED_BACKUPS,,}" in  # Convert to lowercase for comparison
                 true|1|yes|on) dated_backups=true ;;
                 false|0|no|off) dated_backups=false ;;
-                *) log WARN "Invalid DATED_BACKUPS value: ${DATED_BACKUPS}. Using false."
+                *) log WARN "Invalid DATED_BACKUPS value: ${DATED_BACKUPS}. Using default: false"
                    dated_backups=false ;;
             esac
         fi
@@ -225,13 +225,12 @@ load_config() {
         
         log DEBUG "Config loaded - workflows: ($workflows) $(format_storage_value $workflows), credentials: ($credentials) $(format_storage_value $credentials)"
         
-        # Folder structure settings
-        # Handle boolean configs properly - only set if config file has explicit value
+        # Handle folder_structure boolean config
         if [[ -z "$folder_structure" ]] && [[ -n "${FOLDER_STRUCTURE:-}" ]]; then
             case "${FOLDER_STRUCTURE,,}" in  # Convert to lowercase for comparison
                 true|1|yes|on) folder_structure=true ;;
                 false|0|no|off) folder_structure=false ;;
-                *) log WARN "Invalid FOLDER_STRUCTURE value: ${FOLDER_STRUCTURE}. Using false."
+                *) log WARN "Invalid FOLDER_STRUCTURE value: ${FOLDER_STRUCTURE}. Using default: false"
                    folder_structure=false ;;
             esac
         fi
@@ -250,7 +249,7 @@ load_config() {
             case "${VERBOSE,,}" in  # Convert to lowercase for comparison
                 true|1|yes|on) verbose=true ;;
                 false|0|no|off) verbose=false ;;
-                *) log WARN "Invalid VERBOSE value: ${VERBOSE}. Using false."
+                *) log WARN "Invalid VERBOSE value: ${VERBOSE}. Using default: false"
                    verbose=false ;;
             esac
         fi
@@ -260,10 +259,11 @@ load_config() {
             case "${DRY_RUN,,}" in  # Convert to lowercase for comparison
                 true|1|yes|on) dry_run=true ;;
                 false|0|no|off) dry_run=false ;;
-                *) log WARN "Invalid DRY_RUN value: ${DRY_RUN}. Using false."
+                *) log WARN "Invalid DRY_RUN value: ${DRY_RUN}. Using default: false"
                    dry_run=false ;;
             esac
         fi
+        
         
         log_file=${log_file:-${LOG_FILE:-}}
         

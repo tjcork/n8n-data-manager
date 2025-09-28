@@ -383,29 +383,39 @@ show_restore_plan() {
 }
 
 get_github_config() {
+    local reconfigure_mode="${1:-false}"
     local local_token="$github_token"
     local local_repo="$github_repo"
     local local_branch="$github_branch"
 
     log HEADER "GitHub Configuration"
 
-    while [ -z "$local_token" ]; do
+    # Re-ask for token if not set or in reconfigure mode
+    while [[ -z "$local_token" ]] || [[ "$reconfigure_mode" == "true" ]]; do
         printf "Enter GitHub Personal Access Token (PAT): "
         read -s local_token
         echo
-        if [ -z "$local_token" ]; then log ERROR "GitHub token is required."; fi
+        if [ -z "$local_token" ]; then 
+            log ERROR "GitHub token is required."
+        else
+            break  # Exit loop once we have a valid token
+        fi
     done
 
-    while [ -z "$local_repo" ]; do
+    # Re-ask for repo if not set or in reconfigure mode
+    while [[ -z "$local_repo" ]] || [[ "$reconfigure_mode" == "true" ]]; do
         printf "Enter GitHub repository (format: username/repo): "
         read -r local_repo
         if [ -z "$local_repo" ] || ! echo "$local_repo" | grep -q "/"; then
             log ERROR "Invalid GitHub repository format. It should be 'username/repo'."
             local_repo=""
+        else
+            break  # Exit loop once we have a valid repo
         fi
     done
 
-    if [ -z "$local_branch" ]; then
+    # Re-ask for branch if not set or in reconfigure mode
+    if [[ -z "$local_branch" ]] || [[ "$reconfigure_mode" == "true" ]]; then
          printf "Enter Branch to use [main]: "
          read -r local_branch
          local_branch=${local_branch:-main}

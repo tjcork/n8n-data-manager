@@ -147,6 +147,12 @@ main() {
     load_config
 
     log HEADER "n8n Backup/Restore Manager v$VERSION"
+    # Initialize flags before use
+    dry_run_flag=false
+    verbose_flag=false
+    if [[ "${dry_run:-false}" == "true" ]]; then dry_run_flag=true; fi
+    if [[ "${verbose:-false}" == "true" ]]; then verbose_flag=true; fi
+    
     log INFO "🚀 Flexible backup storage: local files or Git repository"
     if [[ $dry_run_flag == true ]]; then log WARN "DRY RUN MODE ENABLED"; fi
     if [[ $verbose_flag == true ]]; then log DEBUG "Verbose mode enabled."; fi
@@ -273,30 +279,21 @@ main() {
         
         # Handle reconfigure action
         if [[ "$action" == "reconfigure" ]]; then
-            log INFO "🔄 Reconfiguring - resetting all configuration values..."
+            log INFO "🔄 Reconfiguring - will re-prompt for all settings..."
             
-            # Clear all configuration variables to force interactive prompts
-            workflows=0
-            credentials=0
-            dated_backups=""
-            folder_structure=""
-            github_token=""
-            github_repo=""
-            github_branch="main"
-            local_backup_path="$HOME/n8n-backup"
-            local_rotation_limit="10"
-            n8n_base_url=""
-            n8n_api_key=""
-            restore_type="all"
+            # Set reconfigure flag to force all interactive prompts to re-ask
+            reconfigure_mode=true
             
-            # Select new action after clearing config
+            # Select new action after setting reconfigure mode
             select_action
             action="$SELECTED_ACTION"
-            log INFO "✅ Configuration cleared. Proceeding with $action in interactive mode..."
+            log INFO "✅ Reconfigure mode enabled. All prompts will re-ask for values during $action..."
+        else
+            reconfigure_mode=false
         fi
         
         # Interactive container selection
-        if [ -z "$container" ]; then
+        if [[ -z "$container" ]] || [[ "$reconfigure_mode" == "true" ]]; then
             select_container
             container="$SELECTED_CONTAINER_ID"
         else
@@ -323,8 +320,8 @@ main() {
         fi
         log DEBUG "Container selected: $container"
         
-        # Interactive dated backup prompt (only if not configured)
-        if [[ "$action" == "backup" ]] && [[ -z "$dated_backups" ]]; then
+        # Interactive dated backup prompt (only if not configured or in reconfigure mode)
+        if [[ "$action" == "backup" ]] && ([[ -z "$dated_backups" ]] || [[ "$reconfigure_mode" == "true" ]]); then
              printf "Create a dated backup (in a timestamped subdirectory)? (yes/no) [no]: "
              local confirm_dated
              read -r confirm_dated
@@ -337,7 +334,7 @@ main() {
         log DEBUG "Use Dated Backup: $dated_backups"
         
         # Interactive storage configuration using new selection functions
-        if [[ "$action" == "backup" ]] && [[ "$workflows" == "0" && "$credentials" == "0" ]]; then
+        if [[ "$action" == "backup" ]] && ([[ "$workflows" == "0" && "$credentials" == "0" ]] || [[ "$reconfigure_mode" == "true" ]]); then
             log INFO "Configure backup storage locations:"
             
             # Use new interactive storage selection functions
@@ -360,7 +357,7 @@ main() {
             fi
             
             # Ask about n8n folder structure if workflows are going to remote
-            if [[ "$workflows" == "2" ]] && [[ -z "$folder_structure" ]]; then
+            if [[ "$workflows" == "2" ]] && ([[ -z "$folder_structure" ]] || [[ "$reconfigure_mode" == "true" ]]); then
                 printf "Create n8n folder structure in Git repository? (yes/no) [no]: "
                 read -r folder_structure_choice
                 if [[ "$folder_structure_choice" == "yes" || "$folder_structure_choice" == "y" ]]; then
@@ -369,8 +366,8 @@ main() {
                     folder_structure=false
                 fi
                     
-                # Prompt for n8n API credentials if not already configured
-                if [[ -z "$n8n_base_url" ]]; then
+                # Prompt for n8n API credentials if not already configured or in reconfigure mode
+                if [[ -z "$n8n_base_url" ]] || [[ "$reconfigure_mode" == "true" ]]; then
                     printf "n8n base URL (e.g., http://localhost:5678): "
                     read -r n8n_url
                     if [[ -n "$n8n_url" ]]; then
@@ -381,7 +378,7 @@ main() {
                     fi
                 fi
                 
-                if [[ -z "$n8n_api_key" ]]; then
+                if [[ -z "$n8n_api_key" ]] || [[ "$reconfigure_mode" == "true" ]]; then
                     printf "n8n API key (leave blank to use email/password login): "
                     read -r -s n8n_api_key_input
                     echo  # Add newline after hidden input
@@ -414,7 +411,7 @@ main() {
         
         # Get GitHub config only if needed
         if [[ $needs_github == true ]]; then
-            get_github_config
+            get_github_config "$reconfigure_mode"
         else
             log INFO "🏠 Local-only backup - no GitHub configuration needed"
             github_token=""
@@ -423,7 +420,7 @@ main() {
         fi
         
         # Interactive restore type selection
-        if [[ "$action" == "restore" ]] && [[ "$restore_type" == "all" ]]; then
+        if [[ "$action" == "restore" ]] && ([[ "$restore_type" == "all" ]] || [[ "$reconfigure_mode" == "true" ]]); then
             select_restore_type
             restore_type="$SELECTED_RESTORE_TYPE"
         elif [[ "$action" == "restore" ]]; then
@@ -451,17 +448,11 @@ main() {
         fi
         
         # Convert remaining string boolean variables to boolean flags (avoid repeated string comparisons)
-        use_dated_backup_flag=false
-        dry_run_flag=false
-        folder_structure_flag=false
         dated_backups_flag=false
-        verbose_flag=false
+        folder_structure_flag=false
         
         if [[ "$dated_backups" == "true" ]]; then dated_backups_flag=true; fi
-        if [[ "$dry_run" == "true" ]]; then dry_run_flag=true; fi
         if [[ "$folder_structure" == "true" ]]; then folder_structure_flag=true; fi
-        if [[ "$verbose" == "true" ]]; then verbose_flag=true; fi
-        # use_dated_backup is derived from dated_backups in this context
         use_dated_backup_flag=$dated_backups_flag
         
         log DEBUG "Storage settings - workflows: ($workflows) $(format_storage_value $workflows), credentials: ($credentials) $(format_storage_value $credentials), needs_github: $needs_github"
