@@ -4,10 +4,14 @@
 # =========================================================
 # Flexible Backup System:
 # - Workflows: local files or Git repository (user choice)
+#   * Git: Individual workflow files in n8n folder structure
+#   * Local: Single JSON file for easy management
 # - Credentials: local files or Git repository (user choice)
 # - Local storage with proper permissions (chmod 600)
 # - Archive rotation for local backups (5-10 backups)
 # - .gitignore management for Git repositories
+# - Version control: [New]/[Updated]/[Deleted] commit messages
+# - Folder mirroring: Git structure matches n8n interface
 # =========================================================
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -16,7 +20,7 @@ IFS=$'\n\t'
 CONFIG_FILE_PATH="${XDG_CONFIG_HOME:-$HOME/.config}/n8n-manager/config"
 
 # --- Global variables ---
-VERSION="3.1.0"
+VERSION="4.0.0"
 DEBUG_TRACE=${DEBUG_TRACE:-false} # Set to true for trace debugging
 SELECTED_ACTION=""
 SELECTED_CONTAINER_ID=""
@@ -41,10 +45,16 @@ ARG_RESTORE_TYPE="all"  # Keep for backwards compatibility
 ARG_DRY_RUN=false
 ARG_VERBOSE=false
 ARG_LOG_FILE=""
+ARG_FOLDER_STRUCTURE=false
+ARG_N8N_BASE_URL=""
+ARG_N8N_API_KEY=""
 CONF_LOCAL_ROTATION_LIMIT=""  # Default rotation limit for local backups
 CONF_DATED_BACKUPS=false
 CONF_VERBOSE=false
 CONF_LOG_FILE=""
+CONF_FOLDER_STRUCTURE=false
+CONF_N8N_BASE_URL=""
+CONF_N8N_API_KEY=""
 
 # ANSI colors for better UI (using printf for robustness)
 printf -v RED     '\033[0;31m'
@@ -174,6 +184,9 @@ check_host_dependencies() {
     if ! command_exists curl; then # Added curl check
         missing_deps="$missing_deps curl"
     fi
+    if ! command_exists python3; then # Added python3 for JSON parsing
+        missing_deps="$missing_deps python3"
+    fi
 
     if [ -n "$missing_deps" ]; then
         log ERROR "Missing required host dependencies:$missing_deps"
@@ -222,6 +235,20 @@ load_config() {
             ARG_LOCAL_ROTATION_LIMIT=${CONF_LOCAL_ROTATION_LIMIT:-}
         fi
         
+        # Load folder structure options from config if not specified
+        if ! $ARG_FOLDER_STRUCTURE; then
+            CONF_FOLDER_STRUCTURE_VAL=${CONF_FOLDER_STRUCTURE:-false}
+            if [[ "$CONF_FOLDER_STRUCTURE_VAL" == "true" ]]; then ARG_FOLDER_STRUCTURE=true; fi
+        fi
+        
+        if [[ -z "$ARG_N8N_BASE_URL" ]]; then
+            ARG_N8N_BASE_URL=${CONF_N8N_BASE_URL:-}
+        fi
+        
+        if [[ -z "$ARG_N8N_API_KEY" ]]; then
+            ARG_N8N_API_KEY=${CONF_N8N_API_KEY:-}
+        fi
+        
         ARG_RESTORE_TYPE=${ARG_RESTORE_TYPE:-${CONF_RESTORE_TYPE:-all}}
         
         if ! $ARG_VERBOSE; then
@@ -246,6 +273,19 @@ load_config() {
         touch "$ARG_LOG_FILE" || { log ERROR "Log file is not writable: $ARG_LOG_FILE"; exit 1; }
         log INFO "Logging output also to: $ARG_LOG_FILE"
     fi
+    
+    # Validate folder structure configuration
+    if $ARG_FOLDER_STRUCTURE; then
+        if [[ -z "$ARG_N8N_BASE_URL" ]]; then
+            log ERROR "Folder structure enabled but n8n URL not provided. Set CONF_N8N_BASE_URL or use --n8n-url"
+            exit 1
+        fi
+        if [[ -z "$ARG_N8N_API_KEY" ]]; then
+            log ERROR "Folder structure enabled but n8n API key not provided. Set CONF_N8N_API_KEY or use --n8n-api-key"
+            exit 1
+        fi
+        log INFO "Folder structure mirroring enabled with n8n instance: $ARG_N8N_BASE_URL"
+    fi
 }
 
 show_help() {
@@ -266,6 +306,9 @@ Options:
   --credentials [mode]  Include credentials in backup. Mode: 'local' (default) or 'remote' (Git repo).
   --path <path>         Local backup directory path (defaults to '~/n8n-backup').
   --rotation <limit>    Local backup rotation: '0' (overwrite), number (keep N most recent), 'unlimited' (keep all).
+  --folder-structure    Enable n8n folder structure mirroring in Git (requires API access).
+  --n8n-url <url>       n8n instance URL (e.g., 'http://localhost:5678').
+  --n8n-api-key <key>   n8n API key for folder structure access.
   --restore-type <type> Type of restore: 'all' (default), 'workflows', or 'credentials' (legacy).
                         Overrides CONF_RESTORE_TYPE in config file.
   --dry-run             Simulate the action without making any changes.
@@ -285,6 +328,9 @@ Configuration File (${CONFIG_FILE_PATH}):
     CONF_CREDENTIALS_STORAGE="local" # Optional: "local" (default, secure) or "remote" (Git repo)
     CONF_LOCAL_BACKUP_PATH="/custom/backup/path" # Optional, defaults to ~/n8n-backup
     CONF_LOCAL_ROTATION_LIMIT="10" # Optional: 0 (overwrite), number (keep N), "unlimited" (keep all)
+    CONF_FOLDER_STRUCTURE=false # Optional: Enable n8n folder structure mirroring
+    CONF_N8N_BASE_URL="http://localhost:5678" # Required if CONF_FOLDER_STRUCTURE=true
+    CONF_N8N_API_KEY="n8n_api_..." # Required if CONF_FOLDER_STRUCTURE=true
     CONF_RESTORE_TYPE="all" # Optional, defaults to 'all' (legacy compatibility)
     CONF_VERBOSE=false      # Optional, defaults to false
     CONF_LOG_FILE="/var/log/n8n-manager.log" # Optional
@@ -850,6 +896,451 @@ timestamp() {
     date +"%Y-%m-%d_%H-%M-%S"
 }
 
+# --- n8n REST API Helper Functions ---
+
+# Test connection to n8n instance and validate API key
+test_n8n_api_connection() {
+    local base_url="$1"
+    local api_key="$2"
+    
+    log INFO "Testing n8n API connection to: $base_url"
+    
+    # Clean up URL (remove trailing slash)
+    base_url="${base_url%/}"
+    
+    # Test API connection with basic endpoint
+    local response
+    local http_status
+    if ! response=$(curl -s -w "\\n%{http_code}" -H "X-N8N-API-KEY: $api_key" "$base_url/rest/workflows?limit=1" 2>/dev/null); then
+        log ERROR "Failed to connect to n8n API at: $base_url"
+        return 1
+    fi
+    
+    http_status=$(echo "$response" | tail -n1)
+    local response_body=$(echo "$response" | head -n -1)
+    
+    if [[ "$http_status" == "401" ]]; then
+        log ERROR "n8n API authentication failed. Please check your API key."
+        return 1
+    elif [[ "$http_status" == "404" ]]; then
+        log ERROR "n8n API endpoint not found. Please check the URL and ensure n8n version supports REST API."
+        return 1
+    elif [[ "$http_status" != "200" ]]; then
+        log ERROR "n8n API connection failed with HTTP status: $http_status"
+        log DEBUG "Response body: $response_body"
+        return 1
+    fi
+    
+    log SUCCESS "n8n API connection successful!"
+    return 0
+}
+
+# Fetch all projects from n8n instance
+fetch_n8n_projects() {
+    local base_url="$1"
+    local api_key="$2"
+    
+    log DEBUG "Fetching projects from n8n API..."
+    
+    # Clean up URL
+    base_url="${base_url%/}"
+    
+    local response
+    local http_status
+    if ! response=$(curl -s -w "\\n%{http_code}" -H "X-N8N-API-KEY: $api_key" "$base_url/rest/projects" 2>/dev/null); then
+        log ERROR "Failed to fetch projects from n8n API"
+        return 1
+    fi
+    
+    http_status=$(echo "$response" | tail -n1)
+    local response_body=$(echo "$response" | head -n -1)
+    
+    if [[ "$http_status" != "200" ]]; then
+        log ERROR "Failed to fetch projects (HTTP $http_status)"
+        return 1
+    fi
+    
+    echo "$response_body"
+    return 0
+}
+
+# Fetch folders for a specific project
+fetch_project_folders() {
+    local base_url="$1"
+    local api_key="$2"
+    local project_id="$3"
+    
+    log DEBUG "Fetching folders for project: $project_id"
+    
+    # Clean up URL
+    base_url="${base_url%/}"
+    
+    local response
+    local http_status
+    if ! response=$(curl -s -w "\\n%{http_code}" -H "X-N8N-API-KEY: $api_key" "$base_url/rest/projects/$project_id/folders" 2>/dev/null); then
+        log ERROR "Failed to fetch folders for project: $project_id"
+        return 1
+    fi
+    
+    http_status=$(echo "$response" | tail -n1)
+    local response_body=$(echo "$response" | head -n -1)
+    
+    if [[ "$http_status" != "200" ]]; then
+        log ERROR "Failed to fetch project folders (HTTP $http_status)"
+        return 1
+    fi
+    
+    echo "$response_body"
+    return 0
+}
+
+# Fetch workflows with folder information
+fetch_workflows_with_folders() {
+    local base_url="$1"
+    local api_key="$2"
+    local project_id="${3:-}"  # Optional project filter
+    
+    log DEBUG "Fetching workflows with folder information..."
+    
+    # Clean up URL  
+    base_url="${base_url%/}"
+    
+    local url="$base_url/rest/workflows?includeFolders=true"
+    if [[ -n "$project_id" ]]; then
+        url="$url&filter[projectId]=$project_id"
+    fi
+    
+    local response
+    local http_status
+    if ! response=$(curl -s -w "\\n%{http_code}" -H "X-N8N-API-KEY: $api_key" "$url" 2>/dev/null); then
+        log ERROR "Failed to fetch workflows with folders"
+        return 1
+    fi
+    
+    http_status=$(echo "$response" | tail -n1)
+    local response_body=$(echo "$response" | head -n -1)
+    
+    if [[ "$http_status" != "200" ]]; then
+        log ERROR "Failed to fetch workflows (HTTP $http_status)"
+        return 1
+    fi
+    
+    echo "$response_body"
+    return 0
+}
+
+# Build folder structure based on n8n's actual folder hierarchy (replaces tag-based logic)
+create_n8n_folder_structure() {
+    local container_id="$1"
+    local workflows_dir="$2"
+    local target_dir="$3"
+    local is_dry_run="$4"
+    local base_url="$5"
+    local api_key="$6"
+    
+    log INFO "Creating folder structure based on n8n's actual folders (not tags)..."
+    
+    # Test API connection first
+    if ! test_n8n_api_connection "$base_url" "$api_key"; then
+        log ERROR "Cannot proceed with folder structure creation - API connection failed"
+        return 1
+    fi
+    
+    # Get list of workflow files from container first
+    local workflow_files
+    if ! workflow_files=$(docker exec "$container_id" find "$workflows_dir" -name "*.json" -type f 2>/dev/null); then
+        log ERROR "Failed to get workflow files from container"
+        return 1
+    fi
+    
+    if [[ -z "$workflow_files" ]]; then
+        log INFO "No workflow files found - clean installation"
+        return 0
+    fi
+    
+    # Fetch projects and workflows with folder information from API
+    local projects_response
+    if ! projects_response=$(fetch_n8n_projects "$base_url" "$api_key"); then
+        log ERROR "Failed to fetch projects from n8n API"
+        return 1
+    fi
+    
+    local workflows_response  
+    if ! workflows_response=$(fetch_workflows_with_folders "$base_url" "$api_key"); then
+        log ERROR "Failed to fetch workflows with folder information"
+        return 1
+    fi
+    
+    # Parse projects to create project name mapping
+    local project_mapping
+    project_mapping=$(echo "$projects_response" | python3 -c "
+import json
+import sys
+try:
+    data = json.load(sys.stdin)
+    for project in data.get('data', data if isinstance(data, list) else []):
+        project_id = project.get('id', '')
+        project_name = project.get('name', 'Unknown')
+        project_type = project.get('type', 'team')
+        # Create clean project folder name
+        if project_type == 'personal':
+            folder_name = 'Personal'
+        else:
+            # Sanitize project name for folder use
+            folder_name = project_name.replace('/', '_').replace(' ', '_')
+        print(f'{project_id}|{folder_name}')
+except Exception as e:
+    print(f'ERROR: {e}', file=sys.stderr)
+    sys.exit(1)
+" 2>/dev/null)
+    
+    if [[ -z "$project_mapping" ]]; then
+        log WARN "No project mapping found, using fallback structure"
+        project_mapping="default|Personal"
+    fi
+    
+    # Track existing workflows for deletion detection
+    local existing_workflows=()
+    if [[ -d "$target_dir" ]]; then
+        while IFS= read -r -d '' existing_file; do
+            if [[ "$existing_file" =~ ([0-9]+)\.json$ ]]; then
+                existing_workflows+=("${BASH_REMATCH[1]}")
+            fi
+        done < <(find "$target_dir" -name "*.json" -type f -print0 2>/dev/null || true)
+    fi
+    
+    local current_workflows=()
+    local new_count=0
+    local updated_count=0
+    
+    # Process each workflow file
+    while IFS= read -r workflow_file; do
+        if [[ -z "$workflow_file" ]]; then continue; fi
+        
+        # Copy workflow file to temporary location for processing
+        local temp_workflow="/tmp/temp_workflow.json"
+        if ! docker cp "${container_id}:${workflow_file}" "$temp_workflow" 2>/dev/null; then
+            log WARN "Failed to copy workflow file: $workflow_file"
+            continue
+        fi
+        
+        # Extract basic workflow information
+        local workflow_info
+        if ! workflow_info=$(python3 -c "
+import json
+import sys
+try:
+    with open('$temp_workflow', 'r') as f:
+        data = json.load(f)
+    workflow_id = data.get('id', 'unknown')
+    workflow_name = data.get('name', 'Unnamed Workflow')
+    print(f'{workflow_id}|{workflow_name}')
+except Exception as e:
+    print('ERROR|ERROR')
+    sys.exit(1)
+" 2>/dev/null); then
+            log WARN "Failed to parse workflow file: $workflow_file"
+            rm -f "$temp_workflow"
+            continue
+        fi
+        
+        IFS='|' read -r workflow_id workflow_name <<< "$workflow_info"
+        
+        if [[ "$workflow_id" == "ERROR" ]]; then
+            log WARN "Failed to extract workflow info from: $workflow_file"
+            rm -f "$temp_workflow"
+            continue
+        fi
+        
+        current_workflows+=("$workflow_id")
+        
+        # Find workflow's project and folder information from API response
+        local folder_info
+        folder_info=$(echo "$workflows_response" | python3 -c "
+import json
+import sys
+try:
+    data = json.load(sys.stdin)
+    workflows = data.get('data', data if isinstance(data, list) else [])
+    for workflow in workflows:
+        if workflow.get('id') == '$workflow_id':
+            project_id = workflow.get('projectId', 'default')
+            folder_id = workflow.get('folderId', None)
+            folder_name = workflow.get('folderName', None)
+            print(f'{project_id}|{folder_id or \"\"}|{folder_name or \"\"}')
+            break
+    else:
+        # Workflow not found in API response, use default
+        print('default||')
+except Exception as e:
+    print('default||')
+" 2>/dev/null)
+        
+        if [[ -z "$folder_info" ]]; then
+            folder_info="default||"
+        fi
+        
+        IFS='|' read -r project_id folder_id folder_name <<< "$folder_info"
+        
+        # Determine project folder name from mapping
+        local project_folder_name="Personal"  # default
+        while IFS='|' read -r mapped_project_id mapped_folder_name; do
+            if [[ "$mapped_project_id" == "$project_id" ]]; then
+                project_folder_name="$mapped_folder_name"
+                break
+            fi
+        done <<< "$project_mapping"
+        
+        # Build the target folder path: ProjectName/[FolderName]/workflow-id.json
+        local folder_path="$target_dir/$project_folder_name"
+        
+        if [[ -n "$folder_name" && "$folder_name" != "" ]]; then
+            # Sanitize folder name (remove invalid characters)
+            local clean_folder_name=$(echo "$folder_name" | tr -d '[\/:*?"<>|]' | tr ' ' '_')
+            folder_path="$folder_path/$clean_folder_name"
+        fi
+        
+        # Create folder structure if it doesn't exist
+        if [[ "$is_dry_run" == "true" ]]; then
+            log DRYRUN "Would create folder: $folder_path"
+        else
+            if ! mkdir -p "$folder_path"; then
+                log ERROR "Failed to create folder: $folder_path"
+                rm -f "$temp_workflow"
+                continue
+            fi
+        fi
+        
+        # Determine target filename
+        local target_file="$folder_path/${workflow_id}.json"
+        local is_new=true
+        local commit_type="[New]"
+        
+        # Check if workflow already exists
+        if [[ -f "$target_file" ]]; then
+            is_new=false
+            commit_type="[Updated]"
+            # Compare files to see if there are actual changes
+            if [[ "$is_dry_run" != "true" ]] && cmp -s "$temp_workflow" "$target_file" 2>/dev/null; then
+                log DEBUG "Workflow $workflow_id unchanged: $workflow_name"
+                rm -f "$temp_workflow"
+                continue
+            fi
+        fi
+        
+        # Copy workflow to target location
+        if [[ "$is_dry_run" == "true" ]]; then
+            log DRYRUN "Would copy workflow $workflow_id to: $target_file ($commit_type $workflow_name)"
+        else
+            if cp "$temp_workflow" "$target_file"; then
+                if $is_new; then
+                    new_count=$((new_count + 1))
+                    log SUCCESS "$commit_type Workflow $workflow_id: $workflow_name -> $target_file"
+                else
+                    updated_count=$((updated_count + 1))
+                    log SUCCESS "$commit_type Workflow $workflow_id: $workflow_name -> $target_file"
+                fi
+            else
+                log ERROR "Failed to copy workflow $workflow_id to: $target_file"
+            fi
+        fi
+        
+        rm -f "$temp_workflow"
+        
+    done <<< "$workflow_files"
+    
+    # Check for deleted workflows
+    local deleted_count=0
+    for existing_id in "${existing_workflows[@]}"; do
+        local found=false
+        for current_id in "${current_workflows[@]}"; do
+            if [[ "$existing_id" == "$current_id" ]]; then
+                found=true
+                break
+            fi
+        done
+        if ! $found; then
+            # Find and remove deleted workflow files
+            local deleted_files
+            while IFS= read -r -d '' deleted_file; do
+                if [[ "$is_dry_run" == "true" ]]; then
+                    log DRYRUN "Would remove deleted workflow: $deleted_file"
+                else
+                    if rm "$deleted_file" 2>/dev/null; then
+                        deleted_count=$((deleted_count + 1))
+                        log SUCCESS "[Deleted] Removed workflow file: $deleted_file"
+                    fi
+                fi
+            done < <(find "$target_dir" -name "${existing_id}.json" -type f -print0 2>/dev/null || true)
+        fi
+    done
+    
+    # Summary
+    log INFO "Folder structure creation completed:"
+    log INFO "  • New workflows: $new_count"
+    log INFO "  • Updated workflows: $updated_count" 
+    log INFO "  • Deleted workflows: $deleted_count"
+    
+    return 0
+}
+
+# Generate commit messages based on workflow changes
+generate_workflow_commit_message() {
+    local target_dir="$1"
+    local is_dry_run="$2"
+    
+    # Count changes by examining Git status
+    local new_files updated_files deleted_files
+    
+    if [[ "$is_dry_run" == "true" ]]; then
+        echo "Backup workflow changes (dry run)"
+        return 0
+    fi
+    
+    # Use git status to detect changes
+    pushd "$target_dir" > /dev/null || return 1
+    
+    # Get added files (new workflows)
+    new_files=$(git status --porcelain 2>/dev/null | grep "^A " | wc -l)
+    # Get modified files (updated workflows)  
+    updated_files=$(git status --porcelain 2>/dev/null | grep "^M " | wc -l)
+    # Get deleted files (removed workflows)
+    deleted_files=$(git status --porcelain 2>/dev/null | grep "^D " | wc -l)
+    
+    popd > /dev/null || return 1
+    
+    # Generate appropriate commit message
+    local commit_parts=()
+    if [[ $new_files -gt 0 ]]; then
+        commit_parts+=("$new_files new")
+    fi
+    if [[ $updated_files -gt 0 ]]; then
+        commit_parts+=("$updated_files updated")
+    fi
+    if [[ $deleted_files -gt 0 ]]; then
+        commit_parts+=("$deleted_files deleted")
+    fi
+    
+    if [[ ${#commit_parts[@]} -eq 0 ]]; then
+        echo "Workflow backup - no changes detected"
+    elif [[ ${#commit_parts[@]} -eq 1 ]]; then
+        echo "Workflow backup - ${commit_parts[0]} workflow(s)"
+    else
+        local message="Workflow backup - "
+        for i in "${!commit_parts[@]}"; do
+            if [[ $i -eq $((${#commit_parts[@]} - 1)) ]]; then
+                message="${message} and ${commit_parts[$i]}"
+            elif [[ $i -eq 0 ]]; then
+                message="${message}${commit_parts[$i]}"
+            else
+                message="${message}, ${commit_parts[$i]}"
+            fi
+        done
+        message="${message} workflow(s)"
+        echo "$message"
+    fi
+}
+
 rollback_restore() {
     local container_id="$1"
     local backup_dir="$2"
@@ -1031,15 +1522,34 @@ backup() {
     local export_failed=false
     local no_data_found=false
 
-    # Export workflows
-    if ! dockExec "$container_id" "n8n export:workflow --all --output=$container_workflows" false; then 
-        # Check if the error is due to no workflows existing
-        if docker exec "$container_id" n8n list workflows 2>&1 | grep -q "No workflows found"; then
-            log INFO "No workflows found to backup - this is a clean installation"
-            no_data_found=true
-        else
-            log ERROR "Failed to export workflows"
+    # Export workflows using individual file method for Git restructuring
+    local container_workflows_dir="/tmp/workflows"
+    if [[ "$workflows_storage" == "remote" ]]; then
+        log INFO "Exporting individual workflow files for Git folder structure..."
+        if ! dockExec "$container_id" "mkdir -p $container_workflows_dir" false; then
+            log ERROR "Failed to create workflows directory in container"
             export_failed=true
+        elif ! dockExec "$container_id" "n8n export:workflow --backup --output=$container_workflows_dir/" false; then 
+            # Check if the error is due to no workflows existing
+            if docker exec "$container_id" n8n list workflows 2>&1 | grep -q "No workflows found"; then
+                log INFO "No workflows found to backup - this is a clean installation"
+                no_data_found=true
+            else
+                log ERROR "Failed to export individual workflow files"
+                export_failed=true
+            fi
+        fi
+    else
+        log INFO "Exporting workflows as single file for local storage..."
+        if ! dockExec "$container_id" "n8n export:workflow --all --output=$container_workflows" false; then 
+            # Check if the error is due to no workflows existing
+            if docker exec "$container_id" n8n list workflows 2>&1 | grep -q "No workflows found"; then
+                log INFO "No workflows found to backup - this is a clean installation"
+                no_data_found=true
+            else
+                log ERROR "Failed to export workflows"
+                export_failed=true
+            fi
         fi
     fi
 
@@ -1221,35 +1731,54 @@ backup() {
         fi
     fi
 
-    log INFO "Copying files to Git directory..."
+    log INFO "Processing files for Git repository..."
     local copy_status="success" # Use string instead of boolean to avoid empty command errors
     
-    # Copy workflows.json to Git repository if requested
+    # Process workflows for Git repository if requested
     if [[ "$workflows_storage" == "remote" ]]; then
-        source_file="/tmp/workflows.json"
-        if [ "$use_dated_backup" = "true" ]; then
-            mkdir -p "${target_dir}" || return 1
-            dest_file="${target_dir}/workflows.json"
-        else
-            dest_file="${tmp_dir}/workflows.json"
-        fi
-
-        # Check if workflows file exists in container
-        if ! docker exec "$container_id" test -f "$source_file"; then
-            log ERROR "Required workflows.json file not found in container"
+        log INFO "Creating n8n folder structure for workflows..."
+        
+        # Create workflow folder structure mirroring n8n interface
+        if ! create_n8n_folder_structure "$container_id" "$target_dir"; then
+            log ERROR "Failed to create workflow folder structure"
             copy_status="failed"
         else
-            # Copy workflows file from container
-            size=$(docker exec "$container_id" du -h "$source_file" | awk '{print $1}')
-            if ! docker cp "${container_id}:${source_file}" "${dest_file}"; then
-                log ERROR "Failed to copy workflows.json from container"
-                copy_status="failed"
+            log SUCCESS "Workflow folder structure created successfully in Git repository"
+        fi
+        
+        # Clean up individual workflow files from container
+        if [[ "$is_dry_run" != "true" ]]; then
+            dockExec "$container_id" "rm -rf $container_workflows_dir" "$is_dry_run" || log WARN "Could not clean up workflows directory in container"
+        fi
+    else
+        log INFO "Workflows will be stored locally only - not processing for Git"
+    fi
+    
+    # Handle credentials file for Git repository if requested  
+    if [[ "$credentials_storage" == "remote" ]]; then
+        log INFO "Processing credentials for Git repository..."
+        if docker exec "$container_id" test -f "$container_credentials"; then
+            local creds_dest_file="${target_dir}/credentials.json"
+            if [[ "$is_dry_run" == "true" ]]; then
+                log DRYRUN "Would copy credentials to Git repository: $creds_dest_file"
             else
-                log SUCCESS "Successfully copied workflows ($size) to Git directory: ${dest_file}"
+                local size
+                size=$(docker exec "$container_id" du -h "$container_credentials" | awk '{print $1}' 2>/dev/null || echo "unknown")
+                if docker cp "${container_id}:${container_credentials}" "$creds_dest_file"; then
+                    log SUCCESS "Successfully copied credentials ($size) to Git directory: $creds_dest_file"
+                else
+                    log ERROR "Failed to copy credentials to Git directory"
+                    copy_status="failed"
+                fi
+            fi
+        else
+            log INFO "No credentials file found in container - creating empty file"
+            if [[ "$is_dry_run" != "true" ]]; then
+                echo "[]" > "${target_dir}/credentials.json"
             fi
         fi
     else
-        log INFO "Workflows will be stored locally only - not copying to Git"
+        log INFO "Credentials will be stored locally only - not processing for Git"
     fi    # Create .gitignore based on credentials_storage setting
     local gitignore_file="${tmp_dir}/.gitignore"
     if $is_dry_run; then
@@ -1344,10 +1873,9 @@ EOF
     log INFO "Adding files to Git repository..."
     
     if $is_dry_run; then
-        if $use_dated_backup; then
-            log DRYRUN "Would add dated backup directory '$backup_timestamp' to Git index (workflows only)"
-        else
-            log DRYRUN "Would add workflow files to Git index (credentials and .env excluded)"
+        log DRYRUN "Would add workflow folder structure and files to Git index"
+        if [[ "$credentials_storage" == "remote" ]]; then
+            log DRYRUN "Would also add credentials file to Git index"
         fi
     else
         # Change to the git directory to avoid parsing issues
@@ -1357,16 +1885,22 @@ EOF
             return 1; 
         }
         
+        # Create backup timestamp file
+        date +"%Y-%m-%d %H:%M:%S" > backup_timestamp.txt
+        
+        # Always add the .gitignore and timestamp
+        if ! git add .gitignore backup_timestamp.txt; then
+            log ERROR "Git add failed for basic files"
+            cd - > /dev/null || true
+            rm -rf "$tmp_dir"
+            return 1
+        fi
+        
         if [ "$use_dated_backup" = "true" ]; then
-            # For dated backups, explicitly add the backup subdirectory (workflows only)
+            # For dated backups, add the entire backup subdirectory with folder structure
             if [ -d "$backup_timestamp" ]; then
-                log DEBUG "Adding dated backup directory: $backup_timestamp (workflows only)"
+                log DEBUG "Adding dated backup directory with folder structure: $backup_timestamp"
                 
-                # First list what's in the directory (for debugging)
-                log DEBUG "Files in backup directory:"
-                ls -la "$backup_timestamp" || true
-                
-                # Add specific directory (should only contain workflows.json)
                 if ! git add "$backup_timestamp"; then
                     log ERROR "Git add failed for dated backup directory"
                     cd - > /dev/null || true
@@ -1374,40 +1908,47 @@ EOF
                     return 1
                 fi
             else
-                log ERROR "Backup directory not found: $backup_timestamp"
-                cd - > /dev/null || true
-                rm -rf "$tmp_dir"
-                return 1
+                log WARN "Backup directory not found: $backup_timestamp (may be empty)"
             fi
         else
-            # Standard repo-root backup - add workflows and conditionally credentials
-            if [[ "$credentials_storage" == "remote" ]]; then
-                log DEBUG "Adding workflow and credential files at repository root"
-                # Add workflows, credentials (if exists), and metadata
-                local files_to_add="workflows.json .gitignore backup_timestamp.txt"
-                if [ -f "credentials.json" ]; then
-                    files_to_add="$files_to_add credentials.json"
-                fi
-                if ! git add $files_to_add; then
-                    log ERROR "Git add failed for workflow and credential files"
+            # Standard repo-root backup - add all workflow folders and files
+            if [[ "$workflows_storage" == "remote" ]]; then
+                log DEBUG "Adding workflow folder structure to repository root"
+                
+                # Add all workflow files and folders (but not hidden files except .gitignore)
+                if ! git add --all .; then
+                    log ERROR "Git add failed for workflow folder structure"
                     cd - > /dev/null || true
+                    rm -rf "$tmp_dir"
                     return 1
                 fi
-            else
-                log DEBUG "Adding workflow files at repository root (credentials excluded)"
-                # Explicitly add only safe files
-                if ! git add workflows.json .gitignore backup_timestamp.txt; then
-                    log ERROR "Git add failed for workflow files"
+                
+                # Remove any accidentally added sensitive files if credentials not in remote
+                if [[ "$credentials_storage" != "remote" ]]; then
+                    git reset HEAD credentials.json 2>/dev/null || true
+                    git reset HEAD .env 2>/dev/null || true
+                fi
+            fi
+            
+            # Handle credentials separately if needed
+            if [[ "$credentials_storage" == "remote" ]] && [ -f "credentials.json" ]; then
+                log DEBUG "Adding credentials file to Git"
+                if ! git add credentials.json; then
+                    log ERROR "Git add failed for credentials file"
                     cd - > /dev/null || true
+                    rm -rf "$tmp_dir"
                     return 1
                 fi
             fi
         fi
         
-        if [[ "$credentials_storage" == "remote" ]]; then
-            log SUCCESS "Workflow and credential files added to Git successfully"
+        # Success message
+        if [[ "$workflows_storage" == "remote" && "$credentials_storage" == "remote" ]]; then
+            log SUCCESS "Workflow folder structure and credentials added to Git successfully"
+        elif [[ "$workflows_storage" == "remote" ]]; then
+            log SUCCESS "Workflow folder structure added to Git successfully (credentials excluded)"
         else
-            log SUCCESS "Workflow files added to Git successfully (credentials and environment excluded)"
+            log SUCCESS "Files added to Git successfully"
         fi
         
         # Verify that files were staged correctly
@@ -1419,24 +1960,33 @@ EOF
     n8n_ver=$(docker exec "$container_id" n8n --version 2>/dev/null || echo "unknown")
     log DEBUG "Detected n8n version: $n8n_ver"
 
-    # --- Commit Logic --- 
-    local commit_status="pending" # Use string instead of boolean to avoid empty command errors
+    # --- Commit Logic ---
     if [[ "$credentials_storage" == "remote" ]]; then
         log INFO "Committing workflow and credential changes to Git..."
     else
         log INFO "Committing workflow changes to Git..."
     fi
     
-    # Create a timestamp with seconds to ensure uniqueness
-    local backup_time=$(date +"%Y-%m-%d_%H-%M-%S")
+    # Generate smart commit message based on actual changes
     local commit_msg
-    if [[ "$credentials_storage" == "remote" ]]; then
-        commit_msg="🛡️ n8n Full Backup (v$n8n_ver) - $backup_time"
-        commit_msg="${commit_msg} [Workflows + Credentials in Git]"
+    if [[ "$workflows_storage" == "remote" ]]; then
+        local workflow_changes
+        workflow_changes=$(generate_workflow_commit_message "$target_dir" "$is_dry_run")
+        if [[ "$credentials_storage" == "remote" ]]; then
+            commit_msg="$workflow_changes + credentials"
+        else
+            commit_msg="$workflow_changes"
+        fi
     else
-        commit_msg="🛡️ n8n Workflows Backup (v$n8n_ver) - $backup_time"
-        commit_msg="${commit_msg} [Credentials stored locally]"
+        # Only credentials in Git (unlikely but possible)
+        commit_msg="Credentials backup - $(date +"%Y-%m-%d_%H-%M-%S")"
     fi
+    
+    # Add n8n version and backup info
+    local n8n_ver
+    n8n_ver=$(docker exec "$container_id" n8n --version 2>/dev/null | grep -o 'n8n@[0-9.]*' | cut -d'@' -f2 || echo "unknown")
+    commit_msg="$commit_msg (n8n v$n8n_ver)"
+    
     if [ "$use_dated_backup" = "true" ]; then
         commit_msg="$commit_msg [$backup_timestamp]"
     fi
@@ -1521,6 +2071,16 @@ EOF
     
     log SUCCESS "Workflow backup successfully pushed to GitHub repository"
     cd - > /dev/null || true
+
+    # Clean up temporary files in container
+    log INFO "Cleaning up temporary files in container..."
+    if [[ "$is_dry_run" == "true" ]]; then
+        log DRYRUN "Would clean up temporary files in container"
+    else
+        # Clean up both old single-file format and new directory format
+        dockExec "$container_id" "rm -f $container_workflows $container_credentials $container_env" "$is_dry_run" || log WARN "Could not clean up single files in container"
+        dockExec "$container_id" "rm -rf $container_workflows_dir" "$is_dry_run" || log WARN "Could not clean up workflows directory in container"
+    fi
 
     log INFO "Cleaning up host temporary directory..."
     if $is_dry_run; then
@@ -2118,6 +2678,9 @@ main() {
             --dry-run) ARG_DRY_RUN=true; shift 1 ;; 
             --verbose) ARG_VERBOSE=true; shift 1 ;; 
             --log-file) ARG_LOG_FILE="$2"; shift 2 ;; 
+            --folder-structure) ARG_FOLDER_STRUCTURE=true; shift 1 ;;
+            --n8n-url) ARG_N8N_BASE_URL="$2"; shift 2 ;;
+            --n8n-api-key) ARG_N8N_API_KEY="$2"; shift 2 ;;
             --trace) DEBUG_TRACE=true; shift 1;; 
             -h|--help) show_help; exit 0 ;; 
             *) echo -e "${RED}[ERROR]${NC} Invalid option: $1" >&2; show_help; exit 1 ;; 
@@ -2200,6 +2763,16 @@ main() {
             if [ -z "$github_token" ] || [ -z "$github_repo" ]; then
                 log ERROR "GitHub token and repository are required for remote operations or restore."
                 log INFO "Please provide --token and --repo via arguments or config file."
+                show_help
+                exit 1
+            fi
+        fi
+        
+        # n8n API credentials required when folder structure is enabled
+        if [[ "$CONF_FOLDER_STRUCTURE" == "true" ]]; then
+            if [[ -z "$CONF_N8N_BASE_URL" ]] || [[ -z "$CONF_N8N_API_KEY" ]]; then
+                log ERROR "n8n API credentials are required when folder structure is enabled."
+                log INFO "Please provide --n8n-url and --n8n-api-key via arguments or config file."
                 show_help
                 exit 1
             fi
@@ -2294,6 +2867,43 @@ main() {
                     fi
                     local_backup_path="$custom_backup_path"
                     log INFO "Using custom local backup directory: $local_backup_path"
+                fi
+            fi
+            
+            # Ask about n8n folder structure if workflows are going to remote
+            if [[ "$workflows_storage" == "remote" ]]; then
+                printf "Create n8n folder structure in Git repository? (yes/no) [no]: "
+                read -r folder_structure_choice
+                if [[ "$folder_structure_choice" == "yes" || "$folder_structure_choice" == "y" ]]; then
+                    CONF_FOLDER_STRUCTURE="true"
+                    
+                    # Prompt for n8n API credentials if not already configured
+                    if [[ -z "$CONF_N8N_BASE_URL" ]]; then
+                        printf "n8n base URL (e.g., http://localhost:5678): "
+                        read -r n8n_url
+                        if [[ -n "$n8n_url" ]]; then
+                            CONF_N8N_BASE_URL="$n8n_url"
+                        else
+                            log ERROR "n8n base URL is required for folder structure"
+                            exit 1
+                        fi
+                    fi
+                    
+                    if [[ -z "$CONF_N8N_API_KEY" ]]; then
+                        printf "n8n API key: "
+                        read -r -s n8n_api_key
+                        echo  # Add newline after hidden input
+                        if [[ -n "$n8n_api_key" ]]; then
+                            CONF_N8N_API_KEY="$n8n_api_key"
+                        else
+                            log ERROR "n8n API key is required for folder structure"
+                            exit 1
+                        fi
+                    fi
+                    
+                    log INFO "✅ Folder structure enabled with n8n API integration"
+                else
+                    CONF_FOLDER_STRUCTURE="false"
                 fi
             fi
         fi
