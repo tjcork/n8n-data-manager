@@ -1316,7 +1316,7 @@ EOF
 
     # --- Commit Logic --- 
     local commit_status="pending" # Use string instead of boolean to avoid empty command errors
-    if $push_credentials; then
+    if [[ "$credentials_storage" == "remote" ]]; then
         log INFO "Committing workflow and credential changes to Git..."
     else
         log INFO "Committing workflow changes to Git..."
