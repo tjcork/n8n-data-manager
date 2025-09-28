@@ -435,12 +435,34 @@ check_github_access() {
         return 1
     fi
 
-    if ! echo "$scopes" | grep -qE '(^|,) *repo(,|$)'; then
-        log ERROR "GitHub token is missing the required 'repo' scope."
-        log INFO "Please create a new token with the 'repo' scope selected."
+    # Check for either classic token (repo scope) or fine-grained token (contents scope)
+    local has_required_scope=false
+    if [ -n "$scopes" ]; then
+        # Classic token with x-oauth-scopes header
+        if echo "$scopes" | grep -qE '(^|,) *repo(,|$)'; then
+            log SUCCESS "GitHub token is valid and has 'repo' scope (classic token)."
+            has_required_scope=true
+        elif echo "$scopes" | grep -qE '(^|,) *contents(,|$)'; then
+            log SUCCESS "GitHub token is valid and has 'contents' scope (fine-grained token)."
+            has_required_scope=true
+        fi
+    else
+        # Fine-grained tokens may not have x-oauth-scopes header, so we test repository access directly
+        log DEBUG "No x-oauth-scopes header found - testing repository access for fine-grained token..."
+        local test_status
+        test_status=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: token $token" "https://api.github.com/repos/$repo")
+        if [[ "$test_status" -eq 200 ]]; then
+            log SUCCESS "GitHub token is valid and has repository access (fine-grained token)."
+            has_required_scope=true
+        fi
+    fi
+
+    if ! $has_required_scope; then
+        log ERROR "GitHub token is missing required permissions."
+        log INFO "For classic tokens: Please create a new token with the 'repo' scope selected."
+        log INFO "For fine-grained tokens: Please ensure the token has 'Contents' repository permissions (read/write)."
         return 1
     fi
-    log SUCCESS "GitHub token is valid and has 'repo' scope."
 
     # 2. Check Repository Existence
     log INFO "Verifying repository existence: $repo ..."
