@@ -157,12 +157,17 @@ except:
     fi
     
     if [[ -n "$email" && -n "$password" ]]; then
-        if test_n8n_session_auth "$base_url" "$email" "$password" "true"; then
-            log SUCCESS "✅ Session authentication successful!"
-            log INFO "REST API endpoints are accessible via session authentication"
-            return 0
+        if authenticate_n8n_session "$base_url" "$email" "$password" 3; then
+            # Test the session with a simple API call
+            if test_n8n_session_auth "$base_url" "$email" "$password" "true"; then
+                log SUCCESS "✅ Session authentication successful!"
+                log INFO "REST API endpoints are accessible via session authentication"
+                return 0
+            else
+                log ERROR "❌ Session authentication succeeded but API test failed"
+            fi
         else
-            log ERROR "❌ Session authentication failed"
+            log ERROR "❌ Session authentication failed after multiple attempts"
         fi
     else
         log ERROR "❌ No valid credentials provided for session authentication"
@@ -358,7 +363,7 @@ create_n8n_folder_structure() {
         fi
         
         # Authenticate and fetch data using session
-        if authenticate_n8n_session "$base_url" "$email" "$password" && \
+        if authenticate_n8n_session "$base_url" "$email" "$password" 3 && \
            projects_response=$(fetch_n8n_projects_session "$base_url" 2>/dev/null) && \
            workflows_response=$(fetch_workflows_with_folders_session "$base_url" 2>/dev/null); then
             log SUCCESS "Successfully fetched data using session authentication"
@@ -366,7 +371,7 @@ create_n8n_folder_structure() {
             log DEBUG "Workflows session response received: $(echo "$workflows_response" | wc -c) characters"
             using_session_auth=true
         else
-            log ERROR "❌ Both API key and session authentication failed!"
+            log ERROR "❌ Session authentication failed after multiple attempts!"
             log ERROR "Cannot proceed with folder structure creation."
             log ERROR "Please verify:"
             log ERROR "  1. n8n instance is running and accessible"
@@ -627,35 +632,79 @@ authenticate_n8n_session() {
     local base_url="$1"
     local email="$2"
     local password="$3"
+    local max_attempts="${4:-3}"  # Default to 3 attempts
     
     # Clean up URL
     base_url="${base_url%/}"
     
-    log DEBUG "Authenticating with n8n session for REST API access"
-    
-    # Attempt to login and get session cookie
+    local attempt=1
     local auth_response
     local http_status
-    if ! auth_response=$(curl -s -w "\n%{http_code}" -c "$N8N_SESSION_COOKIE_FILE" \
-        -X POST \
-        -H "Content-Type: application/json" \
-        -d "{\"body\":{\"emailOrLdapLoginId\":\"$email\",\"password\":\"$password\"}}" \
-        "$base_url/rest/login" 2>/dev/null); then
-        log ERROR "Failed to authenticate with n8n session"
-        return 1
-    fi
     
-    http_status=$(echo "$auth_response" | tail -n1)
-    local response_body=$(echo "$auth_response" | head -n -1)
+    while [[ $attempt -le $max_attempts ]]; do
+        log DEBUG "Authenticating with n8n session (attempt $attempt/$max_attempts)"
+        
+        # If this is a retry, prompt for new credentials
+        if [[ $attempt -gt 1 ]]; then
+            log WARN "Login attempt $((attempt-1)) failed. Please try again."
+            printf "n8n email or LDAP login ID: "
+            read -r email
+            printf "n8n password: "
+            read -r -s password
+            echo  # Add newline after hidden input
+        fi
+        
+        # Attempt to login and get session cookie
+        if ! auth_response=$(curl -s -w "\n%{http_code}" -c "$N8N_SESSION_COOKIE_FILE" \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -d "{\"emailOrLdapLoginId\":\"$email\",\"password\":\"$password\"}" \
+            "$base_url/rest/login" 2>/dev/null); then
+            log ERROR "Failed to connect to n8n login endpoint (attempt $attempt/$max_attempts)"
+            if [[ $attempt -eq $max_attempts ]]; then
+                log ERROR "Max attempts reached. Please check network connectivity and n8n server status."
+                return 1
+            fi
+            ((attempt++))
+            continue
+        fi
+        
+        http_status=$(echo "$auth_response" | tail -n1)
+        local response_body=$(echo "$auth_response" | head -n -1)
+        
+        if [[ "$http_status" == "200" ]]; then
+            log SUCCESS "Successfully authenticated with n8n session!"
+            return 0
+        elif [[ "$http_status" == "401" ]]; then
+            log ERROR "Invalid credentials (HTTP 401) - attempt $attempt/$max_attempts"
+            if [[ $attempt -eq $max_attempts ]]; then
+                log ERROR "Max login attempts reached. Please verify your credentials."
+                return 1
+            fi
+        elif [[ "$http_status" == "403" ]]; then
+            log ERROR "Access forbidden (HTTP 403) - account may be locked or disabled"
+            return 1
+        elif [[ "$http_status" == "429" ]]; then
+            log ERROR "Too many requests (HTTP 429) - please wait before trying again"
+            return 1
+        else
+            log ERROR "Login failed with HTTP $http_status (attempt $attempt/$max_attempts)"
+            log DEBUG "Response: $response_body"
+            if [[ $attempt -eq $max_attempts ]]; then
+                log ERROR "Max attempts reached. Server may be experiencing issues."
+                return 1
+            fi
+        fi
+        
+        ((attempt++))
+        
+        # Add a small delay between attempts
+        if [[ $attempt -le $max_attempts ]]; then
+            sleep 1
+        fi
+    done
     
-    if [[ "$http_status" == "200" ]]; then
-        log DEBUG "Successfully authenticated with n8n session"
-        return 0
-    else
-        log ERROR "n8n session authentication failed with HTTP $http_status"
-        log DEBUG "Response: $response_body"
-        return 1
-    fi
+    return 1
 }
 
 # Fetch projects using session authentication (REST API)
