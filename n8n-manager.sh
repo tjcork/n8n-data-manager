@@ -229,10 +229,14 @@ main() {
 
         # Validate container
         log DEBUG "Validating non-interactive container: $container"
+        # Sanitize container variable to remove any potential newlines or special chars
+        container=$(echo "$container" | tr -d '\n\r' | xargs)
         local found_id
         found_id=$(docker ps -q --filter "id=$container" --filter "name=$container" | head -n 1)
         if [ -z "$found_id" ]; then
-             log ERROR "Container '$container' not found or not running."
+             log ERROR "Specified container '${container}' not found or not running."
+             log INFO "Please check that the container exists and is currently running."
+             log INFO "Use 'docker ps' to see available running containers."
              exit 1
         fi
         container=$found_id
@@ -254,11 +258,15 @@ main() {
             container="$SELECTED_CONTAINER_ID"
         else
             log DEBUG "Validating specified container: $container"
+            # Sanitize container variable to remove any potential newlines or special chars
+            container=$(echo "$container" | tr -d '\n\r' | xargs)
             local found_id
             found_id=$(docker ps -q --filter "id=$container" --filter "name=$container" | head -n 1)
             if [ -z "$found_id" ]; then
-                 log ERROR "Container '$container' not found or not running."
+                 log ERROR "Specified container '${container}' not found or not running."
+                 log INFO "The container may have been stopped or the name/ID may be incorrect."
                  log WARN "Falling back to interactive container selection..."
+                 echo
                  select_container
                  container="$SELECTED_CONTAINER_ID"
             else
