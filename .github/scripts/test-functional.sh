@@ -25,5 +25,5 @@ echo "Testing help functionality..."
 
 echo "Testing configuration file parsing..."
 mkdir -p ~/.config/n8n-manager
-echo 'CONF_VERBOSE=true' > ~/.config/n8n-manager/config
+echo 'VERBOSE=true' > ~/.config/n8n-manager/config
 ./$SCRIPT_FILE --action backup --container test-n8n --dry-run || true

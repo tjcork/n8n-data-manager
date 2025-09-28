@@ -87,28 +87,28 @@ Create the file `~/.config/n8n-manager/config` with content like this:
 
 ```ini
 # GitHub Personal Access Token (Required)
-CONF_GITHUB_TOKEN="ghp_YourGitHubPATGoesHere"
+GITHUB_TOKEN="ghp_YourGitHubPATGoesHere"
 
 # GitHub Repository (Required, format: username/repo)
-CONF_GITHUB_REPO="your-github-username/n8n-backups"
+GITHUB_REPO="your-github-username/n8n-backups"
 
 # Default GitHub Branch (Optional, defaults to main)
-CONF_GITHUB_BRANCH="main"
+GITHUB_BRANCH="main"
 
 # Default n8n Container Name or ID (Optional)
-CONF_DEFAULT_CONTAINER="my-n8n-container"
+DEFAULT_CONTAINER="my-n8n-container"
 
 # Use Dated Backups by default (Optional, true/false, defaults to false)
-CONF_DATED_BACKUPS=true
+DATED_BACKUPS=true
 
 # Default Restore Type (Optional, all/workflows/credentials, defaults to all)
-CONF_RESTORE_TYPE="all"
+RESTORE_TYPE="all"
 
 # Enable Verbose Logging by default (Optional, true/false, defaults to false)
-CONF_VERBOSE=false
+VERBOSE=false
 
 # Log output to a file (Optional, must be an absolute path)
-CONF_LOG_FILE="/var/log/n8n-manager.log"
+LOG_FILE="/var/log/n8n-manager.log"
 ```
 
 **Security Note:** Ensure the configuration file has appropriate permissions (e.g., `chmod 600 ~/.config/n8n-manager/config`) as it contains your GitHub PAT.

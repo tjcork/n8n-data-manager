@@ -19,7 +19,9 @@ IFS=$'\n\t'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- Configuration ---
-CONFIG_FILE_PATH="${XDG_CONFIG_HOME:-$HOME/.config}/n8n-manager/config"
+# Configuration file paths (local first, then user directory)
+LOCAL_CONFIG_FILE="$SCRIPT_DIR/.config"
+USER_CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/n8n-manager/config"
 
 # --- Global Configuration Variables ---
 VERSION="4.1.0"
@@ -266,7 +268,7 @@ main() {
         log DEBUG "Container selected: $container"
         
         # Interactive dated backup prompt
-        if [[ "$action" == "backup" ]] && ! $dated_backups && ! grep -q "DATED_BACKUPS=true" "${config_file:-$CONFIG_FILE_PATH}" 2>/dev/null; then
+        if [[ "$action" == "backup" ]] && ! $dated_backups && ! grep -q "DATED_BACKUPS=true" "${config_file:-${LOCAL_CONFIG_FILE}}" 2>/dev/null && ! grep -q "DATED_BACKUPS=true" "${USER_CONFIG_FILE}" 2>/dev/null; then
              printf "Create a dated backup (in a timestamped subdirectory)? (yes/no) [no]: "
              local confirm_dated
              read -r confirm_dated
@@ -387,7 +389,7 @@ main() {
         fi
         
         # Interactive restore type selection
-        if [[ "$action" == "restore" ]] && [[ "$restore_type" == "all" ]] && ! grep -q "RESTORE_TYPE=" "${config_file:-$CONFIG_FILE_PATH}" 2>/dev/null; then
+        if [[ "$action" == "restore" ]] && [[ "$restore_type" == "all" ]] && ! grep -q "RESTORE_TYPE=" "${config_file:-${LOCAL_CONFIG_FILE}}" 2>/dev/null && ! grep -q "RESTORE_TYPE=" "${USER_CONFIG_FILE}" 2>/dev/null; then
             select_restore_type
             restore_type="$SELECTED_RESTORE_TYPE"
         elif [[ "$action" == "restore" ]]; then

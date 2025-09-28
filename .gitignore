@@ -5,3 +5,6 @@
 .github/workflows/job-logs.txt
 .github/test/workflows
 test.logs
+
+# Local configuration file (project-specific)
+.config

@@ -13,7 +13,7 @@ show_help() {
 Usage: $(basename "$0") [OPTIONS]
 
 Automated backup and restore tool for n8n Docker containers using GitHub.
-Reads configuration from ${CONFIG_FILE_PATH} if it exists.
+Reads configuration from local 'config' file, then ~/.config/n8n-manager/config if it exists.
 
 Options:
   --action <action>     Action to perform: 'backup' or 'restore'.
@@ -30,30 +30,79 @@ Options:
   --n8n-url <url>       n8n instance URL (e.g., 'http://localhost:5678').
   --n8n-api-key <key>   n8n API key for folder structure access.
   --restore-type <type> Type of restore: 'all' (default), 'workflows', or 'credentials' (legacy).
-                        Overrides CONF_RESTORE_TYPE in config file.
+                        Overrides RESTORE_TYPE in config file.
   --dry-run             Simulate the action without making any changes.
   --verbose             Enable detailed debug logging.
   --log-file <path>     Path to a file to append logs to.
   --config <path>       Path to a custom configuration file.
   -h, --help            Show this help message and exit.
 
-Configuration File (${CONFIG_FILE_PATH}):
+Configuration Files (checked in order):
+  1. ./.config (local, project-specific)
+  2. ~/.config/n8n-manager/config (user-specific)
+  3. Custom path via --config option
+
   Define variables like:
-    CONF_GITHUB_TOKEN="ghp_..."
-    CONF_GITHUB_REPO="user/repo"
-    CONF_GITHUB_BRANCH="main"
-    CONF_DEFAULT_CONTAINER="n8n-container-name"
-    CONF_DATED_BACKUPS=true # Optional, defaults to false
-    CONF_WORKFLOWS_STORAGE="local" # Optional: "local" or "remote" (Git repo)
-    CONF_CREDENTIALS_STORAGE="local" # Optional: "local" (default, secure) or "remote" (Git repo)
-    CONF_LOCAL_BACKUP_PATH="/custom/backup/path" # Optional, defaults to ~/n8n-backup
-    CONF_LOCAL_ROTATION_LIMIT="10" # Optional: 0 (overwrite), number (keep N), "unlimited" (keep all)
-    CONF_FOLDER_STRUCTURE=false # Optional: Enable n8n folder structure mirroring
-    CONF_N8N_BASE_URL="http://localhost:5678" # Required if CONF_FOLDER_STRUCTURE=true
-    CONF_N8N_API_KEY="n8n_api_..." # Required if CONF_FOLDER_STRUCTURE=true
-    CONF_RESTORE_TYPE="all" # Optional, defaults to 'all' (legacy compatibility)
-    CONF_VERBOSE=false      # Optional, defaults to false
-    CONF_LOG_FILE="/var/log/n8n-manager.log" # Optional
+    # === REQUIRED SETTINGS ===
+    # GitHub Personal Access Token for repository access
+    GITHUB_TOKEN="ghp_1234567890abcdef1234567890abcdef12345678"
+    
+    # GitHub repository in format: username/repository
+    GITHUB_REPO="myuser/n8n-backup"
+    
+    # Default container ID or name to backup/restore
+    DEFAULT_CONTAINER="n8n-container-name"
+    
+    # === OPTIONAL GITHUB SETTINGS ===
+    # GitHub branch to use (defaults to 'main')
+    GITHUB_BRANCH="main"
+    
+    # === BACKUP BEHAVIOR SETTINGS ===
+    # Create timestamped backup directories (true/false, defaults to false)
+    DATED_BACKUPS=true
+    
+    # Workflows storage location: "local" or "remote" (Git repo)
+    WORKFLOWS_STORAGE="local"
+    
+    # Credentials storage location: "local" (secure) or "remote" (Git repo)
+    CREDENTIALS_STORAGE="local"
+    
+    # === LOCAL BACKUP SETTINGS ===
+    # Custom local backup directory path (defaults to ~/n8n-backup)
+    LOCAL_BACKUP_PATH="/custom/backup/path"
+    
+    # Local backup rotation: 0 (overwrite), number (keep N), "unlimited" (keep all)
+    LOCAL_ROTATION_LIMIT="10"
+    
+    # === n8n FOLDER STRUCTURE SETTINGS ===
+    # Enable n8n folder structure mirroring in Git (requires n8n API access)
+    FOLDER_STRUCTURE=false
+    
+    # n8n instance URL (required if FOLDER_STRUCTURE=true)
+    N8N_BASE_URL="http://localhost:5678"
+    
+    # n8n API key for folder structure access (required if FOLDER_STRUCTURE=true)
+    N8N_API_KEY="n8n_api_1234567890abcdef1234567890abcdef"
+    
+    # n8n email for authentication (alternative to API key)
+    N8N_EMAIL="user@example.com"
+    
+    # n8n password for authentication (alternative to API key)
+    N8N_PASSWORD="your-n8n-password"
+    
+    # === RESTORE BEHAVIOR SETTINGS ===
+    # Default restore type: "all", "workflows", or "credentials" (defaults to 'all')
+    RESTORE_TYPE="all"
+    
+    # === LOGGING SETTINGS ===
+    # Enable verbose debug logging (true/false, defaults to false)
+    VERBOSE=false
+    
+    # Enable dry run mode - simulate actions without making changes (true/false, defaults to false)
+    DRY_RUN=false
+    
+    # Path to log file for persistent logging (optional)
+    LOG_FILE="/var/log/n8n-manager.log"
 
 Command-line arguments override configuration file settings.
 For non-interactive use, required parameters (action, container, token, repo)
@@ -89,7 +138,7 @@ select_container() {
         local display_name="$name"
         local is_default=false
 
-        if [ -n "$DEFAULT_CONTAINER" ] && { [ "$id" = "$DEFAULT_CONTAINER" ] || [ "$name" = "$DEFAULT_CONTAINER" ]; }; then
+        if [ -n "$default_container" ] && { [ "$id" = "$default_container" ] || [ "$name" = "$default_container" ]; }; then
             is_default=true
             default_option_num=$i
             display_name="${display_name} ${YELLOW}(default)${NC}"

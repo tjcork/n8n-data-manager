@@ -1,0 +1,71 @@
+# =========================================================
+# n8n-manager Configuration File Example
+# =========================================================
+# Copy this file to any of these locations:
+#   1. ./.config (local, project-specific) - highest priority
+#   2. ~/.config/n8n-manager/config (user-specific)
+#   3. Custom path via --config option
+#
+# All settings are optional except for required GitHub settings for remote operations
+# This file should be added to .gitignore for security when used locally
+
+# === REQUIRED SETTINGS (for remote operations) ===
+# GitHub Personal Access Token for repository access
+GITHUB_TOKEN="ghp_1234567890abcdef1234567890abcdef12345678"
+
+# GitHub repository in format: username/repository  
+GITHUB_REPO="myuser/n8n-backup"
+
+# Default container ID or name to backup/restore
+DEFAULT_CONTAINER="n8n-container-name"
+
+# === OPTIONAL GITHUB SETTINGS ===
+# GitHub branch to use (defaults to 'main')
+GITHUB_BRANCH="main"
+
+# === BACKUP BEHAVIOR SETTINGS ===
+# Create timestamped backup directories (true/false, defaults to false)
+DATED_BACKUPS=true
+
+# Workflows storage location: "local" or "remote" (Git repo)
+WORKFLOWS_STORAGE="local"
+
+# Credentials storage location: "local" (secure) or "remote" (Git repo)  
+CREDENTIALS_STORAGE="local"
+
+# === LOCAL BACKUP SETTINGS ===
+# Custom local backup directory path (defaults to ~/n8n-backup)
+LOCAL_BACKUP_PATH="/custom/backup/path"
+
+# Local backup rotation: 0 (overwrite), number (keep N), "unlimited" (keep all)
+LOCAL_ROTATION_LIMIT="10"
+
+# === n8n FOLDER STRUCTURE SETTINGS ===
+# Enable n8n folder structure mirroring in Git (requires n8n API access)
+FOLDER_STRUCTURE=false
+
+# n8n instance URL (required if FOLDER_STRUCTURE=true)
+N8N_BASE_URL="http://localhost:5678"
+
+# n8n API key for folder structure access (required if FOLDER_STRUCTURE=true)
+N8N_API_KEY="n8n_api_1234567890abcdef1234567890abcdef"
+
+# n8n email for authentication (alternative to API key)
+N8N_EMAIL="user@example.com"
+
+# n8n password for authentication (alternative to API key)
+N8N_PASSWORD="your-n8n-password"
+
+# === RESTORE BEHAVIOR SETTINGS ===
+# Default restore type: "all", "workflows", or "credentials" (defaults to 'all')
+RESTORE_TYPE="all"
+
+# === LOGGING SETTINGS ===
+# Enable verbose debug logging (true/false, defaults to false)
+VERBOSE=false
+
+# Enable dry run mode - simulate actions without making changes (true/false, defaults to false)
+DRY_RUN=false
+
+# Path to log file for persistent logging (optional)
+LOG_FILE="/var/log/n8n-manager.log"

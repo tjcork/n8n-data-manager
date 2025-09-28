@@ -151,7 +151,18 @@ check_host_dependencies() {
 }
 
 load_config() {
-    local file_to_load="${config_file:-$CONFIG_FILE_PATH}"
+    local file_to_load=""
+    
+    # Priority: explicit config → local config → user config
+    if [ -n "$config_file" ]; then
+        file_to_load="$config_file"
+    elif [ -f "$LOCAL_CONFIG_FILE" ]; then
+        file_to_load="$LOCAL_CONFIG_FILE"
+    elif [ -f "$USER_CONFIG_FILE" ]; then
+        file_to_load="$USER_CONFIG_FILE"
+    fi
+    
+    # Expand tilde if present
     file_to_load="${file_to_load/#\~/$HOME}"
 
     if [ -f "$file_to_load" ]; then
@@ -159,48 +170,56 @@ load_config() {
         source <(grep -vE '^\s*(#|$)' "$file_to_load" 2>/dev/null || true)
         
         # Apply config values to runtime variables (only if not already set)
-        github_token=${github_token:-${CONF_GITHUB_TOKEN:-}}
-        github_repo=${github_repo:-${CONF_GITHUB_REPO:-}}
-        github_branch=${github_branch:-${CONF_GITHUB_BRANCH:-main}}
-        container=${container:-${CONF_DEFAULT_CONTAINER:-}}
-        default_container=${CONF_DEFAULT_CONTAINER:-}
+        github_token=${github_token:-${GITHUB_TOKEN:-}}
+        github_repo=${github_repo:-${GITHUB_REPO:-}}
+        github_branch=${github_branch:-${GITHUB_BRANCH:-main}}
+        container=${container:-${DEFAULT_CONTAINER:-}}
+        default_container=${DEFAULT_CONTAINER:-}
         
         # Handle boolean configs properly
         if [[ "$dated_backups" != "true" ]]; then 
-            CONF_DATED_BACKUPS_VAL=${CONF_DATED_BACKUPS:-false}
-            if [[ "$CONF_DATED_BACKUPS_VAL" == "true" ]]; then dated_backups=true; fi
+            DATED_BACKUPS_VAL=${DATED_BACKUPS:-false}
+            if [[ "$DATED_BACKUPS_VAL" == "true" ]]; then dated_backups=true; fi
         fi
         
         # Storage settings
-        workflows_storage=${workflows_storage:-${CONF_WORKFLOWS_STORAGE:-}}
-        credentials_storage=${credentials_storage:-${CONF_CREDENTIALS_STORAGE:-local}}
-        local_backup_path=${local_backup_path:-${CONF_LOCAL_BACKUP_PATH:-$HOME/n8n-backup}}
-        local_rotation_limit=${local_rotation_limit:-${CONF_LOCAL_ROTATION_LIMIT:-10}}
+        workflows_storage=${workflows_storage:-${WORKFLOWS_STORAGE:-}}
+        credentials_storage=${credentials_storage:-${CREDENTIALS_STORAGE:-local}}
+        local_backup_path=${local_backup_path:-${LOCAL_BACKUP_PATH:-$HOME/n8n-backup}}
+        local_rotation_limit=${local_rotation_limit:-${LOCAL_ROTATION_LIMIT:-10}}
         
         # Folder structure settings
         if [[ "$folder_structure" != "true" ]]; then
-            CONF_FOLDER_STRUCTURE_VAL=${CONF_FOLDER_STRUCTURE:-false}
-            if [[ "$CONF_FOLDER_STRUCTURE_VAL" == "true" ]]; then folder_structure=true; fi
+            FOLDER_STRUCTURE_VAL=${FOLDER_STRUCTURE:-false}
+            if [[ "$FOLDER_STRUCTURE_VAL" == "true" ]]; then folder_structure=true; fi
         fi
         
         # n8n API settings
-        n8n_base_url=${n8n_base_url:-${CONF_N8N_BASE_URL:-}}
-        n8n_api_key=${n8n_api_key:-${CONF_N8N_API_KEY:-}}
-        n8n_email=${n8n_email:-${CONF_N8N_EMAIL:-}}
-        n8n_password=${n8n_password:-${CONF_N8N_PASSWORD:-}}
+        n8n_base_url=${n8n_base_url:-${N8N_BASE_URL:-}}
+        n8n_api_key=${n8n_api_key:-${N8N_API_KEY:-}}
+        n8n_email=${n8n_email:-${N8N_EMAIL:-}}
+        n8n_password=${n8n_password:-${N8N_PASSWORD:-}}
         
         # Other settings
-        restore_type=${restore_type:-${CONF_RESTORE_TYPE:-all}}
+        restore_type=${restore_type:-${RESTORE_TYPE:-all}}
         
         if [[ "$verbose" != "true" ]]; then
-            CONF_VERBOSE_VAL=${CONF_VERBOSE:-false}
-            if [[ "$CONF_VERBOSE_VAL" == "true" ]]; then verbose=true; fi
+            VERBOSE_VAL=${VERBOSE:-false}
+            if [[ "$VERBOSE_VAL" == "true" ]]; then verbose=true; fi
         fi
         
-        log_file=${log_file:-${CONF_LOG_FILE:-}}
+        # Dry run mode (boolean)
+        if [[ "$dry_run" != "true" ]]; then
+            DRY_RUN_VAL=${DRY_RUN:-false}
+            if [[ "$DRY_RUN_VAL" == "true" ]]; then dry_run=true; fi
+        fi
+        
+        log_file=${log_file:-${LOG_FILE:-}}
         
     elif [ -n "$config_file" ]; then
         log WARN "Configuration file specified but not found: $file_to_load"
+    else
+        log DEBUG "No configuration file found (checked: local './.config' and '$USER_CONFIG_FILE')"
     fi
     
     if [ -n "$log_file" ] && [[ "$log_file" != /* ]]; then
