@@ -46,6 +46,14 @@ show_config_summary() {
         log INFO "   📚 GitHub: $github_repo (branch: ${github_branch:-main})"
     fi
     
+    if [[ -n "$n8n_api_key" ]]; then
+        log INFO "   🔐 n8n API auth: API key configured"
+    elif [[ -n "$n8n_session_credential" ]]; then
+        log INFO "   🔐 n8n session credential: $n8n_session_credential"
+    elif [[ -n "$n8n_email" || -n "$n8n_password" ]]; then
+        log INFO "   🔐 n8n session login: direct email/password (legacy)"
+    fi
+
     if [[ "${dated_backups_flag:-false}" == "true" ]] || [[ "$dated_backups" == "true" ]]; then
         log INFO "   📅 Timestamped backups: enabled"
     else
@@ -87,6 +95,7 @@ Options:
   --folder-structure    Enable n8n folder structure mirroring in Git (requires API access).
   --n8n-url <url>       n8n instance URL (e.g., 'http://localhost:5678').
   --n8n-api-key <key>   n8n API key for folder structure access.
+    --n8n-cred <name>   n8n credential name providing Basic Auth for session login when API key is absent.
   --restore-type <type> Type of restore: 'all' (default), 'workflows', or 'credentials' (legacy).
                         Overrides RESTORE_TYPE in config file.
   --dry-run             Simulate the action without making any changes.
@@ -141,12 +150,10 @@ Configuration Files (checked in order):
     
     # n8n API key for folder structure access (required if FOLDER_STRUCTURE=true)
     N8N_API_KEY="n8n_api_1234567890abcdef1234567890abcdef"
-    
-    # n8n email for authentication (alternative to API key)
-    N8N_EMAIL="user@example.com"
-    
-    # n8n password for authentication (alternative to API key)
-    N8N_PASSWORD="your-n8n-password"
+
+    # n8n credential name for session-based login (alternative to API key)
+    # Example: Basic Auth credential named "N8N REST BACKUP"
+    N8N_SESSION_CREDENTIAL="N8N REST BACKUP"
     
     # === RESTORE BEHAVIOR SETTINGS ===
     # Default restore type: "all", "workflows", or "credentials" (defaults to 'all')

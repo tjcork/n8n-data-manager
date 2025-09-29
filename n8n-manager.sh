@@ -67,6 +67,7 @@ local_rotation_limit="10"
 folder_structure=""            # empty = unset, true/false = explicitly configured
 n8n_base_url=""               # Required if folder_structure=true
 n8n_api_key=""                # Optional - session auth used if empty
+n8n_session_credential=""     # Optional - credential name stored inside n8n
 n8n_email=""                  # Optional - for session auth
 n8n_password=""               # Optional - for session auth
 
@@ -141,6 +142,7 @@ main() {
             --folder-structure) folder_structure=true; shift 1 ;;
             --n8n-url) n8n_base_url="$2"; shift 2 ;;
             --n8n-api-key) n8n_api_key="$2"; shift 2 ;;
+            --n8n-cred) n8n_session_credential="$2"; shift 2 ;;
             -h|--help) show_help; exit 0 ;;
             *) echo "[ERROR] Invalid option: $1"; show_help; exit 1 ;;
         esac
@@ -233,9 +235,19 @@ main() {
                 exit 1
             fi
             
+            if [[ -z "$n8n_api_key" ]]; then
+                if [[ -z "$n8n_email" || -z "$n8n_password" ]]; then
+                    if [[ -z "$n8n_session_credential" ]]; then
+                        log ERROR "Session credential name required when API key is not provided."
+                        log INFO "Please configure --n8n-cred or set N8N_SESSION_CREDENTIAL in config."
+                        exit 1
+                    fi
+                fi
+            fi
+
             # Validate API access
             log INFO "Validating n8n API access..."
-            if ! validate_n8n_api_access "$n8n_base_url" "$n8n_api_key" "$n8n_email" "$n8n_password"; then
+            if ! validate_n8n_api_access "$n8n_base_url" "$n8n_api_key" "$n8n_email" "$n8n_password" "$container" "$n8n_session_credential"; then
                 log ERROR "❌ n8n API validation failed!"
                 log ERROR "Please check your URL and credentials."
                 log INFO "💡 Tip: You can test manually with:"
@@ -366,47 +378,57 @@ main() {
                 else
                     folder_structure=false
                 fi
-                    
-                # Prompt for n8n API credentials if not already configured or in reconfigure mode
-                if [[ -z "$n8n_base_url" ]] || [[ "$reconfigure_mode" == "true" ]]; then
-                    printf "n8n base URL (e.g., http://localhost:5678): "
-                    read -r n8n_url
-                    if [[ -n "$n8n_url" ]]; then
-                        n8n_base_url="$n8n_url"
-                    else
-                        log ERROR "n8n base URL is required for folder structure"
+
+                if [[ "$folder_structure" == "true" ]]; then
+                    if [[ -z "$n8n_base_url" ]] || [[ "$reconfigure_mode" == "true" ]]; then
+                        printf "n8n base URL (e.g., http://localhost:5678): "
+                        read -r n8n_url
+                        if [[ -n "$n8n_url" ]]; then
+                            n8n_base_url="$n8n_url"
+                        else
+                            log ERROR "n8n base URL is required for folder structure"
+                            exit 1
+                        fi
+                    fi
+
+                    if [[ -z "$n8n_api_key" ]] || [[ "$reconfigure_mode" == "true" ]]; then
+                        printf "n8n API key (leave blank to use stored Basic Auth credential): "
+                        read -r -s n8n_api_key_input
+                        echo
+                        if [[ -n "$n8n_api_key_input" ]]; then
+                            n8n_api_key="$n8n_api_key_input"
+                        else
+                            n8n_api_key=""
+                        fi
+                    fi
+
+                    if [[ -z "$n8n_api_key" ]]; then
+                        local default_cred_name="${n8n_session_credential:-N8N REST BACKUP}"
+                        if [[ -z "$n8n_session_credential" ]] || [[ "$reconfigure_mode" == "true" ]]; then
+                            printf "n8n credential name for session auth [${default_cred_name}]: "
+                            read -r credential_name_input
+                            credential_name_input=${credential_name_input:-$default_cred_name}
+                            n8n_session_credential="$credential_name_input"
+                        fi
+                    elif [[ "$reconfigure_mode" == "true" ]]; then
+                        n8n_session_credential=""
+                    fi
+
+                    log INFO "Validating n8n API access..."
+                    if ! validate_n8n_api_access "$n8n_base_url" "$n8n_api_key" "$n8n_email" "$n8n_password" "$container" "$n8n_session_credential"; then
+                        log ERROR "❌ n8n API validation failed!"
+                        log ERROR "Authentication failed with all available methods."
+                        log ERROR "Cannot proceed with folder structure creation."
+                        log INFO "💡 Please verify:"
+                        log INFO "   1. n8n instance is running and accessible"
+                        log INFO "   2. Credentials (API key or stored credential) are correct"
+                        log INFO "   3. No authentication barriers blocking access"
                         exit 1
                     fi
+
+                    log SUCCESS "✅ n8n API configuration validated successfully!"
+                    log INFO "✅ Folder structure enabled with n8n API integration"
                 fi
-                
-                if [[ -z "$n8n_api_key" ]] || [[ "$reconfigure_mode" == "true" ]]; then
-                    printf "n8n API key (leave blank to use email/password login): "
-                    read -r -s n8n_api_key_input
-                    echo  # Add newline after hidden input
-                    if [[ -n "$n8n_api_key_input" ]]; then
-                        n8n_api_key="$n8n_api_key_input"
-                    else
-                        log INFO "No API key provided - will use session authentication"
-                        n8n_api_key=""  # Explicitly set to empty
-                    fi
-                fi
-                
-                # Validate API access immediately after configuration
-                log INFO "Validating n8n API access..."
-                if ! validate_n8n_api_access "$n8n_base_url" "$n8n_api_key" "$n8n_email" "$n8n_password"; then
-                    log ERROR "❌ n8n API validation failed!"
-                    log ERROR "Authentication failed with all available methods."
-                    log ERROR "Cannot proceed with folder structure creation."
-                    log INFO "💡 Please verify:"
-                    log INFO "   1. n8n instance is running and accessible"
-                    log INFO "   2. Credentials (API key or email/password) are correct"
-                    log INFO "   3. No authentication barriers blocking access"
-                    exit 1
-                fi
-                
-                log SUCCESS "✅ n8n API configuration validated successfully!"
-                
-                log INFO "✅ Folder structure enabled with n8n API integration"
             fi
         fi
         

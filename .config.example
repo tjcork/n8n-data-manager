@@ -58,11 +58,9 @@ N8N_BASE_URL="http://localhost:5678"
 # n8n API key for folder structure access (required if FOLDER_STRUCTURE=true)
 N8N_API_KEY="n8n_api_1234567890abcdef1234567890abcdef"
 
-# n8n email for authentication (alternative to API key)
-N8N_EMAIL="user@example.com"
-
-# n8n password for authentication (alternative to API key)
-N8N_PASSWORD="your-n8n-password"
+# n8n credential name for session-based login (stored inside n8n credentials)
+# Used when API key is not provided. Example: Basic Auth credential named "N8N REST BACKUP"
+N8N_SESSION_CREDENTIAL="N8N REST BACKUP"
 
 # === RESTORE BEHAVIOR SETTINGS ===
 # Default restore type: "all", "workflows", or "credentials" (defaults to 'all')

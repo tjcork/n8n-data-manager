@@ -333,11 +333,20 @@ load_config() {
         if [[ -z "$n8n_api_key" && -n "${N8N_API_KEY:-}" ]]; then
             n8n_api_key="$N8N_API_KEY"
         fi
-        
+
+        if [[ -z "$n8n_session_credential" ]]; then
+            if [[ -n "${N8N_SESSION_CREDENTIAL:-}" ]]; then
+                n8n_session_credential="$N8N_SESSION_CREDENTIAL"
+            elif [[ -n "${N8N_SESSION_CREDENTIAL_NAME:-}" ]]; then
+                n8n_session_credential="$N8N_SESSION_CREDENTIAL_NAME"
+            fi
+        fi
+
+        # Backward compatibility: allow direct email/password configuration if still provided
         if [[ -z "$n8n_email" && -n "${N8N_EMAIL:-}" ]]; then
             n8n_email="$N8N_EMAIL"
         fi
-        
+
         if [[ -z "$n8n_password" && -n "${N8N_PASSWORD:-}" ]]; then
             n8n_password="$N8N_PASSWORD"
         fi

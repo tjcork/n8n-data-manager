@@ -15,6 +15,7 @@ create_folder_structure_with_git() {
     local target_dir="$2"
     local git_dir="$3"
     local is_dry_run="$4"
+    local container_credentials_path="/tmp/credentials.json"
     
     if [[ -z "$container_id" || -z "$target_dir" || -z "$git_dir" ]]; then
         log "ERROR" "Missing required parameters for folder structure creation"
@@ -57,7 +58,7 @@ create_folder_structure_with_git() {
     # Step 2: Get folder organization mapping from n8n API
     log DEBUG "Step 2: Fetching folder structure mapping from n8n API..."
     local folder_mapping_json
-    if ! folder_mapping_json=$(get_workflow_folder_mapping); then
+    if ! folder_mapping_json=$(get_workflow_folder_mapping "$container_id" "$container_credentials_path"); then
         log ERROR "Failed to get folder structure mapping from n8n API"
         log WARN "Falling back to flat file structure"
         # Fallback: copy all files to target directory without folder structure

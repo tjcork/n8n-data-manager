@@ -8,50 +8,6 @@
 # Source common utilities
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
-# Authenticate with n8n and get session cookie for REST API endpoints
-authenticate_n8n_session() {
-    local base_url="$1"
-    local email="$2"
-    local password="$3"
-    local cookie_file="$4"
-    
-    # Clean up URL
-    base_url="${base_url%/}"
-    
-    log DEBUG "Authenticating with n8n session for REST API access"
-    
-    # First, get the login page to extract CSRF token if needed
-    local login_response
-    if ! login_response=$(curl -s -c "$cookie_file" "$base_url/signin" 2>/dev/null); then
-        log ERROR "Failed to access n8n login page"
-        return 1
-    fi
-    
-    # Attempt to login and get session cookie
-    local auth_response
-    local http_status
-    if ! auth_response=$(curl -s -w "\n%{http_code}" -b "$cookie_file" -c "$cookie_file" \
-        -X POST \
-        -H "Content-Type: application/json" \
-        -d "{\"email\":\"$email\",\"password\":\"$password\"}" \
-        "$base_url/rest/login" 2>/dev/null); then
-        log ERROR "Failed to authenticate with n8n"
-        return 1
-    fi
-    
-    http_status=$(echo "$auth_response" | tail -n1)
-    local response_body=$(echo "$auth_response" | head -n -1)
-    
-    if [[ "$http_status" == "200" ]]; then
-        log DEBUG "Successfully authenticated with n8n session"
-        return 0
-    else
-        log ERROR "n8n session authentication failed with HTTP $http_status"
-        log DEBUG "Response: $response_body"
-        return 1
-    fi
-}
-
 # Test n8n API connection using appropriate authentication method
 test_n8n_api_connection() {
     local base_url="$1"
@@ -89,9 +45,103 @@ test_n8n_api_connection() {
     return 0
 }
 
+# Track whether we've already pulled session credentials from n8n
+_n8n_session_credentials_loaded=false
+
+# Ensure session authentication credentials are available by loading them from
+# the configured n8n credential inside the Docker container when needed.
+#
+# Arguments:
+#   $1 - Docker container ID/name running n8n
+#   $2 - Credential name inside n8n (e.g. "N8N REST BACKUP")
+#   $3 - Optional existing credentials JSON path inside the container
+ensure_n8n_session_credentials() {
+    local container_id="$1"
+    local credential_name="$2"
+    local container_credentials_path="${3:-}"
+
+    if [[ -n "${n8n_email:-}" && -n "${n8n_password:-}" ]]; then
+        _n8n_session_credentials_loaded=true
+        return 0
+    fi
+
+    if [[ -z "$credential_name" ]]; then
+        log ERROR "Session credential name not configured. Set N8N_SESSION_CREDENTIAL."
+        return 1
+    fi
+
+    if [[ -z "$container_id" ]]; then
+        log ERROR "Container ID required to load n8n session credential '$credential_name'."
+        return 1
+    fi
+
+    local credential_payload=""
+
+    if [[ -n "$container_credentials_path" ]]; then
+        if docker exec "$container_id" test -f "$container_credentials_path" 2>/dev/null; then
+            if ! credential_payload=$(docker exec "$container_id" sh -c "cat $container_credentials_path" 2>/dev/null); then
+                credential_payload=""
+            fi
+        fi
+    fi
+
+    if [[ -z "$credential_payload" ]]; then
+        local temp_path="/tmp/n8n-session-credential-$$.json"
+        if ! docker exec "$container_id" sh -c "n8n export:credentials --all --decrypted --output=$temp_path >/dev/null 2>&1"; then
+            log ERROR "Failed to export credentials from n8n container to locate '$credential_name'."
+            return 1
+        fi
+
+        if ! credential_payload=$(docker exec "$container_id" sh -c "cat $temp_path" 2>/dev/null); then
+            credential_payload=""
+        fi
+
+        docker exec "$container_id" sh -c "rm -f $temp_path" >/dev/null 2>&1 || true
+    fi
+
+    if [[ -z "$credential_payload" ]]; then
+        log ERROR "Unable to read exported credentials when searching for '$credential_name'."
+        return 1
+    fi
+
+    local credential_entry
+    if ! credential_entry=$(printf '%s' "$credential_payload" | jq -c --arg name "$credential_name" '
+        (if type == "object" and has("data") then .data else . end)
+        | (if type == "array" then . else [] end)
+        | map(select((.name // "") == $name))
+        | first // empty
+    ' 2>/dev/null); then
+        log ERROR "Failed to parse credentials JSON while locating '$credential_name'."
+        return 1
+    fi
+
+    if [[ -z "$credential_entry" || "$credential_entry" == "null" ]]; then
+        log ERROR "Credential named '$credential_name' not found in n8n instance."
+        return 1
+    fi
+
+    local session_user
+    local session_password
+    session_user=$(printf '%s' "$credential_entry" | jq -r '.data.user // .data.email // empty' 2>/dev/null)
+    session_password=$(printf '%s' "$credential_entry" | jq -r '.data.password // empty' 2>/dev/null)
+
+    if [[ -z "$session_user" || -z "$session_password" || "$session_user" == "null" || "$session_password" == "null" ]]; then
+        log ERROR "Credential '$credential_name' is missing required Basic Auth fields (user/password)."
+        return 1
+    fi
+
+    n8n_email="$session_user"
+    n8n_password="$session_password"
+    _n8n_session_credentials_loaded=true
+    log DEBUG "Loaded session credentials from n8n credential '$credential_name'"
+    return 0
+}
+
 # Comprehensive API validation - tests all available authentication methods
 # Build mapping of workflows to sanitized folder paths
 get_workflow_folder_mapping() {
+    local container_id="$1"
+    local container_credentials_path="${2:-}"
     local base_url="$n8n_base_url"
     local api_key="$n8n_api_key"
     local email="$n8n_email"
@@ -130,8 +180,16 @@ get_workflow_folder_mapping() {
     # Fall back to session auth if API key not usable
     if [[ "$responses_ready" != "true" ]]; then
         if [[ -z "$email" || -z "$password" ]]; then
-            log ERROR "Session credentials not configured. Provide N8N_EMAIL and N8N_PASSWORD"
-            return 1
+            if [[ -n "${n8n_session_credential:-}" ]]; then
+                if ! ensure_n8n_session_credentials "$container_id" "$n8n_session_credential" "$container_credentials_path"; then
+                    return 1
+                fi
+                email="$n8n_email"
+                password="$n8n_password"
+            else
+                log ERROR "Session credentials not configured. Set N8N_SESSION_CREDENTIAL or provide email/password."
+                return 1
+            fi
         fi
 
         log DEBUG "Fetching workflow metadata using session authentication"
@@ -331,6 +389,50 @@ get_workflow_folder_mapping() {
 
     echo "$mapping_json"
     return 0
+}
+
+validate_n8n_api_access() {
+    local base_url="$1"
+    local api_key="$2"
+    local email="$3"
+    local password="$4"
+    local container_id="$5"
+    local credential_name="$6"
+    local container_credentials_path="${7:-}"
+
+    if [[ -z "$base_url" ]]; then
+        log ERROR "n8n base URL is required to validate API access."
+        return 1
+    fi
+
+    base_url="${base_url%/}"
+
+    if [[ -n "$api_key" ]]; then
+        return test_n8n_api_connection "$base_url" "$api_key"
+    fi
+
+    if [[ -z "$email" || -z "$password" ]]; then
+        if [[ -n "$credential_name" ]]; then
+            if ! ensure_n8n_session_credentials "$container_id" "$credential_name" "$container_credentials_path"; then
+                return 1
+            fi
+            email="$n8n_email"
+            password="$n8n_password"
+        fi
+    fi
+
+    if [[ -z "$email" || -z "$password" ]]; then
+        log ERROR "Session authentication requires email/password but none are available. Configure N8N_SESSION_CREDENTIAL or provide credentials."
+        return 1
+    fi
+
+    if test_n8n_session_auth "$base_url" "$email" "$password" false; then
+        cleanup_n8n_session
+        return 0
+    fi
+
+    cleanup_n8n_session
+    return 1
 }
 
 # Fetch projects using API key authentication
