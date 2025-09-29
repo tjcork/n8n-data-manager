@@ -220,88 +220,98 @@ load_config() {
         # Handle workflows storage with flexible input (numeric or descriptive)
         if [[ -z "$workflows" && -n "${WORKFLOWS:-}" ]]; then
             local workflows_config="$WORKFLOWS"
-            workflows_config=$(echo "$workflows_config" | tr '[:upper:]' '[:lower:]')
-            case "$workflows_config" in
-                0|disabled) workflows=0 ;;
-                1|local) workflows=1 ;;
-                2|remote) workflows=2 ;;
-                *) 
-                    log WARN "Invalid WORKFLOWS value in config: '$workflows_config'. Must be 0/disabled, 1/local, or 2/remote. Using default: 1 (local)"
-                    workflows=1
-                    ;;
-            esac
+            # Clean up the value - remove quotes and whitespace
+            workflows_config=$(echo "$workflows_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
+            
+            if [[ "$workflows_config" == "0" || "$workflows_config" == "disabled" ]]; then
+                workflows=0
+            elif [[ "$workflows_config" == "1" || "$workflows_config" == "local" ]]; then
+                workflows=1
+            elif [[ "$workflows_config" == "2" || "$workflows_config" == "remote" ]]; then
+                workflows=2
+            else
+                log WARN "Invalid WORKFLOWS value in config: '$workflows_config'. Must be 0/disabled, 1/local, or 2/remote. Using default: 1 (local)"
+                workflows=1
+            fi
         fi
         
         # Handle credentials storage with flexible input (numeric or descriptive)
         if [[ -z "$credentials" && -n "${CREDENTIALS:-}" ]]; then
             local credentials_config="$CREDENTIALS"
-            credentials_config=$(echo "$credentials_config" | tr '[:upper:]' '[:lower:]')
-            case "$credentials_config" in
-                0|disabled) credentials=0 ;;
-                1|local) credentials=1 ;;
-                2|remote) credentials=2 ;;
-                *) 
-                    log WARN "Invalid CREDENTIALS value in config: '$credentials_config'. Must be 0/disabled, 1/local, or 2/remote. Using default: 1 (local)"
-                    credentials=1
-                    ;;
-            esac
+            # Clean up the value - remove quotes and whitespace
+            credentials_config=$(echo "$credentials_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
+            
+            if [[ "$credentials_config" == "0" || "$credentials_config" == "disabled" ]]; then
+                credentials=0
+            elif [[ "$credentials_config" == "1" || "$credentials_config" == "local" ]]; then
+                credentials=1
+            elif [[ "$credentials_config" == "2" || "$credentials_config" == "remote" ]]; then
+                credentials=2
+            else
+                log WARN "Invalid CREDENTIALS value in config: '$credentials_config'. Must be 0/disabled, 1/local, or 2/remote. Using default: 1 (local)"
+                credentials=1
+            fi
         fi
         
         # === BOOLEAN SETTINGS ===
         # Handle dated_backups boolean config
         if [[ -z "$dated_backups" && -n "${DATED_BACKUPS:-}" ]]; then
             local dated_backups_config="$DATED_BACKUPS"
-            dated_backups_config=$(echo "$dated_backups_config" | tr '[:upper:]' '[:lower:]')
-            case "$dated_backups_config" in
-                true|1|yes|on) dated_backups=true ;;
-                false|0|no|off) dated_backups=false ;;
-                *) 
-                    log WARN "Invalid DATED_BACKUPS value in config: '$dated_backups_config'. Must be true/false. Using default: false"
-                    dated_backups=false
-                    ;;
-            esac
+            # Clean up the value - remove quotes and whitespace
+            dated_backups_config=$(echo "$dated_backups_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
+            if [[ "$dated_backups_config" == "true" || "$dated_backups_config" == "1" || "$dated_backups_config" == "yes" || "$dated_backups_config" == "on" ]]; then
+                dated_backups=true
+            elif [[ "$dated_backups_config" == "false" || "$dated_backups_config" == "0" || "$dated_backups_config" == "no" || "$dated_backups_config" == "off" ]]; then
+                dated_backups=false
+            else
+                log WARN "Invalid DATED_BACKUPS value in config: '$dated_backups_config'. Must be true/false. Using default: false"
+                dated_backups=false
+            fi
         fi
         
         # Handle folder_structure boolean config
         if [[ -z "$folder_structure" && -n "${FOLDER_STRUCTURE:-}" ]]; then
             local folder_structure_config="$FOLDER_STRUCTURE"
-            folder_structure_config=$(echo "$folder_structure_config" | tr '[:upper:]' '[:lower:]')
-            case "$folder_structure_config" in
-                true|1|yes|on) folder_structure=true ;;
-                false|0|no|off) folder_structure=false ;;
-                *) 
-                    log WARN "Invalid FOLDER_STRUCTURE value in config: '$folder_structure_config'. Must be true/false. Using default: false"
-                    folder_structure=false
-                    ;;
-            esac
+            # Clean up the value - remove quotes and whitespace
+            folder_structure_config=$(echo "$folder_structure_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
+            if [[ "$folder_structure_config" == "true" || "$folder_structure_config" == "1" || "$folder_structure_config" == "yes" || "$folder_structure_config" == "on" ]]; then
+                folder_structure=true
+            elif [[ "$folder_structure_config" == "false" || "$folder_structure_config" == "0" || "$folder_structure_config" == "no" || "$folder_structure_config" == "off" ]]; then
+                folder_structure=false
+            else
+                log WARN "Invalid FOLDER_STRUCTURE value in config: '$folder_structure_config'. Must be true/false. Using default: false"
+                folder_structure=false
+            fi
         fi
         
         # Handle verbose boolean config
         if [[ -z "$verbose" && -n "${VERBOSE:-}" ]]; then
             local verbose_config="$VERBOSE"
-            verbose_config=$(echo "$verbose_config" | tr '[:upper:]' '[:lower:]')
-            case "$verbose_config" in
-                true|1|yes|on) verbose=true ;;
-                false|0|no|off) verbose=false ;;
-                *) 
-                    log WARN "Invalid VERBOSE value in config: '$verbose_config'. Must be true/false. Using default: false"
-                    verbose=false
-                    ;;
-            esac
+            # Clean up the value - remove quotes and whitespace
+            verbose_config=$(echo "$verbose_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
+            if [[ "$verbose_config" == "true" || "$verbose_config" == "1" || "$verbose_config" == "yes" || "$verbose_config" == "on" ]]; then
+                verbose=true
+            elif [[ "$verbose_config" == "false" || "$verbose_config" == "0" || "$verbose_config" == "no" || "$verbose_config" == "off" ]]; then
+                verbose=false
+            else
+                log WARN "Invalid VERBOSE value in config: '$verbose_config'. Must be true/false. Using default: false"
+                verbose=false
+            fi
         fi
         
         # Handle dry_run boolean config
         if [[ -z "$dry_run" && -n "${DRY_RUN:-}" ]]; then
             local dry_run_config="$DRY_RUN"
-            dry_run_config=$(echo "$dry_run_config" | tr '[:upper:]' '[:lower:]')
-            case "$dry_run_config" in
-                true|1|yes|on) dry_run=true ;;
-                false|0|no|off) dry_run=false ;;
-                *) 
-                    log WARN "Invalid DRY_RUN value in config: '$dry_run_config'. Must be true/false. Using default: false"
-                    dry_run=false
-                    ;;
-            esac
+            # Clean up the value - remove quotes and whitespace
+            dry_run_config=$(echo "$dry_run_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
+            if [[ "$dry_run_config" == "true" || "$dry_run_config" == "1" || "$dry_run_config" == "yes" || "$dry_run_config" == "on" ]]; then
+                dry_run=true
+            elif [[ "$dry_run_config" == "false" || "$dry_run_config" == "0" || "$dry_run_config" == "no" || "$dry_run_config" == "off" ]]; then
+                dry_run=false
+            else
+                log WARN "Invalid DRY_RUN value in config: '$dry_run_config'. Must be true/false. Using default: false"
+                dry_run=false
+            fi
         fi
         
         # === PATH SETTINGS ===
