@@ -184,8 +184,8 @@ load_config() {
         config_found=true
         log INFO "Loading configuration from: $file_to_load"
         
-        # Source the config file safely (filter out comments and empty lines)
-        if ! source <(grep -vE '^\s*(#|$)' "$file_to_load" 2>/dev/null || true); then
+        # Source the config file safely (normalize CRLF and filter out comments and empty lines)
+        if ! source <(tr -d '\r' < "$file_to_load" | grep -vE '^\s*(#|$)' 2>/dev/null || true); then
             log ERROR "Failed to load configuration from: $file_to_load"
             return 1
         fi
