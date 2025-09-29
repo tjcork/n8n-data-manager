@@ -115,9 +115,9 @@ get_workflow_folder_mapping() {
         log DEBUG "Fetching workflow metadata using API key authentication"
         local api_projects=""
         local api_workflows=""
-        if api_projects=$(fetch_n8n_projects "$base_url" "$api_key") && \
-           api_workflows=$(fetch_workflows_with_folders "$base_url" "$api_key"); then
-            log SUCCESS "Retrieved workflow metadata via API key"
+          if api_projects=$(fetch_n8n_projects "$base_url" "$api_key") && \
+              api_workflows=$(fetch_workflows_with_folders "$base_url" "$api_key"); then
+                log SUCCESS "Retrieved workflow metadata via API key" >&2
             projects_response="$api_projects"
             workflows_response="$api_workflows"
             responses_ready="true"
@@ -319,6 +319,16 @@ get_workflow_folder_mapping() {
         cleanup_n8n_session
     fi
 
+    if ! printf '%s' "$mapping_json" | jq -e '.workflowsById | type == "object"' >/dev/null 2>&1; then
+        log ERROR "Constructed mapping missing workflowsById object"
+        local mapping_preview mapping_length
+        mapping_preview=$(printf '%s' "$mapping_json" | head -c 500)
+    mapping_length=$(printf '%s' "$mapping_json" | wc -c | tr -d ' \n')
+    mapping_length=${mapping_length:-0}
+        log DEBUG "Mapping preview (first 500 chars): ${mapping_preview}$( [ "$mapping_length" -gt 500 ] && echo '…')"
+        return 1
+    fi
+
     echo "$mapping_json"
     return 0
 }
@@ -444,7 +454,7 @@ authenticate_n8n_session() {
         local response_body=$(echo "$auth_response" | head -n -1)
         
         if [[ "$http_status" == "200" ]]; then
-            log SUCCESS "Successfully authenticated with n8n session!"
+            log SUCCESS "Successfully authenticated with n8n session!" >&2
             log DEBUG "Session cookie stored at $N8N_SESSION_COOKIE_FILE"
             
             return 0

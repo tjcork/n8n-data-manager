@@ -96,6 +96,7 @@ log() {
     elif [ "$level" = "WARN" ]; then
         color="$YELLOW"
         prefix="[WARNING]"
+        to_stderr=true
     elif [ "$level" = "ERROR" ]; then
         color="$RED"
         prefix="[ERROR]"

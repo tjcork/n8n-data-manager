@@ -193,9 +193,14 @@ organize_workflows_by_folders() {
     mapping_file=$(mktemp -t n8n-workflow-mapping-XXXXXXXX.json)
     printf '%s' "$mapping_json" > "$mapping_file"
 
-    if ! jq -e '.workflowsById' "$mapping_file" >/dev/null 2>&1; then
-        log ERROR "Workflow mapping JSON missing workflowsById structure"
-        rm -f "$mapping_file"
+    if ! jq -e '.workflowsById | type == "object"' "$mapping_file" >/dev/null 2>&1; then
+        log ERROR "Workflow mapping JSON missing workflowsById object"
+        local debug_preview
+    debug_preview=$(head -c 500 "$mapping_file" 2>/dev/null || echo "<unavailable>")
+    local mapping_size
+    mapping_size=$(wc -c < "$mapping_file" 2>/dev/null || echo 0)
+    log DEBUG "Mapping JSON preview (first 500 chars): ${debug_preview}$( [ "$mapping_size" -gt 500 ] && echo '…')"
+        log DEBUG "Full mapping saved for inspection at: $mapping_file"
         return 1
     fi
 
