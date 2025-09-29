@@ -167,6 +167,13 @@ main() {
     log DEBUG "Branch: $github_branch, Workflows: ($workflows) $(format_storage_value $workflows), Credentials: ($credentials) $(format_storage_value $credentials)"
     log DEBUG "Local Path: $local_backup_path, Rotation: $local_rotation_limit"
     
+    # Calculate if GitHub access is needed
+    needs_github=false
+    if [[ "$action" == "restore" ]] || [[ "$workflows" == "2" ]] || [[ "$credentials" == "2" ]]; then 
+        needs_github=true 
+    fi
+    log DEBUG "GitHub required: $needs_github"
+    
     # Set intelligent defaults for backup (only if not already configured)
     if [[ "$action" == "backup" ]]; then
         # Check if both are disabled after config loading
@@ -437,13 +444,7 @@ main() {
         dry_run=${dry_run:-false}
         
         # Derive convenience flags from numeric storage settings (avoid repeated comparisons)
-        needs_github=false
         needs_local_path=false
-        
-        # Check if GitHub access is needed (for restore or any remote storage)
-        if [[ "$action" == "restore" ]] || [[ "$workflows" == "2" ]] || [[ "$credentials" == "2" ]]; then 
-            needs_github=true 
-        fi
         
         # Check if local path is needed (for any local storage)
         if [[ "$workflows" == "1" ]] || [[ "$credentials" == "1" ]]; then 
