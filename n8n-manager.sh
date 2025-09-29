@@ -244,7 +244,7 @@ main() {
             
             # Validate API access
             log INFO "Validating n8n API access..."
-            if ! validate_n8n_api_access "$n8n_base_url" "$n8n_api_key"; then
+            if ! validate_n8n_api_access "$n8n_base_url" "$n8n_api_key" "$n8n_email" "$n8n_password"; then
                 log ERROR "❌ n8n API validation failed!"
                 log ERROR "Please check your URL and credentials."
                 log INFO "💡 Tip: You can test manually with:"
@@ -402,7 +402,7 @@ main() {
                 
                 # Validate API access immediately after configuration
                 log INFO "Validating n8n API access..."
-                if ! validate_n8n_api_access "$n8n_base_url" "$n8n_api_key"; then
+                if ! validate_n8n_api_access "$n8n_base_url" "$n8n_api_key" "$n8n_email" "$n8n_password"; then
                     log ERROR "❌ n8n API validation failed!"
                     log ERROR "Authentication failed with all available methods."
                     log ERROR "Cannot proceed with folder structure creation."

@@ -49,16 +49,7 @@ create_folder_structure_with_git() {
         if [[ -f "$workflow_file" ]]; then
             # Extract workflow name from file for commit message
             local workflow_name
-            workflow_name=$(python3 -c "
-import json
-import sys
-try:
-    with open('$workflow_file', 'r') as f:
-        data = json.load(f)
-    print(data.get('name', 'Unnamed Workflow'))
-except:
-    print('Unnamed Workflow')
-" 2>/dev/null)
+            workflow_name=$(jq -r '.name // "Unnamed Workflow"' "$workflow_file" 2>/dev/null || echo "Unnamed Workflow")
             
             # Determine if it's new or updated by checking git status
             local is_new="true"

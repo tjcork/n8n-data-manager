@@ -110,18 +110,7 @@ validate_n8n_api_access() {
             api_status=$(echo "$api_response" | tail -n1)
             if [[ "$api_status" == "200" ]]; then
                 local workflow_count
-                workflow_count=$(echo "$api_response" | head -n -1 | python3 -c "
-import json
-import sys
-try:
-    data = json.load(sys.stdin)
-    if isinstance(data, dict) and 'data' in data:
-        print(len(data['data']))
-    else:
-        print('0')
-except:
-    print('0')
-" 2>/dev/null)
+                workflow_count=$(echo "$api_response" | head -n -1 | jq -r '.data | length // 0' 2>/dev/null || echo "0")
                 log SUCCESS "✅ API key authentication successful!"
                 log INFO "Found $workflow_count workflows accessible via API key (/api/v1/)"
                 return 0
@@ -300,9 +289,11 @@ create_n8n_folder_structure() {
     # Use runtime variables for API credentials
     local base_url="$n8n_base_url"
     local api_key="$n8n_api_key"
+    local email="$n8n_email"
+    local password="$n8n_password"
     
-    if [[ -z "$base_url" ]] || [[ -z "$api_key" ]]; then
-        log ERROR "n8n API credentials not configured. Please set N8N_BASE_URL and N8N_API_KEY"
+    if [[ -z "$base_url" ]]; then
+        log ERROR "n8n API URL not configured. Please set N8N_BASE_URL"
         return 1
     fi
     
@@ -319,27 +310,27 @@ create_n8n_folder_structure() {
         log ERROR "Failed to get workflow files from container"
         return 1
     fi
-    
+
     if [[ -z "$workflow_files" ]]; then
         log INFO "No workflow files found - clean installation"
         return 0
     fi
-    
-    # Fetch projects and workflows with folder information from API
+
+    # Determine authentication method and fetch API data
     local projects_response
     local workflows_response
     local using_session_auth=false
     
-    # Skip API key authentication if key is blank - go straight to session auth
+    # Try API key authentication first (if available)
     if [[ -n "$api_key" && "$api_key" != "" ]]; then
         log DEBUG "Trying API key authentication first..."
         if projects_response=$(fetch_n8n_projects "$base_url" "$api_key" 2>/dev/null) && \
            workflows_response=$(fetch_workflows_with_folders "$base_url" "$api_key" 2>/dev/null); then
-            log DEBUG "Successfully fetched data using API key authentication"
+            log SUCCESS "✅ API key authentication successful for data fetching"
             log DEBUG "Projects API response received: $(echo "$projects_response" | wc -c) characters"
             log DEBUG "Workflows API response received: $(echo "$workflows_response" | wc -c) characters"
         else
-            log WARN "API key authentication failed for REST endpoints, trying session authentication..."
+            log WARN "⚠️ API key authentication failed for REST endpoints, trying session authentication..."
             api_key=""  # Clear API key to force session auth
         fi
     else
@@ -348,69 +339,39 @@ create_n8n_folder_structure() {
     
     # Use session authentication if API key is blank or failed
     if [[ -z "$api_key" || "$api_key" == "" ]]; then
-        # Try to get email/password for session auth
-        local email password
-        if [[ -n "$n8n_email" && -n "$n8n_password" ]]; then
-            email="$n8n_email"
-            password="$n8n_password"
+        # Get email/password from config or prompt
+        if [[ -n "$email" && -n "$password" ]]; then
+            log DEBUG "Using email/password from configuration for session auth"
         else
             log INFO "Session authentication requires email/password credentials"
-            printf "n8n email or LDAP login ID: "
-            read -r email
-            printf "n8n password: "
-            read -r -s password
-            echo  # Add newline after hidden input
+            if [[ -z "$email" ]]; then
+                printf "n8n email or LDAP login ID: "
+                read -r email
+            fi
+            if [[ -z "$password" ]]; then
+                printf "n8n password: "
+                read -r -s password
+                echo  # Add newline after hidden input
+            fi
         fi
         
         # Authenticate and fetch data using session
         if authenticate_n8n_session "$base_url" "$email" "$password" 3 && \
            projects_response=$(fetch_n8n_projects_session "$base_url"); then
             
-            log SUCCESS "Successfully authenticated and fetched projects"
-            echo "[DEBUG] Raw projects response: $projects_response"
+            log SUCCESS "✅ Session authentication successful and projects fetched"
+            log DEBUG "Raw projects response: $projects_response"
             
             # Extract project ID for workflows query
             local project_id
-            project_id=$(echo "$projects_response" | python3 -c "
-import json
-import sys
-try:
-    data = json.load(sys.stdin)
-    if isinstance(data, dict) and 'data' in data and data['data']:
-        project = data['data'][0]  # Get first project
-        print(project.get('id', ''))
-except:
-    pass
-" 2>/dev/null)
+            project_id=$(echo "$projects_response" | jq -r '.data[0].id // ""' 2>/dev/null || echo "")
             
-            echo "[DEBUG] Extracted project ID: '$project_id'"
+            log DEBUG "Extracted project ID: '$project_id'"
             
             # Fetch workflows with the project ID
             if workflows_response=$(fetch_workflows_with_folders_session "$base_url" "$project_id"); then
-                log SUCCESS "Successfully fetched workflows for project ID: $project_id"
-                echo "[DEBUG] Raw workflows response: $workflows_response"
-                
-                # Show structure of first few workflows for debugging
-                echo "[DEBUG] Workflow structure analysis:"
-                echo "$workflows_response" | python3 -c "
-import json
-import sys
-try:
-    data = json.load(sys.stdin)
-    workflows = data.get('data', [])
-    print(f'Total workflows in API response: {len(workflows)}')
-    for i, workflow in enumerate(workflows[:3]):  # Show first 3
-        print(f'Workflow {i+1}:')
-        print(f'  id: {workflow.get(\"id\", \"N/A\")}')
-        print(f'  name: {workflow.get(\"name\", \"N/A\")}')
-        print(f'  resource: {workflow.get(\"resource\", \"N/A\")}')
-        print(f'  homeProject: {workflow.get(\"homeProject\", {})}')
-        print(f'  parentFolder: {workflow.get(\"parentFolder\", \"N/A\")}')
-        print(f'  parentFolderId: {workflow.get(\"parentFolderId\", \"N/A\")}')
-        print('---')
-except Exception as e:
-    print(f'Error analyzing workflow structure: {e}')
-" 2>&1
+                log SUCCESS "✅ Successfully fetched workflows for project ID: $project_id"
+                log DEBUG "Raw workflows response: $workflows_response"
                 
                 using_session_auth=true
             else
@@ -419,13 +380,18 @@ except Exception as e:
                 return 1
             fi
         else
-            log ERROR "❌ Session authentication failed after multiple attempts!"
-            log ERROR "Cannot proceed with folder structure creation."
-            log ERROR "Please verify:"
-            log ERROR "  1. n8n instance is running and accessible"
-            log ERROR "  2. Credentials are correct"
-            log ERROR "  3. No authentication barriers (Cloudflare, etc.)"
-            log ERROR "  4. n8n API is properly configured"
+            log ERROR "❌ Session authentication failed!"
+            log ERROR "Cannot proceed with folder structure creation - API authentication failed"
+            log ERROR "Please check:"
+            log ERROR "  1. n8n instance is running and accessible at: $base_url"
+            if [[ -n "$api_key" && "$api_key" != "" ]]; then
+                log ERROR "  2. API key is correct and active"
+            fi
+            if [[ -n "$email" && -n "$password" ]]; then
+                log ERROR "  3. Email/password credentials are correct" 
+                log ERROR "  4. n8n allows password authentication"
+            fi
+            log ERROR "  5. No authentication barriers (Cloudflare, etc.)"
             
             # Cleanup any session files
             cleanup_n8n_session
@@ -435,22 +401,14 @@ except Exception as e:
     
     # Show sample of workflow data for debugging
     local workflow_count
-    workflow_count=$(echo "$workflows_response" | python3 -c "
-import json
-import sys
-try:
-    data = json.load(sys.stdin)
-    if isinstance(data, dict) and 'data' in data:
-        workflows = data['data']
-        print(len(workflows))
-        if workflows:
-            print(f'First workflow: id={workflows[0].get(\"id\", \"unknown\")}, name={workflows[0].get(\"name\", \"unnamed\")}', file=sys.stderr)
-    else:
-        print('0')
-except Exception as e:
-    print(f'Error parsing workflows: {e}', file=sys.stderr)
-    print('0')
-" 2>&1)
+    workflow_count=$(echo "$workflows_response" | jq -r '.data | length // 0' 2>/dev/null || echo "0")
+    
+    # Log first workflow for debugging
+    if [[ "$workflow_count" -gt 0 ]]; then
+        local first_workflow_info
+        first_workflow_info=$(echo "$workflows_response" | jq -r '.data[0] | "First workflow: id=\(.id // "unknown"), name=\(.name // "unnamed")"' 2>/dev/null || echo "Error parsing first workflow")
+        echo "$first_workflow_info" >&2
+    fi
     
     echo "[DEBUG] Raw workflow count: $workflow_count"
     echo "[DEBUG] Starting workflow processing and folder structure creation..."
@@ -458,26 +416,20 @@ except Exception as e:
     
     # Parse projects to create project name mapping
     local project_mapping
-    project_mapping=$(echo "$projects_response" | python3 -c "
-import json
-import sys
-try:
-    data = json.load(sys.stdin)
-    for project in data.get('data', data if isinstance(data, list) else []):
-        project_id = project.get('id', '')
-        project_name = project.get('name', 'Unknown')
-        project_type = project.get('type', 'team')
-        # Create clean project folder name
-        if project_type == 'personal':
-            folder_name = 'Personal'
-        else:
-            # Sanitize project name for folder use
-            folder_name = project_name.replace('/', '_').replace(' ', '_')
-        print(f'{project_id}|{folder_name}')
-except Exception as e:
-    print(f'ERROR: {e}', file=sys.stderr)
-    sys.exit(1)
-" 2>/dev/null)
+    project_mapping=$(echo "$projects_response" | jq -r '
+        .data[]? // (if type == "array" then .[] else empty end) |
+        select(.id and .name) |
+        (
+            .id as $id |
+            .name as $name |
+            .type as $type |
+            if $type == "personal" then
+                "\($id)|Personal"
+            else
+                "\($id)|\($name | gsub("/"; "_") | gsub(" "; "_"))"
+            end
+        )
+    ' 2>/dev/null || echo "default|Personal")
     
     echo "[DEBUG] Project mapping result: $project_mapping"
     
@@ -519,19 +471,7 @@ except Exception as e:
         
         # Extract basic workflow information
         local workflow_info
-        if ! workflow_info=$(python3 -c "
-import json
-import sys
-try:
-    with open('$temp_workflow', 'r') as f:
-        data = json.load(f)
-    workflow_id = data.get('id', 'unknown')
-    workflow_name = data.get('name', 'Unnamed Workflow')
-    print(f'{workflow_id}|{workflow_name}')
-except Exception as e:
-    print('ERROR|ERROR')
-    sys.exit(1)
-" 2>/dev/null); then
+        if ! workflow_info=$(jq -r '(.id // "unknown") + "|" + (.name // "Unnamed Workflow")' "$temp_workflow" 2>/dev/null); then
             log WARN "Failed to parse workflow file: $workflow_file"
             rm -f "$temp_workflow"
             continue
@@ -551,37 +491,16 @@ except Exception as e:
         
         # Find workflow's project and folder information from API response
         local folder_info
-        folder_info=$(echo "$workflows_response" | python3 -c "
-import json
-import sys
-try:
-    data = json.load(sys.stdin)
-    workflows = data.get('data', data if isinstance(data, list) else [])
-    for workflow in workflows:
-        if workflow.get('id') == '$workflow_id':
-            # Extract project information
-            home_project = workflow.get('homeProject', {})
-            project_id = home_project.get('id', 'default')
-            
-            # Extract folder information  
-            folder_name = ''
-            if workflow.get('resource') == 'folder':
-                # This IS a folder, not a workflow in a folder
-                continue
-            elif 'parentFolder' in workflow and workflow['parentFolder']:
-                # Workflow is in a folder
-                folder_name = workflow['parentFolder'].get('name', '')
-            
-            parent_folder_id = workflow.get('parentFolderId', '')
-            print(f'{project_id}|{parent_folder_id}|{folder_name}')
-            break
-    else:
-        # Workflow not found in API response, use default
-        print('default||')
-except Exception as e:
-    print('default||')
-    print(f'Error looking up workflow: {e}', file=sys.stderr)
-" 2>/dev/null)
+        folder_info=$(echo "$workflows_response" | jq -r --arg workflow_id "$workflow_id" '
+            .data[]? // (if type == "array" then .[] else empty end) |
+            select(.id == $workflow_id and .resource != "folder") |
+            (
+                (.homeProject.id // "default") as $project_id |
+                (.parentFolderId // "") as $folder_id |
+                (.parentFolder.name // "") as $folder_name |
+                "\($project_id)|\($folder_id)|\($folder_name)"
+            )
+        ' 2>/dev/null || echo "default||")
         
         echo "[DEBUG] Workflow $workflow_id API folder info: '$folder_info'"
         
@@ -949,18 +868,7 @@ test_n8n_session_auth() {
         if $verbose; then
             log SUCCESS "n8n session authentication successful!"
             local workflow_count
-            workflow_count=$(echo "$response_body" | python3 -c "
-import json
-import sys
-try:
-    data = json.load(sys.stdin)
-    if isinstance(data, dict) and 'data' in data:
-        print(len(data['data']))
-    else:
-        print('0')
-except:
-    print('0')
-" 2>/dev/null)
+            workflow_count=$(echo "$response_body" | jq -r '.data | length // 0' 2>/dev/null || echo "0")
             log INFO "Found $workflow_count workflows accessible via session"
         fi
         return 0

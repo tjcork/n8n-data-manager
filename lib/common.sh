@@ -149,8 +149,8 @@ check_host_dependencies() {
     if ! command_exists curl; then # Added curl check
         missing_deps="$missing_deps curl"
     fi
-    if ! command_exists python3; then # Added python3 for JSON parsing
-        missing_deps="$missing_deps python3"
+    if ! command_exists jq; then # Added jq for JSON parsing
+        missing_deps="$missing_deps jq"
     fi
 
     if [ -n "$missing_deps" ]; then
