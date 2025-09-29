@@ -71,7 +71,7 @@ n8n_email=""                  # Optional - for session auth
 n8n_password=""               # Optional - for session auth
 
 # Logging and misc
-log_file=""
+log_file=""                # Custom log file path
 restore_type="all"            # all|workflows|credentials
 config_file=""                # Custom config file path
 

@@ -124,7 +124,7 @@ log() {
     fi
     
     # Log to file if specified
-    if [ -n "$log_file" ]; then
+    if [ -n "${log_file:-}" ]; then
         echo "$plain" >> "$log_file"
     fi
     
@@ -220,12 +220,13 @@ load_config() {
         # Handle workflows storage with flexible input (numeric or descriptive)
         if [[ -z "$workflows" && -n "${WORKFLOWS:-}" ]]; then
             local workflows_config="$WORKFLOWS"
-            case "${workflows_config,,}" in  # Convert to lowercase
+            workflows_config=$(echo "$workflows_config" | tr '[:upper:]' '[:lower:]')
+            case "$workflows_config" in
                 0|disabled) workflows=0 ;;
                 1|local) workflows=1 ;;
                 2|remote) workflows=2 ;;
                 *) 
-                    log WARN "Invalid WORKFLOWS value in config: '${workflows_config}'. Must be 0/disabled, 1/local, or 2/remote. Using default: 1 (local)"
+                    log WARN "Invalid WORKFLOWS value in config: '$workflows_config'. Must be 0/disabled, 1/local, or 2/remote. Using default: 1 (local)"
                     workflows=1
                     ;;
             esac
@@ -234,12 +235,13 @@ load_config() {
         # Handle credentials storage with flexible input (numeric or descriptive)
         if [[ -z "$credentials" && -n "${CREDENTIALS:-}" ]]; then
             local credentials_config="$CREDENTIALS"
-            case "${credentials_config,,}" in  # Convert to lowercase
+            credentials_config=$(echo "$credentials_config" | tr '[:upper:]' '[:lower:]')
+            case "$credentials_config" in
                 0|disabled) credentials=0 ;;
                 1|local) credentials=1 ;;
                 2|remote) credentials=2 ;;
                 *) 
-                    log WARN "Invalid CREDENTIALS value in config: '${credentials_config}'. Must be 0/disabled, 1/local, or 2/remote. Using default: 1 (local)"
+                    log WARN "Invalid CREDENTIALS value in config: '$credentials_config'. Must be 0/disabled, 1/local, or 2/remote. Using default: 1 (local)"
                     credentials=1
                     ;;
             esac
@@ -249,11 +251,12 @@ load_config() {
         # Handle dated_backups boolean config
         if [[ -z "$dated_backups" && -n "${DATED_BACKUPS:-}" ]]; then
             local dated_backups_config="$DATED_BACKUPS"
-            case "${dated_backups_config,,}" in  # Convert to lowercase
+            dated_backups_config=$(echo "$dated_backups_config" | tr '[:upper:]' '[:lower:]')
+            case "$dated_backups_config" in
                 true|1|yes|on) dated_backups=true ;;
                 false|0|no|off) dated_backups=false ;;
                 *) 
-                    log WARN "Invalid DATED_BACKUPS value in config: '${dated_backups_config}'. Must be true/false. Using default: false"
+                    log WARN "Invalid DATED_BACKUPS value in config: '$dated_backups_config'. Must be true/false. Using default: false"
                     dated_backups=false
                     ;;
             esac
@@ -262,11 +265,12 @@ load_config() {
         # Handle folder_structure boolean config
         if [[ -z "$folder_structure" && -n "${FOLDER_STRUCTURE:-}" ]]; then
             local folder_structure_config="$FOLDER_STRUCTURE"
-            case "${folder_structure_config,,}" in  # Convert to lowercase
+            folder_structure_config=$(echo "$folder_structure_config" | tr '[:upper:]' '[:lower:]')
+            case "$folder_structure_config" in
                 true|1|yes|on) folder_structure=true ;;
                 false|0|no|off) folder_structure=false ;;
                 *) 
-                    log WARN "Invalid FOLDER_STRUCTURE value in config: '${folder_structure_config}'. Must be true/false. Using default: false"
+                    log WARN "Invalid FOLDER_STRUCTURE value in config: '$folder_structure_config'. Must be true/false. Using default: false"
                     folder_structure=false
                     ;;
             esac
@@ -275,11 +279,12 @@ load_config() {
         # Handle verbose boolean config
         if [[ -z "$verbose" && -n "${VERBOSE:-}" ]]; then
             local verbose_config="$VERBOSE"
-            case "${verbose_config,,}" in  # Convert to lowercase
+            verbose_config=$(echo "$verbose_config" | tr '[:upper:]' '[:lower:]')
+            case "$verbose_config" in
                 true|1|yes|on) verbose=true ;;
                 false|0|no|off) verbose=false ;;
                 *) 
-                    log WARN "Invalid VERBOSE value in config: '${verbose_config}'. Must be true/false. Using default: false"
+                    log WARN "Invalid VERBOSE value in config: '$verbose_config'. Must be true/false. Using default: false"
                     verbose=false
                     ;;
             esac
@@ -288,11 +293,12 @@ load_config() {
         # Handle dry_run boolean config
         if [[ -z "$dry_run" && -n "${DRY_RUN:-}" ]]; then
             local dry_run_config="$DRY_RUN"
-            case "${dry_run_config,,}" in  # Convert to lowercase
+            dry_run_config=$(echo "$dry_run_config" | tr '[:upper:]' '[:lower:]')
+            case "$dry_run_config" in
                 true|1|yes|on) dry_run=true ;;
                 false|0|no|off) dry_run=false ;;
                 *) 
-                    log WARN "Invalid DRY_RUN value in config: '${dry_run_config}'. Must be true/false. Using default: false"
+                    log WARN "Invalid DRY_RUN value in config: '$dry_run_config'. Must be true/false. Using default: false"
                     dry_run=false
                     ;;
             esac
