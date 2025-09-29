@@ -31,8 +31,14 @@ create_folder_structure_with_git() {
     # Step 1: Export individual workflow files from Docker container
     log DEBUG "Step 1: Exporting individual workflows from n8n container..."
     local temp_export_dir="$(mktemp -d -t n8n-workflows-XXXXXXXXXX)"
-    
-    if ! docker exec "$container_id" n8n export:workflow --backup --output=/tmp/workflow_exports/ 2>/dev/null; then
+
+    if ! docker exec "$container_id" bash -c 'rm -rf /tmp/workflow_exports && mkdir -p /tmp/workflow_exports' >/dev/null 2>&1; then
+        log ERROR "Failed to prepare workflow export directory inside container"
+        rm -rf "$temp_export_dir"
+        return 1
+    fi
+
+    if ! docker exec "$container_id" n8n export:workflow --all --separate --output=/tmp/workflow_exports/ 2>/dev/null; then
         log ERROR "Failed to export individual workflow files from container"
         rm -rf "$temp_export_dir"
         return 1
@@ -78,6 +84,82 @@ create_folder_structure_with_git() {
     log SUCCESS "n8n folder structure created and committed to repository"
     rm -rf "$temp_export_dir"
     return 0
+}
+
+print_folder_structure_preview() {
+    local base_dir="$1"
+    local max_files=${2:-5}
+
+    if [[ ! -d "$base_dir" ]]; then
+        log WARN "Folder structure preview skipped - directory missing: $base_dir"
+        return
+    fi
+
+    log INFO "Workflow folder structure preview:"
+
+    local base_prefix="${base_dir%/}/"
+
+    # Handle JSON files directly under the base directory
+    local root_files=()
+    while IFS= read -r file; do
+        root_files+=("$file")
+    done < <(find "$base_dir" -maxdepth 1 -type f -name '*.json' | sort | head -n "$max_files")
+
+    if ((${#root_files[@]} > 0)); then
+        log INFO "(root)"
+        for file in "${root_files[@]}"; do
+            log INFO "- $(basename "$file")"
+        done
+        local total_root
+        total_root=$(find "$base_dir" -maxdepth 1 -type f -name '*.json' | wc -l)
+        if (( total_root > ${#root_files[@]} )); then
+            log INFO "- < + $((total_root - ${#root_files[@]})) more >"
+        fi
+    fi
+
+    while IFS= read -r dir; do
+        local relative="${dir#$base_prefix}"
+        if [[ "$relative" == "$dir" ]]; then
+            relative=$(basename "$dir")
+        fi
+
+        IFS='/' read -r -a parts <<< "$relative"
+        local depth=${#parts[@]}
+        local name_index=$((depth - 1))
+        local name="${parts[$name_index]}"
+        local prefix=""
+        if (( depth > 1 )); then
+            for ((i=1; i<depth; i++)); do
+                prefix+="-"
+            done
+            prefix+=" "
+        fi
+
+        log INFO "${prefix}${name}"
+
+        local files=()
+        while IFS= read -r file; do
+            files+=("$file")
+        done < <(find "$dir" -maxdepth 1 -type f -name '*.json' | sort | head -n "$max_files")
+
+        if ((${#files[@]} > 0)); then
+            local file_prefix=""
+            for ((i=0; i<depth; i++)); do
+                file_prefix+="-"
+            done
+            file_prefix+=" "
+
+            for file in "${files[@]}"; do
+                log INFO "${file_prefix}$(basename "$file")"
+            done
+
+            local total_count
+            total_count=$(find "$dir" -maxdepth 1 -type f -name '*.json' | wc -l)
+            if (( total_count > ${#files[@]} )); then
+                log INFO "${file_prefix}< + $((total_count - ${#files[@]})) more >"
+            fi
+        fi
+    done < <(find "$base_dir" -type d -not -path '*/.git*' -mindepth 1 | sort)
 }
 
 organize_workflows_by_folders() {
@@ -250,6 +332,8 @@ organize_workflows_by_folders() {
     log INFO "  • Deleted workflows: $deleted_count"
 
     rm -f "$mapping_file"
+
+    print_folder_structure_preview "$target_dir"
 
     if $commit_fail; then
         log WARN "Completed with some issues during workflow organization"
