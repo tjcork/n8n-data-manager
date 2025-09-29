@@ -234,6 +234,65 @@ generate_unique_workflow_filename() {
     done
 }
 
+prettify_json_file() {
+    local file_path="$1"
+    local is_dry_run="${2:-false}"
+
+    if [[ ! -f "$file_path" ]]; then
+        return 0
+    fi
+
+    if $is_dry_run; then
+        log DEBUG "Skipping JSON prettify (dry run): $file_path"
+        return 0
+    fi
+
+    local tmp_file
+    tmp_file=$(mktemp -t n8n-pretty-json-XXXXXXXX) || {
+        log WARN "Failed to allocate temp file for prettifying: $file_path"
+        return 1
+    }
+
+    if jq '.' "$file_path" >"$tmp_file" 2>/dev/null; then
+        if ! cat "$tmp_file" >"$file_path"; then
+            log WARN "Failed to write prettified JSON back to file: $file_path"
+            rm -f "$tmp_file"
+            return 1
+        fi
+    else
+        log WARN "jq failed to prettify JSON file: $file_path"
+        rm -f "$tmp_file"
+        return 1
+    fi
+
+    rm -f "$tmp_file"
+    log DEBUG "Prettified JSON file: $file_path"
+    return 0
+}
+
+prettify_json_tree() {
+    local root_dir="$1"
+    local is_dry_run="${2:-false}"
+
+    if [[ ! -d "$root_dir" ]]; then
+        return 0
+    fi
+
+    local all_success=true
+    while IFS= read -r -d '' json_file; do
+        if ! prettify_json_file "$json_file" "$is_dry_run"; then
+            all_success=false
+        fi
+    done < <(find "$root_dir" -type f -name '*.json' -print0)
+
+    if ! $all_success; then
+        log WARN "Completed JSON prettify with warnings under: $root_dir"
+        return 1
+    fi
+
+    return 0
+}
+
 copy_workflows_flat_with_names() {
     local source_dir="$1"
     local target_dir="$2"
@@ -268,6 +327,12 @@ copy_workflows_flat_with_names() {
 
         if ! cp "$workflow_file" "$target_dir/$filename"; then
             log WARN "Failed to copy workflow to fallback target: $filename"
+            success=false
+            continue
+        fi
+
+        if ! prettify_json_file "$target_dir/$filename"; then
+            log WARN "Failed to prettify workflow JSON: $filename"
             success=false
             continue
         fi
@@ -388,6 +453,11 @@ organize_workflows_by_folders() {
             log WARN "Failed to copy workflow ${workflow_id:-unknown} to $target_file"
             commit_fail=true
             continue
+        fi
+
+        if ! prettify_json_file "$target_file"; then
+            log WARN "Failed to prettify workflow JSON: $target_file"
+            commit_fail=true
         fi
 
         local relative_git_path=""
@@ -940,6 +1010,9 @@ backup() {
 
             # Copy new workflows from container to local storage
             if docker cp "${container_id}:${container_workflows}" "$local_workflows_file"; then
+                if ! prettify_json_file "$local_workflows_file"; then
+                    log WARN "Failed to prettify local workflows JSON"
+                fi
                 chmod 600 "$local_workflows_file" || log WARN "Could not set permissions on workflows file"
                 log SUCCESS "Workflows stored securely in local storage: $local_workflows_file"
             else
@@ -978,6 +1051,9 @@ backup() {
 
             # Copy new credentials from container to local storage
             if docker cp "${container_id}:${container_credentials}" "$local_credentials_file"; then
+                if ! prettify_json_file "$local_credentials_file"; then
+                    log WARN "Failed to prettify local credentials JSON"
+                fi
                 chmod 600 "$local_credentials_file" || log WARN "Could not set permissions on credentials file"
                 log SUCCESS "Credentials stored securely in local storage: $local_credentials_file"
             else
@@ -1091,6 +1167,9 @@ backup() {
                 else
                     if docker exec "$container_id" test -f "$container_workflows"; then
                         if docker cp "${container_id}:${container_workflows}" "$target_dir/workflows.json"; then
+                            if ! prettify_json_file "$target_dir/workflows.json"; then
+                                log WARN "Failed to prettify workflows JSON in Git repository"
+                            fi
                             log SUCCESS "Workflows copied to Git repository"
                         else
                             log ERROR "Failed to copy workflows to Git repository"
@@ -1098,6 +1177,7 @@ backup() {
                         fi
                     elif docker exec "$container_id" test -d "$container_workflows_dir"; then
                         if docker cp "${container_id}:${container_workflows_dir}/." "$target_dir/"; then
+                            prettify_json_tree "$target_dir" || log WARN "Completed workflow JSON prettify with warnings in Git repository"
                             log SUCCESS "Workflows copied to Git repository from directory export"
                         else
                             log ERROR "Failed to copy workflow directory to Git repository"
@@ -1118,6 +1198,9 @@ backup() {
                 log DRYRUN "Would copy credentials to Git repository: $target_dir/credentials.json"
             else
                 if docker cp "${container_id}:${container_credentials}" "$target_dir/credentials.json"; then
+                    if ! prettify_json_file "$target_dir/credentials.json"; then
+                        log WARN "Failed to prettify credentials JSON in Git repository"
+                    fi
                     log SUCCESS "Credentials copied to Git repository"
                 else
                     log ERROR "Failed to copy credentials to Git repository"
