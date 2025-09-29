@@ -136,6 +136,50 @@ log() {
     return 0
 }
 
+# --- Filename Utilities ---
+sanitize_filename_component() {
+    local input="$1"
+    local max_len="${2:-152}"
+
+    local cleaned
+    cleaned="$(printf '%s' "$input" | tr -d '\000')"
+    cleaned="$(printf '%s' "$cleaned" | tr '\r\n\t' '   ')"
+    cleaned="$(printf '%s' "$cleaned" | sed -e 's/[[:cntrl:]]//g' -e 's#[\\/:*?"<>|]#-#g')"
+    cleaned="$(printf '%s' "$cleaned" | sed -e 's/[[:space:]]\+/ /g' -e 's/^[[:space:]]\+//' -e 's/[[:space:]]\+$//')"
+
+    while [[ "$cleaned" =~ [[:space:].]$ ]]; do
+        cleaned="${cleaned%?}"
+    done
+
+    if (( max_len > 0 && ${#cleaned} > max_len )); then
+        cleaned="${cleaned:0:max_len}"
+        while [[ "$cleaned" =~ [[:space:].]$ ]]; do
+            cleaned="${cleaned%?}"
+        done
+    fi
+
+    printf '%s\n' "$cleaned"
+}
+
+sanitize_workflow_filename_part() {
+    local raw="$1"
+    local fallback="$2"
+
+    local sanitized
+    sanitized="$(sanitize_filename_component "$raw" 152)"
+
+    if [[ -z "$sanitized" ]]; then
+        local fallback_value="Workflow ${fallback:-}";
+        sanitized="$(sanitize_filename_component "$fallback_value" 152)"
+    fi
+
+    if [[ -z "$sanitized" ]]; then
+        sanitized="Workflow"
+    fi
+
+    printf '%s\n' "$sanitized"
+}
+
 # --- Helper Functions (using new log function) ---
 
 command_exists() {

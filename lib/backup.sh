@@ -61,10 +61,8 @@ create_folder_structure_with_git() {
     if ! folder_mapping_json=$(get_workflow_folder_mapping "$container_id" "$container_credentials_path"); then
         log ERROR "Failed to get folder structure mapping from n8n API"
         log WARN "Falling back to flat file structure"
-        # Fallback: copy all files to target directory without folder structure
-        if cp "$temp_export_dir/workflow_exports/"*.json "$target_dir/" 2>/dev/null; then
-            log SUCCESS "Workflows copied to Git repository (flat structure fallback)"
-        else
+        # Fallback: copy all files to target directory using sanitized workflow names
+        if ! copy_workflows_flat_with_names "$temp_export_dir/workflow_exports" "$target_dir"; then
             log ERROR "Failed to copy workflows to Git repository"
             rm -rf "$temp_export_dir"
             return 1
@@ -164,6 +162,125 @@ print_folder_structure_preview() {
     done < <(find "$base_dir" -mindepth 1 -type d -not -path '*/.git*' | sort)
 }
 
+trim_trailing_spaces_and_dots() {
+    local value="$1"
+    while [[ "$value" =~ [[:space:].]$ ]]; do
+        value="${value%?}"
+    done
+    printf '%s\n' "$value"
+}
+
+generate_unique_workflow_filename() {
+    local destination_dir="$1"
+    local workflow_id="$2"
+    local workflow_name="$3"
+    local registry_name="$4"
+
+    local -n registry_ref="$registry_name"
+
+    local base_name
+    base_name="$(sanitize_workflow_filename_part "$workflow_name" "$workflow_id")"
+    local original_base="$base_name"
+
+    local suffix=0
+    local candidate_filename=""
+
+    while true; do
+        local suffix_text=""
+        if (( suffix > 0 )); then
+            suffix_text=" (${suffix})"
+        fi
+
+        local allowed_length=$((152 - ${#suffix_text}))
+        if (( allowed_length <= 0 )); then
+            allowed_length=1
+        fi
+
+        local candidate_base="$base_name"
+        if (( ${#candidate_base} > allowed_length )); then
+            candidate_base="${candidate_base:0:allowed_length}"
+            candidate_base="$(trim_trailing_spaces_and_dots "$candidate_base")"
+            if [[ -z "$candidate_base" ]]; then
+                candidate_base="${original_base:0:allowed_length}"
+                candidate_base="$(trim_trailing_spaces_and_dots "$candidate_base")"
+                if [[ -z "$candidate_base" ]]; then
+                    candidate_base="Workflow"
+                fi
+            fi
+        fi
+
+        local candidate="$candidate_base$suffix_text"
+        candidate_filename="$candidate.json"
+        local candidate_path="$destination_dir/$candidate_filename"
+
+        local existing_id=""
+        if [[ -f "$candidate_path" ]]; then
+            existing_id=$(jq -r '.id // empty' "$candidate_path" 2>/dev/null)
+        fi
+
+        if [[ -n "$workflow_id" && "$existing_id" == "$workflow_id" ]]; then
+            registry_ref["$candidate_path"]=1
+            printf '%s\n' "$candidate_filename"
+            return 0
+        fi
+
+        if [[ ! -e "$candidate_path" && -z "${registry_ref[$candidate_path]+set}" ]]; then
+            registry_ref["$candidate_path"]=1
+            printf '%s\n' "$candidate_filename"
+            return 0
+        fi
+
+        suffix=$((suffix + 1))
+    done
+}
+
+copy_workflows_flat_with_names() {
+    local source_dir="$1"
+    local target_dir="$2"
+
+    if [[ -z "$source_dir" || ! -d "$source_dir" ]]; then
+        log WARN "Fallback copy skipped - source directory missing: $source_dir"
+        return 1
+    fi
+
+    if ! mkdir -p "$target_dir"; then
+        log WARN "Fallback copy failed - could not ensure target directory: $target_dir"
+        return 1
+    fi
+
+    local -A registry=()
+    local success=true
+
+    while IFS= read -r -d '' workflow_file; do
+        local workflow_id
+        workflow_id=$(jq -r '.id // empty' "$workflow_file" 2>/dev/null)
+        local workflow_name
+        workflow_name=$(jq -r '.name // "Unnamed Workflow"' "$workflow_file" 2>/dev/null)
+
+        local filename
+        filename=$(generate_unique_workflow_filename "$target_dir" "$workflow_id" "$workflow_name" registry)
+
+        if [[ -z "$filename" ]]; then
+            log WARN "Skipped workflow during fallback - could not derive filename"
+            success=false
+            continue
+        fi
+
+        if ! cp "$workflow_file" "$target_dir/$filename"; then
+            log WARN "Failed to copy workflow to fallback target: $filename"
+            success=false
+            continue
+        fi
+    done < <(find "$source_dir" -type f -name "*.json" -print0)
+
+    if $success; then
+        log SUCCESS "Workflows copied to Git repository (flat structure fallback)"
+        return 0
+    fi
+
+    return 1
+}
+
 organize_workflows_by_folders() {
     local source_dir="$1"
     local target_dir="$2"
@@ -213,6 +330,7 @@ organize_workflows_by_folders() {
 
     local git_prefix="${git_dir%/}/"
     local -A expected_files=()
+    local -A filename_registry=()
 
     while IFS= read -r -d '' workflow_file; do
         local workflow_id
@@ -249,7 +367,16 @@ organize_workflows_by_folders() {
             continue
         fi
 
-        local target_file="$destination_dir/${workflow_id}.json"
+        local generated_filename
+        generated_filename=$(generate_unique_workflow_filename "$destination_dir" "$workflow_id" "$workflow_name" filename_registry)
+
+        if [[ -z "$generated_filename" ]]; then
+            log WARN "Skipping workflow ${workflow_id:-unknown} - unable to determine filename"
+            commit_fail=true
+            continue
+        fi
+
+        local target_file="$destination_dir/$generated_filename"
         expected_files["$target_file"]=1
 
         if [[ -f "$target_file" ]] && cmp -s "$workflow_file" "$target_file" 2>/dev/null; then
@@ -258,7 +385,7 @@ organize_workflows_by_folders() {
         fi
 
         if ! cp "$workflow_file" "$target_file"; then
-            log WARN "Failed to copy workflow $workflow_id to $target_file"
+            log WARN "Failed to copy workflow ${workflow_id:-unknown} to $target_file"
             commit_fail=true
             continue
         fi
@@ -295,13 +422,10 @@ organize_workflows_by_folders() {
 
     while IFS= read -r -d '' existing_file; do
     if [[ -z "${expected_files[$existing_file]+set}" ]]; then
-            local workflow_id
-            workflow_id=$(basename "$existing_file")
-            workflow_id="${workflow_id%.json}"
             local workflow_name
             workflow_name=$(jq -r '.name // empty' "$existing_file" 2>/dev/null)
             if [[ -z "$workflow_name" || "$workflow_name" == "null" ]]; then
-                workflow_name="Workflow $workflow_id"
+                workflow_name=$(basename "$existing_file" ".json")
             fi
 
             local relative_git_path=""
@@ -1257,21 +1381,21 @@ EOF
     log HEADER "Backup Summary"
     
     if [[ $workflows == 2 && $credentials == 2 ]]; then
-        log SUCCESS "✅ Complete backup successful!"
-        log SUCCESS "📄 Workflows: Stored in GitHub repository with folder structure"
-        log SUCCESS "🔒 Credentials: Stored in GitHub repository (less secure)"
+    log SUCCESS "✅ Complete backup successful!"
+    log SUCCESS "📄 Workflows: Stored in GitHub repository with folder structure"
+    log SUCCESS "🔒 Credentials: Stored in GitHub repository (less secure)"
     elif [[ $workflows == 2 && $credentials == 1 ]]; then
-        log SUCCESS "✅ Hybrid backup successful!"
-        log SUCCESS "📄 Workflows: Stored in GitHub repository with folder structure"
-        log SUCCESS "🔒 Credentials: Stored securely in local storage ($local_credentials_file)"
+    log SUCCESS "✅ Hybrid backup successful!"
+    log SUCCESS "📄 Workflows: Stored in GitHub repository with folder structure"
+    log SUCCESS "🔒 Credentials: Stored securely in local storage ($local_credentials_file)"
     elif [[ $workflows == 1 && $credentials == 1 ]]; then
-        log SUCCESS "✅ Local backup successful!"
-        log SUCCESS "📄 Workflows: Stored securely in local storage ($local_workflows_file)"
-        log SUCCESS "🔒 Credentials: Stored securely in local storage ($local_credentials_file)"
+    log SUCCESS "✅ Local backup successful!"
+    log SUCCESS "📄 Workflows: Stored securely in local storage ($local_workflows_file)"
+    log SUCCESS "🔒 Credentials: Stored securely in local storage ($local_credentials_file)"
     elif [[ $workflows == 1 && $credentials == 2 ]]; then
-        log SUCCESS "✅ Mixed backup successful!"
-        log SUCCESS "📄 Workflows: Stored securely in local storage ($local_workflows_file)"
-        log SUCCESS "🔒 Credentials: Stored in GitHub repository (less secure)"
+    log SUCCESS "✅ Mixed backup successful!"
+    log SUCCESS "📄 Workflows: Stored securely in local storage ($local_workflows_file)"
+    log SUCCESS "🔒 Credentials: Stored in GitHub repository (less secure)"
     fi
     
     log SUCCESS "🌱 Environment: Stored securely in local storage ($local_env_file)"
