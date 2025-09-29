@@ -66,7 +66,7 @@ ensure_n8n_session_credentials() {
     fi
 
     if [[ -z "$credential_name" ]]; then
-        log ERROR "Session credential name not configured. Set N8N_SESSION_CREDENTIAL."
+        log ERROR "Session credential name not configured. Set N8N_LOGIN_CREDENTIAL_NAME."
         return 1
     fi
 
@@ -187,7 +187,7 @@ get_workflow_folder_mapping() {
                 email="$n8n_email"
                 password="$n8n_password"
             else
-                log ERROR "Session credentials not configured. Set N8N_SESSION_CREDENTIAL or provide email/password."
+                log ERROR "Session credentials not configured. Set N8N_LOGIN_CREDENTIAL_NAME or provide email/password."
                 return 1
             fi
         fi
@@ -422,7 +422,7 @@ validate_n8n_api_access() {
     fi
 
     if [[ -z "$email" || -z "$password" ]]; then
-        log ERROR "Session authentication requires email/password but none are available. Configure N8N_SESSION_CREDENTIAL or provide credentials."
+        log ERROR "Session authentication requires email/password but none are available. Configure N8N_LOGIN_CREDENTIAL_NAME or provide credentials."
         return 1
     fi
 

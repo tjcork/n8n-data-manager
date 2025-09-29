@@ -153,7 +153,7 @@ Configuration Files (checked in order):
 
     # n8n credential name for session-based login (alternative to API key)
     # Example: Basic Auth credential named "N8N REST BACKUP"
-    N8N_SESSION_CREDENTIAL="N8N REST BACKUP"
+    N8N_LOGIN_CREDENTIAL_NAME="N8N REST BACKUP"
     
     # === RESTORE BEHAVIOR SETTINGS ===
     # Default restore type: "all", "workflows", or "credentials" (defaults to 'all')

@@ -111,7 +111,7 @@ VERBOSE=false
 LOG_FILE="/var/log/n8n-manager.log"
 
 # n8n credential used for session authentication when building folder structure (Optional)
-# N8N_SESSION_CREDENTIAL="N8N REST BACKUP"
+# N8N_LOGIN_CREDENTIAL_NAME="N8N REST BACKUP"
 ```
 
 **Security Note:** Ensure the configuration file has appropriate permissions (e.g., `chmod 600 ~/.config/n8n-manager/config`) as it contains your GitHub PAT.

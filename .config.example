@@ -60,7 +60,7 @@ N8N_API_KEY="n8n_api_1234567890abcdef1234567890abcdef"
 
 # n8n credential name for session-based login (stored inside n8n credentials)
 # Used when API key is not provided. Example: Basic Auth credential named "N8N REST BACKUP"
-N8N_SESSION_CREDENTIAL="N8N REST BACKUP"
+N8N_LOGIN_CREDENTIAL_NAME="N8N REST BACKUP"
 
 # === RESTORE BEHAVIOR SETTINGS ===
 # Default restore type: "all", "workflows", or "credentials" (defaults to 'all')

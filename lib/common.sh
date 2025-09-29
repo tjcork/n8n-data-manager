@@ -335,10 +335,10 @@ load_config() {
         fi
 
         if [[ -z "$n8n_session_credential" ]]; then
-            if [[ -n "${N8N_SESSION_CREDENTIAL:-}" ]]; then
-                n8n_session_credential="$N8N_SESSION_CREDENTIAL"
-            elif [[ -n "${N8N_SESSION_CREDENTIAL_NAME:-}" ]]; then
-                n8n_session_credential="$N8N_SESSION_CREDENTIAL_NAME"
+            if [[ -n "${N8N_LOGIN_CREDENTIAL_NAME:-}" ]]; then
+                n8n_session_credential="$N8N_LOGIN_CREDENTIAL_NAME"
+            elif [[ -n "${N8N_LOGIN_CREDENTIAL_NAME_NAME:-}" ]]; then
+                n8n_session_credential="$N8N_LOGIN_CREDENTIAL_NAME_NAME"
             fi
         fi
 

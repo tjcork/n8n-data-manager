@@ -239,7 +239,7 @@ main() {
                 if [[ -z "$n8n_email" || -z "$n8n_password" ]]; then
                     if [[ -z "$n8n_session_credential" ]]; then
                         log ERROR "Session credential name required when API key is not provided."
-                        log INFO "Please configure --n8n-cred or set N8N_SESSION_CREDENTIAL in config."
+                        log INFO "Please configure --n8n-cred or set N8N_LOGIN_CREDENTIAL_NAME in config."
                         exit 1
                     fi
                 fi
