@@ -599,7 +599,7 @@ backup() {
     local is_dry_run=$6            # Boolean: true/false instead of string  
     local workflows=$7             # Numeric: 0=disabled, 1=local, 2=remote
     local credentials=$8           # Numeric: 0=disabled, 1=local, 2=remote
-    local folder_structure_flag=$9 # Boolean: true if folder structure enabled
+    local folder_structure_enabled=${9:-false} # Boolean: true if folder structure enabled
     local local_backup_path="${10:-$HOME/n8n-backup}"  # Local backup path (default: ~/n8n-backup)
     local local_rotation_limit="${11:-10}"  # Local rotation limit (default: 10)
     
@@ -733,7 +733,7 @@ backup() {
         if ! dockExec "$container_id" "mkdir -p $container_workflows_dir" false; then
             log ERROR "Failed to create workflows directory in container"
             export_failed=true
-        elif ! dockExec "$container_id" "n8n export:workflow --backup --output=$container_workflows_dir/" false; then 
+        elif ! dockExec "$container_id" "n8n export:workflow --all --separate --output=$container_workflows_dir/" false; then 
             # Check if the error is due to no workflows existing
             if docker exec "$container_id" n8n list workflows 2>&1 | grep -q "No workflows found"; then
                 log INFO "No workflows found to backup - this is a clean installation"
@@ -930,48 +930,48 @@ backup() {
         fi
 
         # Copy files to Git repository
-        local copy_status="success"
+    local copy_status="success"
+    local folder_structure_committed=false
         
         # Handle workflows for remote storage
-        if [[ $workflows == 2 ]] && docker exec "$container_id" test -f "$container_workflows"; then
+        if [[ $workflows == 2 ]]; then
             log INFO "Preparing workflows for Git repository..."
-            if [[ $folder_structure_flag == true ]]; then
-                # Create folder structure in Git repo
-                if [[ $is_dry_run == true ]]; then
+            if [[ "$folder_structure_enabled" == true ]]; then
+                if $is_dry_run; then
                     log DRYRUN "Would create n8n folder structure in Git repository"
                 else
-                    echo "[DEBUG] Creating n8n folder structure using API..."
-                    echo "[DEBUG] n8n URL: $n8n_base_url"
-                    echo "[DEBUG] API Key: ${n8n_api_key:0:8}..."
-                    # Set container_id globally for API functions to use
+                    log DEBUG "Creating n8n folder structure using API..."
+                    log DEBUG "n8n URL: $n8n_base_url"
                     export container_id="$container_id"
                     if create_folder_structure_with_git "$container_id" "$target_dir" "$tmp_dir" "$is_dry_run"; then
+                        folder_structure_committed=true
                         log SUCCESS "n8n folder structure created in repository with individual commits"
-                        # Debug: Show what files were created
-                        echo "[DEBUG] Files created by folder structure:"
-                        find "$target_dir" -name "*.json" | head -10 | while read -r file; do
-                            echo "[DEBUG]   Created: $file"
-                        done
                     else
-                        log ERROR "Failed to create folder structure, falling back to flat structure"
-                        # Fallback to flat structure
+                        log ERROR "Failed to create folder structure, attempting flat structure fallback"
+                    fi
+                fi
+            fi
+
+            if ! $folder_structure_committed; then
+                if $is_dry_run; then
+                    log DRYRUN "Would copy workflows to Git repository: $target_dir/workflows.json"
+                else
+                    if docker exec "$container_id" test -f "$container_workflows"; then
                         if docker cp "${container_id}:${container_workflows}" "$target_dir/workflows.json"; then
-                            log SUCCESS "Workflows copied to Git repository (flat structure fallback)"
+                            log SUCCESS "Workflows copied to Git repository"
                         else
                             log ERROR "Failed to copy workflows to Git repository"
                             copy_status="failed"
                         fi
-                    fi
-                fi
-            else
-                # Standard flat file structure
-                if $is_dry_run; then
-                    log DRYRUN "Would copy workflows to Git repository: $target_dir/workflows.json"
-                else
-                    if docker cp "${container_id}:${container_workflows}" "$target_dir/workflows.json"; then
-                        log SUCCESS "Workflows copied to Git repository"
+                    elif docker exec "$container_id" test -d "$container_workflows_dir"; then
+                        if docker cp "${container_id}:${container_workflows_dir}/." "$target_dir/"; then
+                            log SUCCESS "Workflows copied to Git repository from directory export"
+                        else
+                            log ERROR "Failed to copy workflow directory to Git repository"
+                            copy_status="failed"
+                        fi
                     else
-                        log ERROR "Failed to copy workflows to Git repository"
+                        log ERROR "No workflow export found in container for flat structure backup"
                         copy_status="failed"
                     fi
                 fi
@@ -998,10 +998,23 @@ backup() {
         if $is_dry_run; then
             log DRYRUN "Would create .gitignore file"
         else
-            if [[ $credentials == 2 ]]; then
-                # Credential-inclusive mode: allow credentials but exclude environment
+            local template_dir="$(dirname "${BASH_SOURCE[0]}")/../templates"
+            local gitignore_base_template="$template_dir/gitignore.base"
+            local gitignore_credentials_template="$template_dir/gitignore.credentials-secure"
+
+            if [[ -f "$gitignore_base_template" ]]; then
+                if ! cp "$gitignore_base_template" "$gitignore_file"; then
+                    log ERROR "Failed to copy gitignore base template to $gitignore_file"
+                    rm -f "$gitignore_file"
+                    return 1
+                fi
+            else
+                log WARN "Gitignore base template missing ($gitignore_base_template). Using fallback defaults."
                 cat > "$gitignore_file" << 'EOF'
-# n8n Environment Security - Exclude sensitive environment data
+# n8n Git Backup - managed ignore rules
+.gitignore
+
+# Environment security
 .env
 *.env
 **/.env
@@ -1021,32 +1034,21 @@ Thumbs.db
 *.tmp
 *.temp
 EOF
+            fi
+
+            if [[ $credentials == 2 ]]; then
                 log SUCCESS "Created .gitignore for credential-inclusive backup"
             else
-                # Default secure mode: exclude all sensitive data
-                cat > "$gitignore_file" << 'EOF'
-# n8n Security - Never commit sensitive data
+                if [[ -f "$gitignore_credentials_template" ]]; then
+                    cat "$gitignore_credentials_template" >> "$gitignore_file"
+                else
+                    log WARN "Gitignore credentials template missing ($gitignore_credentials_template). Using fallback defaults."
+                    cat >> "$gitignore_file" << 'EOF'
+# Sensitive credentials (excluded from repository)
 credentials.json
-.env
-*.env
 **/credentials.json
-**/.env
-**/*.env
-
-# Archive directories
-archive/
-
-# OS and editor files
-.DS_Store
-Thumbs.db
-*.swp
-*.swo
-*~
-
-# Temporary files
-*.tmp
-*.temp
 EOF
+                fi
                 log SUCCESS "Created .gitignore to prevent sensitive data from being committed"
             fi
         fi
@@ -1107,7 +1109,7 @@ EOF
                 fi
             else
                 # Standard repo-root backup - add workflow files and folders specifically
-                if [[ $workflows == 2 ]]; then
+                if [[ $workflows == 2 && $folder_structure_committed == false ]]; then
                     log DEBUG "Adding workflow folder structure to repository root"
                     
                     # Add workflow folders and JSON files specifically
@@ -1144,7 +1146,11 @@ EOF
             fi
             
             # Success message
-            if [[ $workflows == 2 && $credentials == 2 ]]; then
+            if [[ $folder_structure_committed == true && $credentials == 2 ]]; then
+                log SUCCESS "Workflow folder structure and credentials processed successfully"
+            elif [[ $folder_structure_committed == true ]]; then
+                log SUCCESS "Workflow folder structure processed successfully"
+            elif [[ $workflows == 2 && $credentials == 2 ]]; then
                 log SUCCESS "Workflow folder structure and credentials added to Git successfully"
             elif [[ $workflows == 2 ]]; then
                 log SUCCESS "Workflow folder structure added to Git successfully (credentials excluded)"
@@ -1195,26 +1201,37 @@ EOF
                 git config user.name "n8n-backup-script" || true
             fi
             
-            # Commit changes
-            if git diff --cached --quiet; then
-                log WARN "No changes detected in Git repository - nothing to commit"
+            if $folder_structure_committed; then
+                log INFO "Pushing workflow commits to remote repository..."
+                if git push origin "$branch"; then
+                    log SUCCESS "✅ Backup pushed to GitHub repository successfully!"
+                else
+                    log ERROR "Failed to push workflow commits to remote repository"
+                    rm -rf "$tmp_dir"
+                    return 1
+                fi
             else
-                if git commit -m "$commit_msg"; then
-                    log SUCCESS "Changes committed successfully"
-                    
-                    # Push to remote repository
-                    log INFO "Pushing changes to remote repository..."
-                    if git push origin "$branch"; then
-                        log SUCCESS "✅ Backup pushed to GitHub repository successfully!"
+                # Commit changes
+                if git diff --cached --quiet; then
+                    log WARN "No changes detected in Git repository - nothing to commit"
+                else
+                    if git commit -m "$commit_msg"; then
+                        log SUCCESS "Changes committed successfully"
+                        
+                        # Push to remote repository
+                        log INFO "Pushing changes to remote repository..."
+                        if git push origin "$branch"; then
+                            log SUCCESS "✅ Backup pushed to GitHub repository successfully!"
+                        else
+                            log ERROR "Failed to push changes to remote repository"
+                            rm -rf "$tmp_dir"
+                            return 1
+                        fi
                     else
-                        log ERROR "Failed to push changes to remote repository"
+                        log ERROR "Failed to commit changes"
                         rm -rf "$tmp_dir"
                         return 1
                     fi
-                else
-                    log ERROR "Failed to commit changes"
-                    rm -rf "$tmp_dir"
-                    return 1
                 fi
             fi
         fi

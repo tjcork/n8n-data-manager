@@ -21,7 +21,7 @@ show_config_summary() {
             0) workflows_desc="disabled" ;;
             1) workflows_desc="local secure storage" ;;
             2) 
-                if [[ "${folder_structure_flag:-false}" == "true" ]] || [[ "$folder_structure" == "true" ]]; then
+                if [[ "${folder_structure_enabled:-false}" == "true" ]] || [[ "$folder_structure" == "true" ]]; then
                     workflows_desc="remote Git repository (with n8n folder structure)"
                 else
                     workflows_desc="remote Git repository"

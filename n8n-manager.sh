@@ -150,15 +150,7 @@ main() {
     load_config
 
     log HEADER "n8n Backup/Restore Manager v$VERSION"
-    # Initialize flags before use
-    dry_run_flag=false
-    verbose_flag=false
-    if [[ "${dry_run:-false}" == "true" ]]; then dry_run_flag=true; fi
-    if [[ "${verbose:-false}" == "true" ]]; then verbose_flag=true; fi
-    
     log INFO "🚀 Flexible backup storage: local files or Git repository"
-    if [[ $dry_run_flag == true ]]; then log WARN "DRY RUN MODE ENABLED"; fi
-    if [[ $verbose_flag == true ]]; then log DEBUG "Verbose mode enabled."; fi
     
     check_host_dependencies
 
@@ -172,8 +164,7 @@ main() {
     if [[ "$action" == "restore" ]] || [[ "$workflows" == "2" ]] || [[ "$credentials" == "2" ]]; then 
         needs_github=true 
     fi
-    log DEBUG "GitHub required: $needs_github"
-    
+
     # Set intelligent defaults for backup (only if not already configured)
     if [[ "$action" == "backup" ]]; then
         # Check if both are disabled after config loading
@@ -437,12 +428,6 @@ main() {
              log INFO "Using restore type: $restore_type"
         fi
         
-        # Set defaults for any boolean variables still empty after interactive prompts
-        dated_backups=${dated_backups:-false}
-        folder_structure=${folder_structure:-false}
-        verbose=${verbose:-false}
-        dry_run=${dry_run:-false}
-        
         # Derive convenience flags from numeric storage settings (avoid repeated comparisons)
         needs_local_path=false
         
@@ -451,17 +436,45 @@ main() {
             needs_local_path=true 
         fi
         
-        # Convert remaining string boolean variables to boolean flags (avoid repeated string comparisons)
-        dated_backups_flag=false
-        folder_structure_flag=false
-        
-        if [[ "$dated_backups" == "true" ]]; then dated_backups_flag=true; fi
-        if [[ "$folder_structure" == "true" ]]; then folder_structure_flag=true; fi
-        use_dated_backup_flag=$dated_backups_flag
-        
-        log DEBUG "Storage settings - workflows: ($workflows) $(format_storage_value $workflows), credentials: ($credentials) $(format_storage_value $credentials), needs_github: $needs_github"
-        log DEBUG "Boolean flags - dated_backups: $dated_backups_flag, dry_run: $dry_run_flag, folder_structure: $folder_structure_flag"
+    log DEBUG "Storage settings - workflows: ($workflows) $(format_storage_value $workflows), credentials: ($credentials) $(format_storage_value $credentials), needs_github: $needs_github"
     fi
+
+    # Normalize boolean values after configuration and prompts
+    dry_run=${dry_run:-false}
+    verbose=${verbose:-false}
+    dated_backups=${dated_backups:-false}
+    folder_structure=${folder_structure:-false}
+
+    dry_run_flag=false
+    if [[ "$dry_run" == "true" ]]; then
+        dry_run_flag=true
+    fi
+
+    verbose_flag=false
+    if [[ "$verbose" == "true" ]]; then
+        verbose_flag=true
+    fi
+
+    dated_backups_flag=false
+    if [[ "$dated_backups" == "true" ]]; then
+        dated_backups_flag=true
+    fi
+
+    folder_structure_enabled=false
+    if [[ "$folder_structure" == "true" ]]; then
+        folder_structure_enabled=true
+    fi
+
+    if [[ $dry_run_flag == true ]]; then
+        log WARN "DRY RUN MODE ENABLED"
+    fi
+
+    if [[ $verbose_flag == true ]]; then
+        log DEBUG "Verbose mode enabled."
+    fi
+
+    log DEBUG "Boolean flags - dated_backups: $dated_backups_flag, dry_run: $dry_run_flag, folder_structure: $folder_structure_enabled"
+    log DEBUG "GitHub required: $needs_github"
 
     # Final validation
     if [ -z "$action" ] || [ -z "$container" ]; then
@@ -491,7 +504,7 @@ main() {
     log INFO "Starting action: $action"
     case "$action" in
         backup)
-            if backup "$container" "$github_token" "$github_repo" "$github_branch" "$dated_backups_flag" "$dry_run_flag" "$workflows" "$credentials" "$folder_structure_flag" "$local_backup_path" "$local_rotation_limit"; then
+            if backup "$container" "$github_token" "$github_repo" "$github_branch" "$dated_backups_flag" "$dry_run_flag" "$workflows" "$credentials" "$folder_structure_enabled" "$local_backup_path" "$local_rotation_limit"; then
                 log SUCCESS "Backup operation completed successfully."
             else
                 log ERROR "Backup operation failed."
