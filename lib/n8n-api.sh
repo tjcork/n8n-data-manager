@@ -178,6 +178,39 @@ get_workflow_folder_mapping() {
         return 1
     fi
 
+    # Strip Windows-style carriage returns to avoid jq parsing issues
+    projects_response="$(printf '%s' "$projects_response" | tr -d '\r')"
+    workflows_response="$(printf '%s' "$workflows_response" | tr -d '\r')"
+
+    if [ "$verbose" = "true" ]; then
+        local projects_preview
+        local workflows_preview
+        projects_preview="$(printf '%s' "$projects_response" | tr '\n' ' ' | head -c 200)"
+        workflows_preview="$(printf '%s' "$workflows_response" | tr '\n' ' ' | head -c 200)"
+        log DEBUG "Projects response preview: ${projects_preview}$( [ $(printf '%s' "$projects_response" | wc -c) -gt 200 ] && echo '…')"
+        log DEBUG "Workflows response preview: ${workflows_preview}$( [ $(printf '%s' "$workflows_response" | wc -c) -gt 200 ] && echo '…')"
+    fi
+
+    if ! printf '%s' "$projects_response" | jq empty >/dev/null 2>&1; then
+        local sample
+        sample="$(printf '%s' "$projects_response" | tr '\n' ' ' | head -c 200)"
+        log ERROR "Projects response is not valid JSON (sample: ${sample}...)"
+        if $using_session; then
+            cleanup_n8n_session
+        fi
+        return 1
+    fi
+
+    if ! printf '%s' "$workflows_response" | jq empty >/dev/null 2>&1; then
+        local sample
+        sample="$(printf '%s' "$workflows_response" | tr '\n' ' ' | head -c 200)"
+        log ERROR "Workflows response is not valid JSON (sample: ${sample}...)"
+        if $using_session; then
+            cleanup_n8n_session
+        fi
+        return 1
+    fi
+
     local mapping_json
     if ! mapping_json=$(jq -n \
         --argjson projects "$projects_response" \
@@ -205,7 +238,7 @@ get_workflow_folder_mapping() {
             (
                 ($projects.data // [])
                 | map({
-                    id: .id // "default",
+                    id: (.id // "default"),
                     name: (if (.type // "") == "personal" then "Personal" else (.name // "Project") end),
                     slug: sanitize(if (.type // "") == "personal" then "Personal" else (.name // "Project") end)
                 })
