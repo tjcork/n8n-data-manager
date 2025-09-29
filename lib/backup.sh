@@ -32,7 +32,7 @@ create_folder_structure_with_git() {
     log DEBUG "Step 1: Exporting individual workflows from n8n container..."
     local temp_export_dir="$(mktemp -d -t n8n-workflows-XXXXXXXXXX)"
 
-    if ! docker exec "$container_id" bash -c 'rm -rf /tmp/workflow_exports && mkdir -p /tmp/workflow_exports' >/dev/null 2>&1; then
+    if ! dockExec "$container_id" "rm -rf /tmp/workflow_exports && mkdir -p /tmp/workflow_exports" false; then
         log ERROR "Failed to prepare workflow export directory inside container"
         rm -rf "$temp_export_dir"
         return 1
