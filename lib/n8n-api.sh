@@ -107,21 +107,28 @@ get_workflow_folder_mapping() {
     local projects_response=""
     local workflows_response=""
     local using_session=false
+    local responses_ready="false"
+    local used_api_key="false"
 
     # Prefer API key if supplied
     if [[ -n "$api_key" ]]; then
         log DEBUG "Fetching workflow metadata using API key authentication"
-        if projects_response=$(fetch_n8n_projects "$base_url" "$api_key") && \
-           workflows_response=$(fetch_workflows_with_folders "$base_url" "$api_key"); then
+        local api_projects=""
+        local api_workflows=""
+        if api_projects=$(fetch_n8n_projects "$base_url" "$api_key") && \
+           api_workflows=$(fetch_workflows_with_folders "$base_url" "$api_key"); then
             log SUCCESS "Retrieved workflow metadata via API key"
+            projects_response="$api_projects"
+            workflows_response="$api_workflows"
+            responses_ready="true"
+            used_api_key="true"
         else
-            log WARN "API key request failed. Falling back to session authentication"
-            api_key=""
+            log WARN "API key request failed (see above). Will retry using session authentication"
         fi
     fi
 
     # Fall back to session auth if API key not usable
-    if [[ -z "$api_key" ]]; then
+    if [[ "$responses_ready" != "true" ]]; then
         if [[ -z "$email" || -z "$password" ]]; then
             log ERROR "Session credentials not configured. Provide N8N_EMAIL and N8N_PASSWORD"
             return 1
@@ -135,18 +142,30 @@ get_workflow_folder_mapping() {
 
         using_session=true
 
-        if ! projects_response=$(fetch_n8n_projects_session "$base_url"); then
+        local session_projects=""
+        local session_workflows=""
+
+        if ! session_projects=$(fetch_n8n_projects_session "$base_url"); then
             cleanup_n8n_session
             return 1
         fi
-        if ! workflows_response=$(fetch_workflows_with_folders_session "$base_url" ""); then
+        if ! session_workflows=$(fetch_workflows_with_folders_session "$base_url" ""); then
             cleanup_n8n_session
             return 1
         fi
+
+        projects_response="$session_projects"
+        workflows_response="$session_workflows"
+        responses_ready="true"
+    fi
+
+    if [[ "$responses_ready" != "true" ]]; then
+        log ERROR "Unable to retrieve workflow metadata via API key or session authentication"
+        return 1
     fi
 
     # Normalize responses when using API key
-    if [[ -n "$api_key" ]]; then
+    if [[ "$used_api_key" == "true" && "$using_session" == "false" ]]; then
         projects_response="$(echo "$projects_response" | jq 'if type == "object" then . else {data: .} end' 2>/dev/null)"
         workflows_response="$(echo "$workflows_response" | jq 'if type == "object" then . else {data: .} end' 2>/dev/null)"
     fi
