@@ -161,7 +161,7 @@ print_folder_structure_preview() {
                 log INFO "${file_prefix}< + $((total_count - ${#files[@]})) more >"
             fi
         fi
-    done < <(find "$base_dir" -type d -not -path '*/.git*' -mindepth 1 | sort)
+    done < <(find "$base_dir" -mindepth 1 -type d -not -path '*/.git*' | sort)
 }
 
 organize_workflows_by_folders() {
@@ -920,8 +920,10 @@ backup() {
                 log WARN "Branch '$branch' not found, creating new repository"
                 git init .
                 git remote add origin "$clone_url"
-                git config user.email "n8n-backup-script@localhost"
-                git config user.name "n8n-backup-script"
+                local fallback_email="${git_commit_email:-n8n-backup-script@localhost}"
+                local fallback_name="${git_commit_name:-n8n-backup-script}"
+                git config user.email "$fallback_email"
+                git config user.name "$fallback_name"
             fi
         fi
 
@@ -1200,12 +1202,14 @@ EOF
             log DRYRUN "Would commit with message: $commit_msg"
         else
             if [[ -z "$(git config user.email 2>/dev/null)" ]]; then
-                log WARN "No Git user.email configured, setting default"
-                git config user.email "n8n-backup-script@localhost" || true
+                local configured_email="${git_commit_email:-n8n-backup-script@localhost}"
+                log WARN "No Git user.email configured, setting default to $configured_email"
+                git config user.email "$configured_email" || true
             fi
             if [[ -z "$(git config user.name 2>/dev/null)" ]]; then
-                log WARN "No Git user.name configured, setting default"
-                git config user.name "n8n-backup-script" || true
+                local configured_name="${git_commit_name:-n8n-backup-script}"
+                log WARN "No Git user.name configured, setting default to $configured_name"
+                git config user.name "$configured_name" || true
             fi
             
             if $folder_structure_committed; then

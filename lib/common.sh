@@ -12,6 +12,9 @@ IFS=$'\n\t'
 VERSION="4.0.0"
 DEBUG_TRACE=${DEBUG_TRACE:-false} # Set to true for trace debugging
 
+git_commit_name=""
+git_commit_email=""
+
 # ANSI colors for better UI (using printf for robustness)
 printf -v RED     '\033[0;31m'
 printf -v GREEN   '\033[0;32m'
@@ -342,6 +345,14 @@ load_config() {
             fi
         fi
 
+        if [[ -z "$git_commit_name" && -n "${GIT_COMMIT_NAME:-}" ]]; then
+            git_commit_name="$GIT_COMMIT_NAME"
+        fi
+
+        if [[ -z "$git_commit_email" && -n "${GIT_COMMIT_EMAIL:-}" ]]; then
+            git_commit_email="$GIT_COMMIT_EMAIL"
+        fi
+
         # Backward compatibility: allow direct email/password configuration if still provided
         if [[ -z "$n8n_email" && -n "${N8N_EMAIL:-}" ]]; then
             n8n_email="$N8N_EMAIL"
@@ -394,6 +405,24 @@ load_config() {
     
     if [[ -z "$github_branch" ]]; then
         github_branch="main"
+    fi
+
+    if [[ -z "$git_commit_name" ]]; then
+        git_commit_name="N8N Backup Manager"
+    fi
+
+    if [[ -z "$git_commit_email" ]]; then
+        local base_domain raw_domain
+        raw_domain="${n8n_base_url:-}"
+        if [[ -n "$raw_domain" ]]; then
+            base_domain=$(echo "$raw_domain" | sed -E 's#^[a-zA-Z]+://##' | sed 's#/.*$##')
+            base_domain="${base_domain%%:*}"
+            base_domain=$(echo "$base_domain" | tr '[:upper:]' '[:lower:]')
+            base_domain="${base_domain:-n8n.local}"
+        else
+            base_domain="n8n.local"
+        fi
+        git_commit_email="backup@${base_domain}"
     fi
     
     # === LOG FILE VALIDATION ===

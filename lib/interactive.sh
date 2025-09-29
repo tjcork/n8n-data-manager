@@ -45,6 +45,13 @@ show_config_summary() {
     if [[ -n "$github_repo" ]]; then
         log INFO "   📚 GitHub: $github_repo (branch: ${github_branch:-main})"
     fi
+
+    if [[ -n "${git_commit_name:-}" || -n "${git_commit_email:-}" ]]; then
+        local display_name display_email
+        display_name="${git_commit_name:-N8N Backup Manager}"
+        display_email="${git_commit_email:-backup@n8n.local}"
+        log INFO "   ✍️ Git identity: $display_name <$display_email>"
+    fi
     
     if [[ -n "$n8n_api_key" ]]; then
         log INFO "   🔐 n8n API auth: API key configured"

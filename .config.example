@@ -23,6 +23,11 @@ DEFAULT_CONTAINER="n8n-container-name"
 # GitHub branch to use (defaults to 'main')
 GITHUB_BRANCH="main"
 
+# Git commit identity used for automated backups (optional)
+# Defaults to "N8N Backup Manager" and backup@<base domain of N8N_BASE_URL>
+# GIT_COMMIT_NAME="N8N Backup Manager"
+# GIT_COMMIT_EMAIL="backup@example.com"
+
 # === BACKUP BEHAVIOR SETTINGS ===
 # Create timestamped backup directories (true/false, defaults to false)
 DATED_BACKUPS=true

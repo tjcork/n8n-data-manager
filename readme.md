@@ -95,6 +95,11 @@ GITHUB_REPO="your-github-username/n8n-backups"
 # Default GitHub Branch (Optional, defaults to main)
 GITHUB_BRANCH="main"
 
+# Git identity for automated commits (Optional)
+# Defaults to "N8N Backup Manager" and backup@<base domain of N8N_BASE_URL>
+# GIT_COMMIT_NAME="N8N Backup Manager"
+# GIT_COMMIT_EMAIL="backup@example.com"
+
 # Default n8n Container Name or ID (Optional)
 DEFAULT_CONTAINER="my-n8n-container"
 
