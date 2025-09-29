@@ -245,6 +245,70 @@ get_workflow_folder_mapping() {
     return 0
 }
 
+# Fetch projects using API key authentication
+fetch_n8n_projects() {
+    local base_url="$1"
+    local api_key="$2"
+
+    base_url="${base_url%/}"
+
+    local response
+    local http_status
+    if ! response=$(curl -s -w "\n%{http_code}" \
+        -H "X-N8N-API-KEY: $api_key" \
+        -H "Accept: application/json" \
+        "$base_url/rest/projects"); then
+        log ERROR "Failed to fetch projects with API key authentication"
+        return 1
+    fi
+
+    http_status=$(echo "$response" | tail -n1)
+    local response_body=$(echo "$response" | head -n -1)
+
+    if [[ "$http_status" != "200" ]]; then
+        log ERROR "Projects API returned HTTP $http_status when using API key"
+        log DEBUG "Projects API Response Body: $response_body"
+        return 1
+    fi
+
+    log DEBUG "Projects API (API key) success - received $(echo "$response_body" | wc -c) bytes"
+    echo "$response_body"
+    return 0
+}
+
+# Fetch workflows (including folder metadata) using API key authentication
+fetch_workflows_with_folders() {
+    local base_url="$1"
+    local api_key="$2"
+
+    base_url="${base_url%/}"
+
+    local query_url="$base_url/rest/workflows?includeScopes=true&includeFolders=true&filter=%7B%22isArchived%22%3Afalse%7D&skip=0&take=1000&sortBy=updatedAt%3Adesc"
+
+    local response
+    local http_status
+    if ! response=$(curl -s -w "\n%{http_code}" \
+        -H "X-N8N-API-KEY: $api_key" \
+        -H "Accept: application/json" \
+        "$query_url"); then
+        log ERROR "Failed to fetch workflows with API key authentication"
+        return 1
+    fi
+
+    http_status=$(echo "$response" | tail -n1)
+    local response_body=$(echo "$response" | head -n -1)
+
+    if [[ "$http_status" != "200" ]]; then
+        log ERROR "Workflows API returned HTTP $http_status when using API key"
+        log DEBUG "Workflows API Response Body: $response_body"
+        return 1
+    fi
+
+    log DEBUG "Workflows API (API key) success - received $(echo "$response_body" | wc -c) bytes"
+    echo "$response_body"
+    return 0
+}
+
 # ============================================================================
 # Session-based Authentication Functions for REST API (/rest/* endpoints)
 # ============================================================================

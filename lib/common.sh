@@ -463,16 +463,20 @@ dockExec() {
     else
         log DEBUG "Executing in container $container_id: $cmd"
         output=$(docker exec "$container_id" sh -c "$cmd" 2>&1) || exit_code=$?
+
+        local filtered_output=""
+        if [ -n "$output" ]; then
+            filtered_output=$(echo "$output" | grep -vE 'OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS|N8N_BLOCK_ENV_ACCESS_IN_NODE' || true)
+        fi
         
-        # Use explicit string comparison to avoid empty command errors
-        if [ "$verbose" = "true" ] && [ -n "$output" ]; then
-            log DEBUG "Container output:\n$(echo "$output" | sed 's/^/  /')"
+        if [ "$verbose" = "true" ] && [ -n "$filtered_output" ]; then
+            log DEBUG "Container output:\n$(echo "$filtered_output" | sed 's/^/  /')"
         fi
         
         if [ $exit_code -ne 0 ]; then
             log ERROR "Command failed in container (Exit Code: $exit_code): $cmd"
-            if [ "$verbose" != "true" ] && [ -n "$output" ]; then
-                log ERROR "Container output:\n$(echo "$output" | sed 's/^/  /')"
+            if [ "$verbose" != "true" ] && [ -n "$filtered_output" ]; then
+                log ERROR "Container output:\n$(echo "$filtered_output" | sed 's/^/  /')"
             fi
             return 1
         fi

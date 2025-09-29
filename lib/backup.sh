@@ -38,7 +38,8 @@ create_folder_structure_with_git() {
         return 1
     fi
 
-    if ! docker exec "$container_id" n8n export:workflow --all --separate --output=/tmp/workflow_exports/ 2>/dev/null; then
+    local export_cmd="n8n export:workflow --all --separate --output=/tmp/workflow_exports/"
+    if ! dockExec "$container_id" "$export_cmd" false; then
         log ERROR "Failed to export individual workflow files from container"
         rm -rf "$temp_export_dir"
         return 1
