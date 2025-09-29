@@ -9,14 +9,15 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/n8n-api.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/git.sh"
 
-# Orchestrate folder structure creation with Git operations
+# Orchestrate folder structure creation with proper separation of concerns
 create_folder_structure_with_git() {
-    local backup_dir="$1"
-    local git_dir="$2"
-    local is_dry_run="$3"
+    local container_id="$1"
+    local target_dir="$2"
+    local git_dir="$3"
+    local is_dry_run="$4"
     
-    if [[ -z "$backup_dir" || -z "$git_dir" ]]; then
-        log "ERROR" "Missing required parameters for folder structure with Git operations"
+    if [[ -z "$container_id" || -z "$target_dir" || -z "$git_dir" ]]; then
+        log "ERROR" "Missing required parameters for folder structure creation"
         return 1
     fi
     
@@ -25,55 +26,236 @@ create_folder_structure_with_git() {
         return 0
     fi
     
-    # Initialize Git repository if needed
-    if ! init_git_repo "$git_dir"; then
-        log "ERROR" "Failed to initialize Git repository"
+    log INFO "Creating n8n folder structure with proper workflow organization..."
+    
+    # Step 1: Export individual workflow files from Docker container
+    log DEBUG "Step 1: Exporting individual workflows from n8n container..."
+    local temp_export_dir="$(mktemp -d -t n8n-workflows-XXXXXXXXXX)"
+    
+    if ! docker exec "$container_id" n8n export:workflow --backup --output=/tmp/workflow_exports/ 2>/dev/null; then
+        log ERROR "Failed to export individual workflow files from container"
+        rm -rf "$temp_export_dir"
         return 1
     fi
     
-    # Create folder structure using pure n8n API operations
-    if ! create_n8n_folder_structure "$backup_dir"; then
-        log "ERROR" "Failed to create n8n folder structure"
+    # Copy exported files from container to local temp directory
+    if ! docker cp "${container_id}:/tmp/workflow_exports/" "$temp_export_dir/"; then
+        log ERROR "Failed to copy exported workflow files from container"
+        rm -rf "$temp_export_dir"
         return 1
     fi
     
-    # Now handle Git operations for all the files that were created
-    cd "$git_dir" || {
-        log "ERROR" "Failed to change to git directory: $git_dir"
-        return 1
-    }
+    log SUCCESS "Exported individual workflow files to temporary directory"
     
-    # Find all workflow JSON files and commit them individually
-    local commit_count=0
+    # Step 2: Get folder organization mapping from n8n API
+    log DEBUG "Step 2: Fetching folder structure mapping from n8n API..."
+    local folder_mapping_json
+    if ! folder_mapping_json=$(get_workflow_folder_mapping); then
+        log ERROR "Failed to get folder structure mapping from n8n API"
+        log WARN "Falling back to flat file structure"
+        # Fallback: copy all files to target directory without folder structure
+        if cp "$temp_export_dir/workflow_exports/"*.json "$target_dir/" 2>/dev/null; then
+            log SUCCESS "Workflows copied to Git repository (flat structure fallback)"
+        else
+            log ERROR "Failed to copy workflows to Git repository"
+            rm -rf "$temp_export_dir"
+            return 1
+        fi
+        rm -rf "$temp_export_dir"
+        return 0
+    fi
+    
+    log SUCCESS "Retrieved folder structure mapping from n8n API"
+    
+    # Step 3: Organize files according to folder structure and commit to Git
+    log DEBUG "Step 3: Organizing workflows into folder structure..."
+    if ! organize_workflows_by_folders "$temp_export_dir/workflow_exports" "$target_dir" "$folder_mapping_json" "$git_dir"; then
+        log ERROR "Failed to organize workflows by folders"
+        rm -rf "$temp_export_dir"
+        return 1
+    fi
+    
+    log SUCCESS "n8n folder structure created and committed to repository"
+    rm -rf "$temp_export_dir"
+    return 0
+}
+
+organize_workflows_by_folders() {
+    local source_dir="$1"
+    local target_dir="$2"
+    local mapping_json="$3"
+    local git_dir="$4"
+
+    if [[ -z "$source_dir" || ! -d "$source_dir" ]]; then
+        log ERROR "Workflow export directory missing: $source_dir"
+        return 1
+    fi
+
+    if [[ -z "$target_dir" ]]; then
+        log ERROR "Target directory not specified for workflow organization"
+        return 1
+    fi
+
+    if [[ -z "$git_dir" || ! -d "$git_dir" ]]; then
+        log ERROR "Git directory not accessible: $git_dir"
+        return 1
+    fi
+
+    if ! mkdir -p "$target_dir"; then
+        log ERROR "Failed to ensure target directory exists: $target_dir"
+        return 1
+    fi
+
+    local mapping_file
+    mapping_file=$(mktemp -t n8n-workflow-mapping-XXXXXXXX.json)
+    printf '%s' "$mapping_json" > "$mapping_file"
+
+    if ! jq -e '.workflowsById' "$mapping_file" >/dev/null 2>&1; then
+        log ERROR "Workflow mapping JSON missing workflowsById structure"
+        rm -f "$mapping_file"
+        return 1
+    fi
+
+    local new_count=0
+    local updated_count=0
+    local unchanged_count=0
+    local deleted_count=0
+    local commit_fail=false
+
+    local git_prefix="${git_dir%/}/"
+    local -A expected_files=()
+
     while IFS= read -r -d '' workflow_file; do
-        if [[ -f "$workflow_file" ]]; then
-            # Extract workflow name from file for commit message
+        local workflow_id
+        workflow_id=$(jq -r '.id // empty' "$workflow_file" 2>/dev/null)
+
+        if [[ -z "$workflow_id" ]]; then
+            log WARN "Skipping workflow file without ID: $workflow_file"
+            continue
+        fi
+
+        local workflow_name
+        workflow_name=$(jq -r '.name // "Unnamed Workflow"' "$workflow_file" 2>/dev/null)
+
+        local relative_path
+        relative_path=$(jq -r --arg id "$workflow_id" '.workflowsById[$id].relativePath // empty' "$mapping_file" 2>/dev/null)
+        local display_path
+        display_path=$(jq -r --arg id "$workflow_id" '.workflowsById[$id].displayPath // empty' "$mapping_file" 2>/dev/null)
+
+        if [[ -z "$relative_path" || "$relative_path" == "null" ]]; then
+            relative_path="Personal"
+        fi
+
+        if [[ -z "$display_path" || "$display_path" == "null" ]]; then
+            display_path="$relative_path"
+        fi
+
+        relative_path="${relative_path#/}"
+        relative_path="${relative_path%/}"
+
+        local destination_dir="$target_dir/$relative_path"
+        if ! mkdir -p "$destination_dir"; then
+            log WARN "Failed to create destination directory: $destination_dir"
+            commit_fail=true
+            continue
+        fi
+
+        local target_file="$destination_dir/${workflow_id}.json"
+        expected_files["$target_file"]=1
+
+        if [[ -f "$target_file" ]] && cmp -s "$workflow_file" "$target_file" 2>/dev/null; then
+            unchanged_count=$((unchanged_count + 1))
+            continue
+        fi
+
+        if ! cp "$workflow_file" "$target_file"; then
+            log WARN "Failed to copy workflow $workflow_id to $target_file"
+            commit_fail=true
+            continue
+        fi
+
+        local relative_git_path=""
+        if [[ "$target_file" == "$git_prefix"* ]]; then
+            relative_git_path="${target_file#$git_prefix}"
+        else
+            log WARN "Workflow file resides outside Git directory: $target_file"
+            commit_fail=true
+            continue
+        fi
+
+        local is_new="true"
+        if git -C "$git_dir" ls-files --error-unmatch "$relative_git_path" >/dev/null 2>&1; then
+            is_new="false"
+        fi
+
+        if [[ "$is_new" == "true" ]]; then
+            new_count=$((new_count + 1))
+        else
+            updated_count=$((updated_count + 1))
+        fi
+
+        local commit_label="$workflow_name"
+        if [[ -n "$display_path" && "$display_path" != "$workflow_name" ]]; then
+            commit_label="$workflow_name ($display_path)"
+        fi
+
+        if ! commit_individual_workflow "$relative_git_path" "$commit_label" "$git_dir" "$is_new"; then
+            commit_fail=true
+        fi
+    done < <(find "$source_dir" -type f -name "*.json" -not -path "*/.git/*" -print0)
+
+    while IFS= read -r -d '' existing_file; do
+        if [[ -z "${expected_files[$existing_file]}" ]]; then
+            local workflow_id
+            workflow_id=$(basename "$existing_file")
+            workflow_id="${workflow_id%.json}"
             local workflow_name
-            workflow_name=$(jq -r '.name // "Unnamed Workflow"' "$workflow_file" 2>/dev/null || echo "Unnamed Workflow")
-            
-            # Determine if it's new or updated by checking git status
-            local is_new="true"
-            if git ls-files --error-unmatch "$(realpath --relative-to="$git_dir" "$workflow_file")" >/dev/null 2>&1; then
-                is_new="false"
+            workflow_name=$(jq -r '.name // empty' "$existing_file" 2>/dev/null)
+            if [[ -z "$workflow_name" || "$workflow_name" == "null" ]]; then
+                workflow_name="Workflow $workflow_id"
             fi
-            
-            # Get relative path for Git operations
-            local relative_path
-            relative_path=$(realpath --relative-to="$git_dir" "$workflow_file")
-            
-            # Commit the individual workflow
-            if commit_individual_workflow "$relative_path" "$workflow_name" "$git_dir" "$is_new"; then
-                commit_count=$((commit_count + 1))
+
+            local relative_git_path=""
+            if [[ "$existing_file" == "$git_prefix"* ]]; then
+                relative_git_path="${existing_file#$git_prefix}"
+            else
+                log WARN "Workflow deletion outside Git directory: $existing_file"
+                commit_fail=true
+                continue
+            fi
+
+            if ! rm -f "$existing_file"; then
+                log WARN "Failed to remove obsolete workflow file: $existing_file"
+                commit_fail=true
+                continue
+            fi
+
+            if commit_deleted_workflow "$relative_git_path" "$workflow_name" "$git_dir"; then
+                deleted_count=$((deleted_count + 1))
+            else
+                commit_fail=true
             fi
         fi
-    done < <(find "$backup_dir" -name "*.json" -type f -print0)
-    
-    # Commit credentials if present
-    if [[ -f "$git_dir/credentials.json" ]]; then
-        commit_credentials "$git_dir"
+    done < <(find "$target_dir" -type f -name "*.json" -not -path "*/.git/*" -print0)
+
+    while IFS= read -r -d '' empty_dir; do
+        [[ "$empty_dir" == "$target_dir" ]] && continue
+        rmdir "$empty_dir" 2>/dev/null || true
+    done < <(find "$target_dir" -type d -empty -not -path "*/.git/*" -print0)
+
+    log INFO "Workflow organization summary:"
+    log INFO "  • New workflows: $new_count"
+    log INFO "  • Updated workflows: $updated_count"
+    log INFO "  • Unchanged workflows: $unchanged_count"
+    log INFO "  • Deleted workflows: $deleted_count"
+
+    rm -f "$mapping_file"
+
+    if $commit_fail; then
+        log WARN "Completed with some issues during workflow organization"
+        return 1
     fi
-    
-    log "SUCCESS" "Created folder structure with $commit_count individual workflow commits"
+
     return 0
 }
 
@@ -336,6 +518,9 @@ backup() {
     local folder_structure_flag=$9 # Boolean: true if folder structure enabled
     local local_backup_path="${10:-$HOME/n8n-backup}"  # Local backup path (default: ~/n8n-backup)
     local local_rotation_limit="${11:-10}"  # Local rotation limit (default: 10)
+    
+    # Make container_id globally available for API functions
+    export container_id="$container_id"
     
     # Derive storage descriptions for logging
     local workflows_desc="disabled"
@@ -672,9 +857,11 @@ backup() {
                     log DRYRUN "Would create n8n folder structure in Git repository"
                 else
                     echo "[DEBUG] Creating n8n folder structure using API..."
-                    echo "[DEBUG] n8n URL: $N8N_BASE_URL"
-                    echo "[DEBUG] API Key: ${N8N_API_KEY:0:8}..."
-                    if create_folder_structure_with_git "$target_dir" "$tmp_dir" "$is_dry_run"; then
+                    echo "[DEBUG] n8n URL: $n8n_base_url"
+                    echo "[DEBUG] API Key: ${n8n_api_key:0:8}..."
+                    # Set container_id globally for API functions to use
+                    export container_id="$container_id"
+                    if create_folder_structure_with_git "$container_id" "$target_dir" "$tmp_dir" "$is_dry_run"; then
                         log SUCCESS "n8n folder structure created in repository with individual commits"
                         # Debug: Show what files were created
                         echo "[DEBUG] Files created by folder structure:"

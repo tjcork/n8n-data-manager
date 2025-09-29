@@ -90,564 +90,158 @@ test_n8n_api_connection() {
 }
 
 # Comprehensive API validation - tests all available authentication methods
-validate_n8n_api_access() {
-    local base_url="$1"
-    local api_key="$2"
-    local email="${3:-}"      # Optional: for session auth fallback
-    local password="${4:-}"   # Optional: for session auth fallback
-    
-    log INFO "🔍 Validating n8n API access and permissions..."
-    
-    # Clean up URL
-    base_url="${base_url%/}"
-    
-    # If API key is blank or empty, skip API key authentication and go straight to session auth
-    if [[ -n "$api_key" && "$api_key" != "" ]]; then
-        log DEBUG "Testing API key authentication on /api/v1/ endpoints..."
-        local api_response
-        local api_status
-        if api_response=$(curl -s -w "\n%{http_code}" -H "X-N8N-API-KEY: $api_key" "$base_url/api/v1/workflows?limit=1" 2>/dev/null); then
-            api_status=$(echo "$api_response" | tail -n1)
-            if [[ "$api_status" == "200" ]]; then
-                local workflow_count
-                workflow_count=$(echo "$api_response" | head -n -1 | jq -r '.data | length // 0' 2>/dev/null || echo "0")
-                log SUCCESS "✅ API key authentication successful!"
-                log INFO "Found $workflow_count workflows accessible via API key (/api/v1/)"
-                return 0
-            else
-                log WARN "⚠️ API key authentication failed (HTTP $api_status), trying session auth..."
-            fi
-        else
-            log WARN "⚠️ API key authentication request failed, trying session auth..."
-        fi
-    else
-        log INFO "No API key provided - using session-based authentication for REST API"
-    fi
-    
-    # Try session-based authentication for REST API endpoints
-    log DEBUG "Using session authentication for /rest/ endpoints..."
-    
-    # If no email/password provided, prompt for them
-    if [[ -z "$email" || -z "$password" ]]; then
-        if [[ -n "$api_key" && "$api_key" != "" ]]; then
-            log INFO "API key authentication failed. Trying session-based authentication for REST API..."
-        else
-            log INFO "Using session-based authentication for REST API access..."
-        fi
-        if [[ -z "$email" ]]; then
-            printf "n8n email or LDAP login ID: "
-            read -r email
-        fi
-        if [[ -z "$password" ]]; then
-            printf "n8n password: "
-            read -r -s password
-            echo  # Add newline after hidden input
-        fi
-    fi
-    
-    if [[ -n "$email" && -n "$password" ]]; then
-        if authenticate_n8n_session "$base_url" "$email" "$password" 3; then
-            # Test the session with a simple API call
-            if test_n8n_session_auth "$base_url" "$email" "$password" "true"; then
-                log SUCCESS "✅ Session authentication successful!"
-                log INFO "REST API endpoints are accessible via session authentication"
-                return 0
-            else
-                log ERROR "❌ Session authentication succeeded but API test failed"
-            fi
-        else
-            log ERROR "❌ Session authentication failed after multiple attempts"
-        fi
-    else
-        log ERROR "❌ No valid credentials provided for session authentication"
-    fi
-    
-    # If we get here, all authentication methods failed
-    log ERROR "❌ n8n API validation failed with all available methods!"
-    log ERROR "Cannot proceed without valid authentication. Please check:"
-    if [[ -n "$api_key" && "$api_key" != "" ]]; then
-        log ERROR "  1. API key is correct and active"
-        log ERROR "  2. Try manually: curl -H \"X-N8N-API-KEY: $api_key\" \"$base_url/api/v1/workflows?limit=1\""
-    fi
-    if [[ -n "$email" && -n "$password" ]]; then
-        log ERROR "  3. Email/LDAP login ID and password are correct"
-        log ERROR "  4. n8n instance allows password authentication"
-        log ERROR "  5. No additional authentication barriers (like Cloudflare Access)"
-    fi
-    log ERROR "  6. n8n instance is properly configured and accessible"
-    log ERROR "  7. Network connectivity to n8n server"
-    
-    return 1
-}
-
-# Fetch all projects from n8n instance
-fetch_n8n_projects() {
-    local base_url="$1"
-    local api_key="$2"
-    
-    log DEBUG "Fetching projects from n8n API..."
-    
-    # Clean up URL
-    base_url="${base_url%/}"
-    
-    local response
-    local http_status
-    if ! response=$(curl -s -w "\\n%{http_code}" -H "X-N8N-API-KEY: $api_key" "$base_url/rest/projects" 2>/dev/null); then
-        log ERROR "Failed to fetch projects from n8n API"
-        return 1
-    fi
-    
-    http_status=$(echo "$response" | tail -n1)
-    local response_body=$(echo "$response" | head -n -1)
-    
-    if [[ "$http_status" != "200" ]]; then
-        log ERROR "Failed to fetch projects (HTTP $http_status)"
-        return 1
-    fi
-    
-    echo "$response_body"
-    return 0
-}
-
-# Fetch folders for a specific project
-fetch_project_folders() {
-    local base_url="$1"
-    local api_key="$2"
-    local project_id="$3"
-    
-    log DEBUG "Fetching folders for project: $project_id"
-    
-    # Clean up URL
-    base_url="${base_url%/}"
-    
-    local response
-    local http_status
-    if ! response=$(curl -s -w "\\n%{http_code}" -H "X-N8N-API-KEY: $api_key" "$base_url/rest/projects/$project_id/folders" 2>/dev/null); then
-        log ERROR "Failed to fetch folders for project: $project_id"
-        return 1
-    fi
-    
-    http_status=$(echo "$response" | tail -n1)
-    local response_body=$(echo "$response" | head -n -1)
-    
-    if [[ "$http_status" != "200" ]]; then
-        log ERROR "Failed to fetch project folders (HTTP $http_status)"
-        return 1
-    fi
-    
-    echo "$response_body"
-    return 0
-}
-
-# Fetch workflows with folder information
-fetch_workflows_with_folders() {
-    local base_url="$1"
-    local api_key="$2"
-    local project_id="${3:-}"  # Optional project filter
-    
-    log DEBUG "Fetching workflows with folder information..."
-    
-    # Clean up URL  
-    base_url="${base_url%/}"
-    
-    local url="$base_url/rest/workflows?includeFolders=true"
-    if [[ -n "$project_id" ]]; then
-        url="$url&filter[projectId]=$project_id"
-    fi
-    
-    local response
-    local http_status
-    if ! response=$(curl -s -w "\\n%{http_code}" -H "X-N8N-API-KEY: $api_key" "$url" 2>/dev/null); then
-        log ERROR "Failed to fetch workflows with folders"
-        return 1
-    fi
-    
-    http_status=$(echo "$response" | tail -n1)
-    local response_body=$(echo "$response" | head -n -1)
-    
-    if [[ "$http_status" != "200" ]]; then
-        log ERROR "Failed to fetch workflows (HTTP $http_status)"
-        return 1
-    fi
-    
-    echo "$response_body"
-    return 0
-}
-
-# Build folder structure based on n8n's actual folder hierarchy (replaces tag-based logic)
-# Create n8n folder structure mirroring the API structure
-create_n8n_folder_structure() {
-    local backup_dir="$1"
-    
-    if [[ -z "$backup_dir" ]]; then
-        log "ERROR" "Backup directory not specified for folder structure creation"
-        return 1
-    fi
-    
-    log INFO "Creating folder structure based on n8n's actual folders (not tags)..."
-    
-    # Use runtime variables for API credentials
+# Build mapping of workflows to sanitized folder paths
+get_workflow_folder_mapping() {
     local base_url="$n8n_base_url"
     local api_key="$n8n_api_key"
     local email="$n8n_email"
     local password="$n8n_password"
-    
+
     if [[ -z "$base_url" ]]; then
         log ERROR "n8n API URL not configured. Please set N8N_BASE_URL"
         return 1
     fi
-    
-    # Test API connection first (non-verbose since we validated earlier)
-    if ! test_n8n_api_connection "$base_url" "$api_key" "false"; then
-        log ERROR "Cannot proceed with folder structure creation - API connection failed"
-        return 1
-    fi
-    
-    # Get list of workflow files from container first
-    local container_workflows_dir="/home/node/.n8n/workflows"
-    local workflow_files
-    if ! workflow_files=$(docker exec "$container_id" find "$container_workflows_dir" -name "*.json" -type f 2>/dev/null); then
-        log ERROR "Failed to get workflow files from container"
-        return 1
+
+    base_url="${base_url%/}"
+
+    local projects_response=""
+    local workflows_response=""
+    local using_session=false
+
+    # Prefer API key if supplied
+    if [[ -n "$api_key" ]]; then
+        log DEBUG "Fetching workflow metadata using API key authentication"
+        if projects_response=$(fetch_n8n_projects "$base_url" "$api_key") && \
+           workflows_response=$(fetch_workflows_with_folders "$base_url" "$api_key"); then
+            log SUCCESS "Retrieved workflow metadata via API key"
+        else
+            log WARN "API key request failed. Falling back to session authentication"
+            api_key=""
+        fi
     fi
 
-    if [[ -z "$workflow_files" ]]; then
-        log INFO "No workflow files found - clean installation"
-        return 0
-    fi
+    # Fall back to session auth if API key not usable
+    if [[ -z "$api_key" ]]; then
+        if [[ -z "$email" || -z "$password" ]]; then
+            log ERROR "Session credentials not configured. Provide N8N_EMAIL and N8N_PASSWORD"
+            return 1
+        fi
 
-    # Determine authentication method and fetch API data
-    local projects_response
-    local workflows_response
-    local using_session_auth=false
-    
-    # Try API key authentication first (if available)
-    if [[ -n "$api_key" && "$api_key" != "" ]]; then
-        log DEBUG "Trying API key authentication first..."
-        if projects_response=$(fetch_n8n_projects "$base_url" "$api_key" 2>/dev/null) && \
-           workflows_response=$(fetch_workflows_with_folders "$base_url" "$api_key" 2>/dev/null); then
-            log SUCCESS "✅ API key authentication successful for data fetching"
-            log DEBUG "Projects API response received: $(echo "$projects_response" | wc -c) characters"
-            log DEBUG "Workflows API response received: $(echo "$workflows_response" | wc -c) characters"
-        else
-            log WARN "⚠️ API key authentication failed for REST endpoints, trying session authentication..."
-            api_key=""  # Clear API key to force session auth
+        log DEBUG "Fetching workflow metadata using session authentication"
+        if ! authenticate_n8n_session "$base_url" "$email" "$password" 1; then
+            log ERROR "Session authentication failed"
+            return 1
         fi
-    else
-        log INFO "No API key provided - using session authentication for REST API"
-    fi
-    
-    # Use session authentication if API key is blank or failed
-    if [[ -z "$api_key" || "$api_key" == "" ]]; then
-        # Get email/password from config or prompt
-        if [[ -n "$email" && -n "$password" ]]; then
-            log DEBUG "Using email/password from configuration for session auth"
-        else
-            log INFO "Session authentication requires email/password credentials"
-            if [[ -z "$email" ]]; then
-                printf "n8n email or LDAP login ID: "
-                read -r email
-            fi
-            if [[ -z "$password" ]]; then
-                printf "n8n password: "
-                read -r -s password
-                echo  # Add newline after hidden input
-            fi
+
+        using_session=true
+
+        if ! projects_response=$(fetch_n8n_projects_session "$base_url"); then
+            cleanup_n8n_session
+            return 1
         fi
-        
-        # Authenticate and fetch data using session
-        if authenticate_n8n_session "$base_url" "$email" "$password" 3 && \
-           projects_response=$(fetch_n8n_projects_session "$base_url"); then
-            
-            log SUCCESS "✅ Session authentication successful and projects fetched"
-            log DEBUG "Raw projects response: $projects_response"
-            
-            # Extract project ID for workflows query
-            local project_id
-            project_id=$(echo "$projects_response" | jq -r '.data[0].id // ""' 2>/dev/null || echo "")
-            
-            log DEBUG "Extracted project ID: '$project_id'"
-            
-            # Fetch workflows with the project ID
-            if workflows_response=$(fetch_workflows_with_folders_session "$base_url" "$project_id"); then
-                log SUCCESS "✅ Successfully fetched workflows for project ID: $project_id"
-                log DEBUG "Raw workflows response: $workflows_response"
-                
-                using_session_auth=true
-            else
-                log ERROR "❌ Failed to fetch workflows even after successful authentication!"
-                cleanup_n8n_session
-                return 1
-            fi
-        else
-            log ERROR "❌ Session authentication failed!"
-            log ERROR "Cannot proceed with folder structure creation - API authentication failed"
-            log ERROR "Please check:"
-            log ERROR "  1. n8n instance is running and accessible at: $base_url"
-            if [[ -n "$api_key" && "$api_key" != "" ]]; then
-                log ERROR "  2. API key is correct and active"
-            fi
-            if [[ -n "$email" && -n "$password" ]]; then
-                log ERROR "  3. Email/password credentials are correct" 
-                log ERROR "  4. n8n allows password authentication"
-            fi
-            log ERROR "  5. No authentication barriers (Cloudflare, etc.)"
-            
-            # Cleanup any session files
+        if ! workflows_response=$(fetch_workflows_with_folders_session "$base_url" ""); then
             cleanup_n8n_session
             return 1
         fi
     fi
-    
-    # Show sample of workflow data for debugging
-    local workflow_count
-    workflow_count=$(echo "$workflows_response" | jq -r '.data | length // 0' 2>/dev/null || echo "0")
-    
-    # Log first workflow for debugging
-    if [[ "$workflow_count" -gt 0 ]]; then
-        local first_workflow_info
-        first_workflow_info=$(echo "$workflows_response" | jq -r '.data[0] | "First workflow: id=\(.id // "unknown"), name=\(.name // "unnamed")"' 2>/dev/null || echo "Error parsing first workflow")
-        echo "$first_workflow_info" >&2
+
+    # Normalize responses when using API key
+    if [[ -n "$api_key" ]]; then
+        projects_response="$(echo "$projects_response" | jq 'if type == "object" then . else {data: .} end' 2>/dev/null)"
+        workflows_response="$(echo "$workflows_response" | jq 'if type == "object" then . else {data: .} end' 2>/dev/null)"
     fi
-    
-    echo "[DEBUG] Raw workflow count: $workflow_count"
-    echo "[DEBUG] Starting workflow processing and folder structure creation..."
-    log DEBUG "Found $workflow_count workflows via API"
-    
-    # Parse projects to create project name mapping
-    local project_mapping
-    project_mapping=$(echo "$projects_response" | jq -r '
-        .data[]? // (if type == "array" then .[] else empty end) |
-        select(.id and .name) |
-        (
-            .id as $id |
-            .name as $name |
-            .type as $type |
-            if $type == "personal" then
-                "\($id)|Personal"
-            else
-                "\($id)|\($name | gsub("/"; "_") | gsub(" "; "_"))"
-            end
-        )
-    ' 2>/dev/null || echo "default|Personal")
-    
-    echo "[DEBUG] Project mapping result: $project_mapping"
-    
-    if [[ -z "$project_mapping" ]]; then
-        log WARN "No project mapping found, using fallback structure"
-        project_mapping="default|Personal"
-        echo "[DEBUG] Using fallback project mapping: $project_mapping"
+
+    if [[ -z "$projects_response" || -z "$workflows_response" ]]; then
+        log ERROR "Failed to retrieve workflow metadata from n8n"
+        if $using_session; then
+            cleanup_n8n_session
+        fi
+        return 1
     fi
-    
-    # Track existing workflows for deletion detection
-    local existing_workflows=()
-    if [[ -d "$target_dir" ]]; then
-        while IFS= read -r -d '' existing_file; do
-            if [[ "$existing_file" =~ ([0-9]+)\.json$ ]]; then
-                existing_workflows+=("${BASH_REMATCH[1]}")
-            fi
-        done < <(find "$target_dir" -name "*.json" -type f -print0 2>/dev/null || true)
-    fi
-    
-    local current_workflows=()
-    local new_count=0
-    local updated_count=0
-    
-    echo "[DEBUG] Starting workflow processing - combining Docker files with API folder structure"
-    echo "[DEBUG] Processing $(echo "$workflow_files" | wc -l) workflow files from Docker container"
-    
-    # Process each workflow file
-    while IFS= read -r workflow_file; do
-        if [[ -z "$workflow_file" ]]; then continue; fi
-        
-        echo "[DEBUG] Processing Docker workflow file: $workflow_file"
-        
-        # Copy workflow file to temporary location for processing
-        local temp_workflow="/tmp/temp_workflow.json"
-        if ! docker cp "${container_id}:${workflow_file}" "$temp_workflow" 2>/dev/null; then
-            log WARN "Failed to copy workflow file: $workflow_file"
-            continue
-        fi
-        
-        # Extract basic workflow information
-        local workflow_info
-        if ! workflow_info=$(jq -r '(.id // "unknown") + "|" + (.name // "Unnamed Workflow")' "$temp_workflow" 2>/dev/null); then
-            log WARN "Failed to parse workflow file: $workflow_file"
-            rm -f "$temp_workflow"
-            continue
-        fi
-        
-        IFS='|' read -r workflow_id workflow_name <<< "$workflow_info"
-        
-        echo "[DEBUG] Extracted from Docker file - ID: '$workflow_id', Name: '$workflow_name'"
-        
-        if [[ "$workflow_id" == "ERROR" ]]; then
-            log WARN "Failed to extract workflow info from: $workflow_file"
-            rm -f "$temp_workflow"
-            continue
-        fi
-        
-        current_workflows+=("$workflow_id")
-        
-        # Find workflow's project and folder information from API response
-        local folder_info
-        folder_info=$(echo "$workflows_response" | jq -r --arg workflow_id "$workflow_id" '
-            .data[]? // (if type == "array" then .[] else empty end) |
-            select(.id == $workflow_id and .resource != "folder") |
+
+    local mapping_json
+    if ! mapping_json=$(jq -n \
+        --argjson projects "$projects_response" \
+        --argjson workflows "$workflows_response" '
+            def sanitize($value):
+                ($value // "")
+                | gsub("\\s+"; "_")
+                | gsub("/"; "_")
+                | gsub("[^A-Za-z0-9._-]"; "");
+
+            def folder_array($folder):
+                if $folder == null then []
+                else
+                    (
+                        ($folder.fullPath // $folder.path // $folder.name // "")
+                        | split("/")
+                        | map(select(length > 0))
+                        | map({
+                            name: ., 
+                            slug: sanitize(.)
+                        })
+                    )
+                end;
+
             (
-                (.homeProject.id // "default") as $project_id |
-                (.parentFolderId // "") as $folder_id |
-                (.parentFolder.name // "") as $folder_name |
-                "\($project_id)|\($folder_id)|\($folder_name)"
-            )
-        ' 2>/dev/null || echo "default||")
-        
-        echo "[DEBUG] Workflow $workflow_id API folder info: '$folder_info'"
-        
-        if [[ -z "$folder_info" ]]; then
-            folder_info="default||"
-            echo "[DEBUG] Using fallback folder info for workflow $workflow_id"
+                ($projects.data // [])
+                | map({
+                    id: .id // "default",
+                    name: (if (.type // "") == "personal" then "Personal" else (.name // "Project") end),
+                    slug: sanitize(if (.type // "") == "personal" then "Personal" else (.name // "Project") end)
+                })
+            ) as $project_lookup |
+
+            (
+                ($project_lookup | map({ (.id): {name: .name, slug: .slug} }) | add) // {}
+            ) as $projects_by_id |
+
+            (
+                ($workflows.data // [])
+                | map(select(.resource != "folder"))
+                | map({
+                    id: (.id | tostring),
+                    name: (.name // "Unnamed Workflow"),
+                    project: (
+                        (.homeProject.id // "default") as $pid |
+                        ($projects_by_id[$pid] // {name: "Personal", slug: "Personal"}) as $project_info |
+                        { id: $pid, name: $project_info.name, slug: $project_info.slug }
+                    ),
+                    folders: folder_array(.parentFolder),
+                    relativePath: (
+                        (.homeProject.id // "default") as $pid |
+                        ($projects_by_id[$pid] // {slug: "Personal"}) as $project_info |
+                        [$project_info.slug]
+                        + (folder_array(.parentFolder) | map(.slug))
+                        | join("/")
+                    ),
+                    displayPath: (
+                        (.homeProject.id // "default") as $pid |
+                        ($projects_by_id[$pid] // {name: "Personal"}) as $project_info |
+                        [$project_info.name]
+                        + (folder_array(.parentFolder) | map(.name))
+                        | join("/")
+                    )
+                })
+            ) as $workflow_list |
+            {
+                fetchedAt: (now | todateiso8601),
+                workflows: $workflow_list,
+                workflowsById: ($workflow_list | map({key: .id, value: .}) | from_entries)
+            }
+        '); then
+        log ERROR "Failed to construct workflow mapping JSON"
+        if $using_session; then
+            cleanup_n8n_session
         fi
-        
-        IFS='|' read -r project_id folder_id folder_name <<< "$folder_info"
-        
-        # Determine project folder name from mapping
-        local project_folder_name="Personal"  # default
-        while IFS='|' read -r mapped_project_id mapped_folder_name; do
-            if [[ "$mapped_project_id" == "$project_id" ]]; then
-                project_folder_name="$mapped_folder_name"
-                break
-            fi
-        done <<< "$project_mapping"
-        
-        # Build the target folder path: ProjectName/[FolderName]/workflow-id.json
-        local folder_path="$target_dir/$project_folder_name"
-        
-        echo "[DEBUG] Base folder path: '$folder_path'"
-        
-        if [[ -n "$folder_name" && "$folder_name" != "" ]]; then
-            # Sanitize folder name (remove invalid characters)
-            local clean_folder_name=$(echo "$folder_name" | tr -d '[\/:*?"<>|]' | tr ' ' '_')
-            folder_path="$folder_path/$clean_folder_name"
-            echo "[DEBUG] Added subfolder: '$clean_folder_name' -> Final path: '$folder_path'"
-        fi
-        
-        # Create folder structure if it doesn't exist
-        echo "[DEBUG] Creating folder structure: '$folder_path'"
-        if ! mkdir -p "$folder_path"; then
-            log ERROR "Failed to create folder: $folder_path"
-            rm -f "$temp_workflow"
-            continue
-        fi
-        echo "[DEBUG] Successfully created folder structure"
-        
-        # Determine target filename
-        local target_file="$folder_path/${workflow_id}.json"
-        local is_new=true
-        
-        echo "[DEBUG] Target file: '$target_file'"
-        
-        # Check if workflow already exists
-        if [[ -f "$target_file" ]]; then
-            is_new=false
-            echo "[DEBUG] File exists, checking for changes"
-            # Compare files to see if there are actual changes
-            if cmp -s "$temp_workflow" "$target_file" 2>/dev/null; then
-                echo "[DEBUG] Workflow $workflow_id unchanged: $workflow_name"
-                log DEBUG "Workflow $workflow_id unchanged: $workflow_name"
-                rm -f "$temp_workflow"
-                continue
-            fi
-            echo "[DEBUG] File has changes, will update"
-        else
-            echo "[DEBUG] New file will be created"
-        fi
-        
-        # Copy workflow to target location
-        echo "[DEBUG] Copying workflow from temp to target location"
-        if cp "$temp_workflow" "$target_file"; then
-            if $is_new; then
-                new_count=$((new_count + 1))
-                echo "[DEBUG] Successfully created new workflow file"
-                log SUCCESS "[New] Workflow $workflow_id: $workflow_name -> $target_file"
-            else
-                updated_count=$((updated_count + 1))
-                echo "[DEBUG] Successfully updated existing workflow file"
-                log SUCCESS "[Updated] Workflow $workflow_id: $workflow_name -> $target_file"
-            fi
-        else
-            log ERROR "Failed to copy workflow $workflow_id to: $target_file"
-            echo "[DEBUG] Failed to copy workflow file"
-        fi
-        
-        rm -f "$temp_workflow"
-        echo "[DEBUG] Cleaned up temp file, finished processing workflow $workflow_id"
-        
-    done <<< "$workflow_files"
-    
-    # Check for deleted workflows
-    local deleted_count=0
-    for existing_id in "${existing_workflows[@]}"; do
-        local found=false
-        for current_id in "${current_workflows[@]}"; do
-            if [[ "$existing_id" == "$current_id" ]]; then
-                found=true
-                break
-            fi
-        done
-        if ! $found; then
-            # Find and remove deleted workflow files
-            local deleted_files
-            while IFS= read -r -d '' deleted_file; do
-                if rm "$deleted_file" 2>/dev/null; then
-                    deleted_count=$((deleted_count + 1))
-                    log SUCCESS "[Deleted] Removed workflow file: $deleted_file"
-                    
-                    # Remove empty directories up the tree
-                    local dir_path=$(dirname "$deleted_file")
-                    while [[ "$dir_path" != "$target_dir" && "$dir_path" != "." && "$dir_path" != "/" ]]; do
-                        if rmdir "$dir_path" 2>/dev/null; then
-                            log DEBUG "Removed empty directory: $dir_path"
-                            dir_path=$(dirname "$dir_path")
-                        else
-                            break
-                        fi
-                    done
-                fi
-            done < <(find "$target_dir" -name "${existing_id}.json" -type f -print0 2>/dev/null || true)
-        fi
-    done
-    
-    # Summary
-    log INFO "Folder structure creation completed:"
-    log INFO "  • New workflows: $new_count"
-    log INFO "  • Updated workflows: $updated_count" 
-    log INFO "  • Deleted workflows: $deleted_count"
-    
-    # DEBUG: Show the created folder structure
-    echo "[DEBUG] Final folder structure created in $target_dir:"
-    if [[ -d "$target_dir" ]]; then
-        find "$target_dir" -type d | sort | while read -r dir; do
-            local relative_path="${dir#$target_dir}"
-            if [[ -n "$relative_path" ]]; then
-                echo "[DEBUG]   Folder: $relative_path"
-            fi
-        done
-        
-        echo "[DEBUG] Files created in folder structure:"
-        find "$target_dir" -name "*.json" | sort | while read -r file; do
-            local relative_path="${file#$target_dir}"
-            echo "[DEBUG]   File: $relative_path"
-        done
-    else
-        echo "[DEBUG] Target directory does not exist: $target_dir"
+        return 1
     fi
-    
-    # Cleanup session if we used it
-    if $using_session_auth; then
+
+    if $using_session; then
         cleanup_n8n_session
     fi
-    
+
+    echo "$mapping_json"
     return 0
 }
 
@@ -709,15 +303,7 @@ authenticate_n8n_session() {
         
         if [[ "$http_status" == "200" ]]; then
             log SUCCESS "Successfully authenticated with n8n session!"
-            
-            # DEBUG: Show what cookies we got
-            if [[ -f "$N8N_SESSION_COOKIE_FILE" ]]; then
-                echo "[DEBUG] Cookie file contents:"
-                cat "$N8N_SESSION_COOKIE_FILE"
-                echo "[DEBUG] End cookie file contents"
-            else
-                echo "[DEBUG] No cookie file found at: $N8N_SESSION_COOKIE_FILE"
-            fi
+            log DEBUG "Session cookie stored at $N8N_SESSION_COOKIE_FILE"
             
             return 0
         elif [[ "$http_status" == "401" ]]; then
@@ -776,11 +362,11 @@ fetch_n8n_projects_session() {
     
     if [[ "$http_status" != "200" ]]; then
         log ERROR "Failed to fetch projects via session (HTTP $http_status)"
-        echo "[DEBUG] Projects API Response Body: $response_body"
+        log DEBUG "Projects API Response Body: $response_body"
         return 1
     fi
     
-    echo "[DEBUG] Projects API Success - Response: $response_body"
+    log DEBUG "Projects API Success - received $(echo "$response_body" | wc -c) bytes"
     echo "$response_body"
     return 0
 }
@@ -826,12 +412,12 @@ fetch_workflows_with_folders_session() {
     
     if [[ "$http_status" != "200" ]]; then
         log ERROR "Failed to fetch workflows with folders via session (HTTP $http_status)"
-        echo "[DEBUG] Workflows API Response Body: $response_body"
-        echo "[DEBUG] Query URL was: $query_url"
+        log DEBUG "Workflows API Response Body: $response_body"
+        log DEBUG "Query URL was: $query_url"
         return 1
     fi
     
-    echo "[DEBUG] Workflows API Success - Response: $response_body"
+    log DEBUG "Workflows API Success - received $(echo "$response_body" | wc -c) bytes"
     echo "$response_body"
     return 0
 }

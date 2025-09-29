@@ -93,6 +93,41 @@ commit_individual_workflow() {
     return 0
 }
 
+commit_deleted_workflow() {
+    local file_path="$1"
+    local workflow_name="$2"
+    local git_dir="$3"
+
+    if [[ -z "$file_path" || -z "$workflow_name" || -z "$git_dir" ]]; then
+        log "ERROR" "Missing required parameters for deleted workflow commit"
+        return 1
+    fi
+
+    cd "$git_dir" || {
+        log "ERROR" "Failed to change to git directory: $git_dir"
+        return 1
+    }
+
+    if ! git add "$file_path" 2>/dev/null; then
+        log "ERROR" "Failed to stage workflow deletion: $file_path"
+        return 1
+    fi
+
+    if git diff --cached --quiet; then
+        log "DEBUG" "No deletion changes to commit for workflow: $workflow_name"
+        return 0
+    fi
+
+    local commit_msg="[deleted] $workflow_name"
+    if ! git commit -m "$commit_msg" >/dev/null 2>&1; then
+        log "ERROR" "Failed to commit workflow deletion: $workflow_name"
+        return 1
+    fi
+
+    log "SUCCESS" "Committed workflow deletion: $workflow_name"
+    return 0
+}
+
 # Commit credentials file
 commit_credentials() {
     local git_dir="$1"
