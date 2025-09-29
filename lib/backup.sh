@@ -293,7 +293,7 @@ organize_workflows_by_folders() {
     done < <(find "$source_dir" -type f -name "*.json" -not -path "*/.git/*" -print0)
 
     while IFS= read -r -d '' existing_file; do
-        if [[ -z "${expected_files[$existing_file]}" ]]; then
+    if [[ -z "${expected_files[$existing_file]+set}" ]]; then
             local workflow_id
             workflow_id=$(basename "$existing_file")
             workflow_id="${workflow_id%.json}"
