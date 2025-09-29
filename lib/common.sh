@@ -89,6 +89,7 @@ log() {
     if [ "$level" = "DEBUG" ]; then
         color="$DIM"
         prefix="[DEBUG]"
+        to_stderr=true
     elif [ "$level" = "INFO" ]; then
         color="$BLUE"
         prefix="==>"

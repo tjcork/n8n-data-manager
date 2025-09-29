@@ -221,19 +221,44 @@ get_workflow_folder_mapping() {
                 | gsub("/"; "_")
                 | gsub("[^A-Za-z0-9._-]"; "");
 
-            def folder_array($folder):
-                if $folder == null then []
+            def normalize_id($value):
+                if $value == null then null
                 else
-                    (
-                        ($folder.fullPath // $folder.path // $folder.name // "")
-                        | split("/")
-                        | map(select(length > 0))
-                        | map({
-                            name: ., 
-                            slug: sanitize(.)
-                        })
-                    )
+                    ($value | tostring) as $str |
+                    if ($str | gsub("\\s"; "")) == "" or $str == "null" then null else $str end
                 end;
+
+            def folder_lookup:
+                ($workflows.data // [])
+                | map(select(.resource == "folder"))
+                | map(
+                    (normalize_id(.id)) as $fid |
+                    if $fid == null then empty else
+                        {
+                            key: $fid,
+                            value: {
+                                id: $fid,
+                                name: (.name // "Folder"),
+                                slug: sanitize(.name // "Folder"),
+                                parentId: normalize_id(.parentFolderId // (.parentFolder.id // null))
+                            }
+                        }
+                    end
+                )
+                | from_entries;
+
+            def folder_path($folderId; $folders):
+                (normalize_id($folderId)) as $fid |
+                if $fid == null then []
+                else
+                    ($folders[$fid] // null) as $folder |
+                    if $folder == null then []
+                    else
+                        (folder_path($folder.parentId; $folders) + [{name: $folder.name, slug: $folder.slug}])
+                    end
+                end;
+
+            folder_lookup as $folders_by_id |
 
             (
                 ($projects.data // [])
@@ -251,30 +276,31 @@ get_workflow_folder_mapping() {
             (
                 ($workflows.data // [])
                 | map(select(.resource != "folder"))
-                | map({
-                    id: (.id | tostring),
-                    name: (.name // "Unnamed Workflow"),
-                    project: (
-                        (.homeProject.id // "default") as $pid |
-                        ($projects_by_id[$pid] // {name: "Personal", slug: "Personal"}) as $project_info |
-                        { id: $pid, name: $project_info.name, slug: $project_info.slug }
-                    ),
-                    folders: folder_array(.parentFolder),
-                    relativePath: (
-                        (.homeProject.id // "default") as $pid |
-                        ($projects_by_id[$pid] // {slug: "Personal"}) as $project_info |
-                        [$project_info.slug]
-                        + (folder_array(.parentFolder) | map(.slug))
-                        | join("/")
-                    ),
-                    displayPath: (
-                        (.homeProject.id // "default") as $pid |
-                        ($projects_by_id[$pid] // {name: "Personal"}) as $project_info |
-                        [$project_info.name]
-                        + (folder_array(.parentFolder) | map(.name))
-                        | join("/")
-                    )
-                })
+                | map(
+                    (folder_path(.parentFolderId // (.parentFolder.id // null); $folders_by_id)) as $folder_chain |
+                    (.homeProject.id // "default") as $pid |
+                    ($projects_by_id[$pid] // {name: "Personal", slug: "Personal"}) as $project_info |
+                    {
+                        id: (.id | tostring),
+                        name: (.name // "Unnamed Workflow"),
+                        project: {
+                            id: $pid,
+                            name: $project_info.name,
+                            slug: $project_info.slug
+                        },
+                        folders: $folder_chain,
+                        relativePath: (
+                            [$project_info.slug]
+                            + ($folder_chain | map(.slug))
+                            | join("/")
+                        ),
+                        displayPath: (
+                            [$project_info.name]
+                            + ($folder_chain | map(.name))
+                            | join("/")
+                        )
+                    }
+                )
             ) as $workflow_list |
             {
                 fetchedAt: (now | todateiso8601),
