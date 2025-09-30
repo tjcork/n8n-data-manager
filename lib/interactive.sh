@@ -98,6 +98,9 @@ Options:
   --workflows [mode]    Include workflows in backup. Mode: 0 (disabled), 1 (local, default), 2 (remote Git repo).
   --credentials [mode]  Include credentials in backup. Mode: 0 (disabled), 1 (local, default), 2 (remote Git repo).
   --path <path>         Local backup directory path (defaults to '~/n8n-backup').
+    --encrypted-credentials <true|false>
+                                                If true (default), prefer encrypted credential exports from n8n.
+                                                Set to false to force decrypted credential exports (legacy, less secure).
   --rotation <limit>    Local backup rotation: '0' (overwrite), number (keep N most recent), 'unlimited' (keep all).
   --folder-structure    Enable n8n folder structure mirroring in Git (requires API access).
   --n8n-url <url>       n8n instance URL (e.g., 'http://localhost:5678').
@@ -140,6 +143,10 @@ Configuration Files (checked in order):
     
     # Credentials storage: 0=disabled, 1=local (secure), 2=remote (Git repo)
     CREDENTIALS=1
+    
+        # Export credentials encrypted by default (true/false). When true, the backup
+        # process will prefer encrypted exports. To use legacy decrypted exports set to false.
+        CREDENTIALS_ENCRYPTED=true
     
     # === LOCAL BACKUP SETTINGS ===
     # Custom local backup directory path (defaults to ~/n8n-backup)

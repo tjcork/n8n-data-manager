@@ -361,6 +361,20 @@ load_config() {
                 log WARN "Invalid DRY_RUN value in config: '$dry_run_config'. Must be true/false. Using default: false"
                 dry_run=false
             fi
+
+            # Handle credentials_encrypted boolean config
+            if [[ -z "$credentials_encrypted" && -n "${CREDENTIALS_ENCRYPTED:-}" ]]; then
+                local credentials_encrypted_config="$CREDENTIALS_ENCRYPTED"
+                credentials_encrypted_config=$(echo "$credentials_encrypted_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
+                if [[ "$credentials_encrypted_config" == "true" || "$credentials_encrypted_config" == "1" || "$credentials_encrypted_config" == "yes" || "$credentials_encrypted_config" == "on" ]]; then
+                    credentials_encrypted=true
+                elif [[ "$credentials_encrypted_config" == "false" || "$credentials_encrypted_config" == "0" || "$credentials_encrypted_config" == "no" || "$credentials_encrypted_config" == "off" ]]; then
+                    credentials_encrypted=false
+                else
+                    log WARN "Invalid CREDENTIALS_ENCRYPTED value in config: '$credentials_encrypted_config'. Must be true/false. Using default: true"
+                    credentials_encrypted=true
+                fi
+            fi
         fi
         
         # === PATH SETTINGS ===
@@ -467,6 +481,12 @@ load_config() {
             base_domain="n8n.local"
         fi
         git_commit_email="backup@${base_domain}"
+    fi
+
+    # Default to encrypted credential exports unless explicitly disabled
+    if [[ -z "${credentials_encrypted:-}" ]]; then
+        credentials_encrypted=true
+        log DEBUG "Defaulting to encrypted credential exports: credentials_encrypted=true"
     fi
     
     # === LOG FILE VALIDATION ===

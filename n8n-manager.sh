@@ -46,6 +46,7 @@ SELECTED_RESTORE_TYPE="all"
 action=""
 container=""
 default_container=""           # Default container from config
+credentials_encrypted=""      # empty = unset, true/false = explicitly configured
 # Control flags
 dry_run=""     # empty = unset, true/false = explicitly configured
 verbose=""     # empty = unset, true/false = explicitly configured
@@ -115,6 +116,14 @@ main() {
                 esac
                 ;;
             --path) local_backup_path="$2"; shift 2 ;;
+            --encrypted-credentials)
+                # Enable/disable encrypted credentials export on CLI
+                case "${2,,}" in
+                    true|1|yes|on) credentials_encrypted=true; shift 2 ;;
+                    false|0|no|off) credentials_encrypted=false; shift 2 ;;
+                    *) log ERROR "Invalid value for --encrypted-credentials: $2. Use true/false"; exit 1 ;;
+                esac
+                ;;
             --rotation)
                 if [[ -n "$2" && "$2" != -* ]]; then
                     local_rotation_limit="$2"; shift 2

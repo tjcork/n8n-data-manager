@@ -984,7 +984,18 @@ backup() {
     # Export credentials based on storage mode
     if [[ $credentials != 0 ]]; then
         log INFO "Exporting credentials for $credentials_desc storage..."
-        if ! dockExec "$container_id" "n8n export:credentials --all --decrypted --output=$container_credentials" false; then 
+        # Choose export flags based on credentials_encrypted toggle
+        local cred_export_cmd="n8n export:credentials --all --output=$container_credentials"
+        if [[ "${credentials_encrypted:-true}" == "false" ]]; then
+            # Explicitly request decrypted export when user disables encrypted exports
+            cred_export_cmd+=" --decrypted"
+            log WARN "Using decrypted credential export (credentials will be plain JSON)."
+        else
+            # Prefer encrypted export (n8n defaults to encrypted output when using secrets)
+            log DEBUG "Exporting credentials in encrypted form (default)"
+        fi
+
+        if ! dockExec "$container_id" "$cred_export_cmd" false; then 
             # Check if the error is due to no credentials existing
             if docker exec "$container_id" n8n list credentials 2>&1 | grep -q "No credentials found"; then
                 log INFO "No credentials found to backup - this is a clean installation"

@@ -152,7 +152,16 @@ restore() {
     if [[ "$restore_type" == "all" || "$restore_type" == "credentials" ]]; then
         if ! $backup_failed; then
             local cred_output
-            cred_output=$(docker exec "$container_id" n8n export:credentials --all --decrypted --output=$container_pre_credentials 2>&1) || {
+            # Respect credentials_encrypted toggle: export decrypted only when explicitly disabled
+            local cred_export_cmd="n8n export:credentials --all --output=$container_pre_credentials"
+            if [[ "${credentials_encrypted:-true}" == "false" ]]; then
+                cred_export_cmd+=" --decrypted"
+                log DEBUG "Pre-restore backup: exporting credentials decrypted (--decrypted)"
+            else
+                log DEBUG "Pre-restore backup: exporting credentials in encrypted form (default)"
+            fi
+
+            cred_output=$(docker exec "$container_id" sh -lc "$cred_export_cmd" 2>&1) || {
                 if check_no_data "$cred_output"; then
                     log INFO "No existing credentials found - this is a clean installation"
                     no_existing_data=true
@@ -347,6 +356,34 @@ restore() {
             rm -rf "$download_dir"
             if [ -n "$pre_restore_dir" ]; then log WARN "Pre-restore backup kept at: $pre_restore_dir"; fi
             return 1
+        fi
+    fi
+
+    # If credentials were found in the Git repository (legacy), and encrypted-credentials
+    # is enabled (the default), warn the user because repository-stored credentials may be
+    # encrypted or otherwise not importable unless the target n8n instance has the same key.
+    if [[ "$restore_type" == "all" || "$restore_type" == "credentials" ]]; then
+        if [[ -n "$repo_credentials" && "$repo_credentials" == "$download_dir"* ]]; then
+            if [[ "${credentials_encrypted:-true}" == "true" ]]; then
+                log WARN "Found credentials in Git repository, but encrypted credential exports are enabled by default."
+                log WARN "If the repository-stored credentials are encrypted, the target n8n instance may not be able to import them unless it has the same encryption key."
+                if [ -t 0 ]; then
+                    printf "Proceed with importing credentials from Git (may fail if encrypted)? (yes/no) [no]: "
+                    read -r proceed_choice
+                    if [[ "$proceed_choice" != "yes" && "$proceed_choice" != "y" ]]; then
+                        log INFO "Aborting credentials restore as requested by user."
+                        rm -rf "$download_dir"
+                        if [ -n "$pre_restore_dir" ]; then log WARN "Pre-restore backup kept at: $pre_restore_dir"; fi
+                        return 1
+                    fi
+                else
+                    log ERROR "Non-interactive restore cannot safely import repository-stored credentials when encrypted exports are enabled."
+                    log ERROR "Either provide credentials via local secure storage (~/$HOME/n8n-backup/credentials.json), or run with CREDENTIALS_ENCRYPTED=false to force decrypted exports at backup time."
+                    rm -rf "$download_dir"
+                    if [ -n "$pre_restore_dir" ]; then log WARN "Pre-restore backup kept at: $pre_restore_dir"; fi
+                    return 1
+                fi
+            fi
         fi
     fi
     
