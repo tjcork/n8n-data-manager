@@ -2,7 +2,7 @@
 # =========================================================
 # lib/restore.sh - Restore operations for n8n-manager
 # =========================================================
-# All restore-related functions: rollback, restore process, file validation
+# All restore-related functions: restore process, rollback
 
 # Source required modules
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
@@ -152,16 +152,7 @@ restore() {
     if [[ "$restore_type" == "all" || "$restore_type" == "credentials" ]]; then
         if ! $backup_failed; then
             local cred_output
-            # Respect credentials_encrypted toggle: export decrypted only when explicitly disabled
-            local cred_export_cmd="n8n export:credentials --all --output=$container_pre_credentials"
-            if [[ "${credentials_encrypted:-true}" == "false" ]]; then
-                cred_export_cmd+=" --decrypted"
-                log DEBUG "Pre-restore backup: exporting credentials decrypted (--decrypted)"
-            else
-                log DEBUG "Pre-restore backup: exporting credentials in encrypted form (default)"
-            fi
-
-            cred_output=$(docker exec "$container_id" sh -lc "$cred_export_cmd" 2>&1) || {
+            cred_output=$(docker exec "$container_id" n8n export:credentials --all --decrypted --output=$container_pre_credentials 2>&1) || {
                 if check_no_data "$cred_output"; then
                     log INFO "No existing credentials found - this is a clean installation"
                     no_existing_data=true
@@ -358,34 +349,6 @@ restore() {
             return 1
         fi
     fi
-
-    # If credentials were found in the Git repository (legacy), and encrypted-credentials
-    # is enabled (the default), warn the user because repository-stored credentials may be
-    # encrypted or otherwise not importable unless the target n8n instance has the same key.
-    if [[ "$restore_type" == "all" || "$restore_type" == "credentials" ]]; then
-        if [[ -n "$repo_credentials" && "$repo_credentials" == "$download_dir"* ]]; then
-            if [[ "${credentials_encrypted:-true}" == "true" ]]; then
-                log WARN "Found credentials in Git repository, but encrypted credential exports are enabled by default."
-                log WARN "If the repository-stored credentials are encrypted, the target n8n instance may not be able to import them unless it has the same encryption key."
-                if [ -t 0 ]; then
-                    printf "Proceed with importing credentials from Git (may fail if encrypted)? (yes/no) [no]: "
-                    read -r proceed_choice
-                    if [[ "$proceed_choice" != "yes" && "$proceed_choice" != "y" ]]; then
-                        log INFO "Aborting credentials restore as requested by user."
-                        rm -rf "$download_dir"
-                        if [ -n "$pre_restore_dir" ]; then log WARN "Pre-restore backup kept at: $pre_restore_dir"; fi
-                        return 1
-                    fi
-                else
-                    log ERROR "Non-interactive restore cannot safely import repository-stored credentials when encrypted exports are enabled."
-                    log ERROR "Either provide credentials via local secure storage (~/$HOME/n8n-backup/credentials.json), or run with CREDENTIALS_ENCRYPTED=false to force decrypted exports at backup time."
-                    rm -rf "$download_dir"
-                    if [ -n "$pre_restore_dir" ]; then log WARN "Pre-restore backup kept at: $pre_restore_dir"; fi
-                    return 1
-                fi
-            fi
-        fi
-    fi
     
     # Validate files before proceeding
     log INFO "Validating files for import..."
@@ -423,16 +386,46 @@ restore() {
     
     # --- 3. Import Data ---
     log HEADER "Step 3: Importing Data into n8n"
-    
+
     local container_import_workflows="/tmp/import_workflows.json"
     local container_import_credentials="/tmp/import_credentials.json"
-    
+
+    # --- Credentials decryption integration ---
+    local credentials_to_import="$repo_credentials"
+    local decrypt_tmpfile=""
+    if [[ "$restore_type" == "all" || "$restore_type" == "credentials" ]]; then
+        # Only attempt decryption if not a dry run and file is not empty
+        if [ "$is_dry_run" != "true" ] && [ -s "$repo_credentials" ]; then
+            # Check if file appears to be encrypted (has base64 data fields)
+            if jq -e '.[0] | has("data") and (.data | type == "string")' "$repo_credentials" >/dev/null 2>&1; then
+                log INFO "Encrypted credentials detected. Decrypting before import..."
+                decrypt_tmpfile="$(mktemp -t n8n-decrypted-XXXXXXXX.json)"
+                # Prompt for key and decrypt using lib/decrypt.sh
+                source "$(dirname "$0")/../lib/decrypt.sh"
+                check_dependencies
+                local decryption_key
+                read -r -s -p "Enter encryption key for credentials decryption: " decryption_key
+                echo >&2
+                if decrypt_credentials_file "$decryption_key" "$repo_credentials" "$decrypt_tmpfile"; then
+                    log SUCCESS "Credentials decrypted successfully."
+                    credentials_to_import="$decrypt_tmpfile"
+                else
+                    log ERROR "Failed to decrypt credentials. Aborting restore."
+                    rm -f "$decrypt_tmpfile"
+                    rm -rf "$download_dir"
+                    if [ -n "$pre_restore_dir" ]; then log WARN "Pre-restore backup kept at: $pre_restore_dir"; fi
+                    return 1
+                fi
+            fi
+        fi
+    fi
+
     log INFO "Copying files to container..."
     local copy_status="success"
-    
+
     # Copy workflow file if needed
     if [[ "$restore_type" == "all" || "$restore_type" == "workflows" ]]; then
-        if [[ $is_dry_run == true ]]; then
+        if [ "$is_dry_run" = "true" ]; then
             log DRYRUN "Would copy $repo_workflows to ${container_id}:${container_import_workflows}"
         else
             if docker cp "$repo_workflows" "${container_id}:${container_import_workflows}"; then
@@ -443,19 +436,24 @@ restore() {
             fi
         fi
     fi
-    
-    # Copy credentials file if needed
+
+    # Copy credentials file if needed (use decrypted if available)
     if [[ "$restore_type" == "all" || "$restore_type" == "credentials" ]]; then
-        if [[ $is_dry_run == true ]]; then
-            log DRYRUN "Would copy $repo_credentials to ${container_id}:${container_import_credentials}"
+        if [ "$is_dry_run" = "true" ]; then
+            log DRYRUN "Would copy $credentials_to_import to ${container_id}:${container_import_credentials}"
         else
-            if docker cp "$repo_credentials" "${container_id}:${container_import_credentials}"; then
+            if docker cp "$credentials_to_import" "${container_id}:${container_import_credentials}"; then
                 log SUCCESS "Successfully copied credentials.json to container"
             else
                 log ERROR "Failed to copy credentials.json to container."
                 copy_status="failed"
             fi
         fi
+    fi
+
+    # Clean up decrypted temp file if used
+    if [ -n "$decrypt_tmpfile" ]; then
+        rm -f "$decrypt_tmpfile"
     fi
     
     if [ "$copy_status" = "failed" ]; then
@@ -471,7 +469,7 @@ restore() {
     
     # Import workflows if needed
     if [[ "$restore_type" == "all" || "$restore_type" == "workflows" ]]; then
-        if [[ $is_dry_run == true ]]; then
+        if [ "$is_dry_run" = "true" ]; then
             log DRYRUN "Would run: n8n import:workflow --input=$container_import_workflows"
         else
             log INFO "Importing workflows..."
@@ -492,7 +490,7 @@ restore() {
     
     # Import credentials if needed
     if [[ "$restore_type" == "all" || "$restore_type" == "credentials" ]]; then
-        if [[ $is_dry_run == true ]]; then
+        if [ "$is_dry_run" = "true" ]; then
             log DRYRUN "Would run: n8n import:credentials --input=$container_import_credentials"
         else
             log INFO "Importing credentials..."
