@@ -1,3 +1,5 @@
+# Local development environment
+local-dev/
 .windsurfrules
 .windsurf/workflows
 *windsurf/*

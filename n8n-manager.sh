@@ -64,6 +64,16 @@ credentials=""            # empty = unset, 0=disabled, 1=local, 2=remote
 local_backup_path="$HOME/n8n-backup"
 local_rotation_limit="10"
 
+# Track configuration value sources (cli/config/default/interactive)
+workflows_source="unset"
+credentials_source="unset"
+local_backup_path_source="unset"
+local_rotation_limit_source="unset"
+dated_backups_source="unset"
+dry_run_source="unset"
+folder_structure_source="unset"
+credentials_encrypted_source="unset"
+
 # Advanced features
 folder_structure=""            # empty = unset, true/false = explicitly configured
 n8n_base_url=""               # Required if folder_structure=true
@@ -96,37 +106,37 @@ main() {
             --repo) github_repo="$2"; shift 2 ;; 
             --branch) github_branch="$2"; shift 2 ;; 
             --config) config_file="$2"; shift 2 ;; 
-            --dated) dated_backups=true; shift 1 ;;
+            --dated) dated_backups=true; dated_backups_source="cli"; shift 1 ;;
                         --workflows)
                 case "${2,,}" in  # Convert to lowercase
-                    0|disabled) workflows=0; shift 2 ;;
-                    1|local) workflows=1; shift 2 ;;
-                    2|remote) workflows=2; shift 2 ;;
+                    0|disabled) workflows=0; workflows_source="cli"; shift 2 ;;
+                    1|local) workflows=1; workflows_source="cli"; shift 2 ;;
+                    2|remote) workflows=2; workflows_source="cli"; shift 2 ;;
                     *) log ERROR "Invalid workflows value: $2. Must be 0/disabled, 1/local, or 2/remote"
                        exit 1 ;;
                 esac
                 ;;
             --credentials)
                 case "${2,,}" in  # Convert to lowercase
-                    0|disabled) credentials=0; shift 2 ;;
-                    1|local) credentials=1; shift 2 ;;
-                    2|remote) credentials=2; shift 2 ;;
+                    0|disabled) credentials=0; credentials_source="cli"; shift 2 ;;
+                    1|local) credentials=1; credentials_source="cli"; shift 2 ;;
+                    2|remote) credentials=2; credentials_source="cli"; shift 2 ;;
                     *) log ERROR "Invalid credentials value: $2. Must be 0/disabled, 1/local, or 2/remote"
                        exit 1 ;;
                 esac
                 ;;
-            --path) local_backup_path="$2"; shift 2 ;;
+            --path) local_backup_path="$2"; local_backup_path_source="cli"; shift 2 ;;
             --encrypted-credentials)
                 # Enable/disable encrypted credentials export on CLI
                 case "${2,,}" in
-                    true|1|yes|on) credentials_encrypted=true; shift 2 ;;
-                    false|0|no|off) credentials_encrypted=false; shift 2 ;;
+                    true|1|yes|on) credentials_encrypted=true; credentials_encrypted_source="cli"; shift 2 ;;
+                    false|0|no|off) credentials_encrypted=false; credentials_encrypted_source="cli"; shift 2 ;;
                     *) log ERROR "Invalid value for --encrypted-credentials: $2. Use true/false"; exit 1 ;;
                 esac
                 ;;
             --rotation)
                 if [[ -n "$2" && "$2" != -* ]]; then
-                    local_rotation_limit="$2"; shift 2
+                    local_rotation_limit="$2"; local_rotation_limit_source="cli"; shift 2
                 else
                     echo -e "${YELLOW}[INFO]${NC}   Valid rotation options:" >&2
                     echo -e "${YELLOW}[INFO]${NC}   • 0          - No rotation (overwrite current backup)" >&2
@@ -145,10 +155,10 @@ main() {
                     exit 1
                 fi
                 ;;
-            --dry-run) dry_run=true; shift 1 ;; 
+            --dry-run) dry_run=true; dry_run_source="cli"; shift 1 ;;
             --verbose) verbose=true; shift 1 ;; 
             --log-file) log_file="$2"; shift 2 ;; 
-            --folder-structure) folder_structure=true; shift 1 ;;
+            --folder-structure) folder_structure=true; folder_structure_source="cli"; shift 1 ;;
             --n8n-url) n8n_base_url="$2"; shift 2 ;;
             --n8n-api-key) n8n_api_key="$2"; shift 2 ;;
             --n8n-cred) n8n_session_credential="$2"; shift 2 ;;
@@ -164,6 +174,11 @@ main() {
     log INFO "🚀 Flexible backup storage: local files or Git repository"
     
     check_host_dependencies
+
+    local interactive_mode=false
+    if [ -t 0 ]; then
+        interactive_mode=true
+    fi
 
     # Runtime variables are now lowercase and used directly
     log DEBUG "Action: $action, Container: $container, Repo: $github_repo"
@@ -342,8 +357,8 @@ main() {
         fi
         log DEBUG "Container selected: $container"
         
-        # Interactive dated backup prompt (only if not configured or in reconfigure mode)
-        if [[ "$action" == "backup" ]] && ([[ -z "$dated_backups" ]] || [[ "$reconfigure_mode" == "true" ]]); then
+        # Interactive dated backup prompt (only if value originated from defaults or reconfigure mode)
+        if [[ "$action" == "backup" ]] && ([[ "$dated_backups_source" == "default" ]] || [[ "$reconfigure_mode" == "true" ]]); then
              printf "Create a dated backup (in a timestamped subdirectory)? (yes/no) [no]: "
              local confirm_dated
              read -r confirm_dated
@@ -352,34 +367,98 @@ main() {
              else
                  dated_backups=false
              fi
+             dated_backups_source="interactive"
         fi
         log DEBUG "Use Dated Backup: $dated_backups"
         
         # Interactive storage configuration using new selection functions
-        if [[ "$action" == "backup" ]] && ([[ "$workflows" == "0" && "$credentials" == "0" ]] || [[ "$reconfigure_mode" == "true" ]]); then
-            log INFO "Configure backup storage locations:"
-            
-            # Use new interactive storage selection functions
-            select_workflows_storage
-            select_credentials_storage
-            
-            log INFO "Selected: Workflows=($workflows) $(format_storage_value $workflows), Credentials=($credentials) $(format_storage_value $credentials)"
-            
-            # Ask for local backup directory if local storage is needed
-            if [[ "$workflows" == "1" || "$credentials" == "1" ]]; then
-                printf "Local backup directory [~/n8n-backup]: "
+        if [[ "$action" == "backup" ]]; then
+            local prompt_workflows=false
+            local prompt_credentials=false
+
+            if [[ "$reconfigure_mode" == "true" ]]; then
+                prompt_workflows=true
+                prompt_credentials=true
+            else
+                if [[ "$workflows_source" == "default" ]]; then
+                    prompt_workflows=true
+                fi
+                if [[ "$credentials_source" == "default" ]]; then
+                    prompt_credentials=true
+                fi
+            fi
+
+            if [[ "$prompt_workflows" == true ]] || [[ "$prompt_credentials" == true ]]; then
+                log INFO "Configure backup storage locations:"
+            fi
+
+            if [[ "$prompt_workflows" == true ]]; then
+                select_workflows_storage
+                workflows_source="interactive"
+            fi
+
+            if [[ "$prompt_credentials" == true ]]; then
+                select_credentials_storage
+                credentials_source="interactive"
+            fi
+
+            if [[ "$prompt_workflows" == true ]] || [[ "$prompt_credentials" == true ]]; then
+                log INFO "Selected: Workflows=($workflows) $(format_storage_value $workflows), Credentials=($credentials) $(format_storage_value $credentials)"
+            fi
+
+            local needs_local_path_prompt=false
+            local has_local_storage=false
+            if [[ "$workflows" == "1" ]] || [[ "$credentials" == "1" ]]; then
+                has_local_storage=true
+            fi
+
+            if [[ "$has_local_storage" == true ]]; then
+                if [[ "$reconfigure_mode" == "true" ]]; then
+                    needs_local_path_prompt=true
+                elif [[ "$local_backup_path_source" == "default" ]] || [[ "$prompt_workflows" == true ]] || [[ "$prompt_credentials" == true ]]; then
+                    needs_local_path_prompt=true
+                fi
+            fi
+
+            if [[ "$needs_local_path_prompt" == true ]]; then
+                printf "Local backup directory [${local_backup_path}]: "
                 read -r custom_backup_path
                 if [[ -n "$custom_backup_path" ]]; then
                     if [[ "$custom_backup_path" =~ ^~ ]]; then
                         custom_backup_path="${custom_backup_path/#\~/$HOME}"
                     fi
                     local_backup_path="$custom_backup_path"
-                    log INFO "Using custom local backup directory: $local_backup_path"
+                    local_backup_path_source="interactive"
+                    log INFO "Using local backup directory: $local_backup_path"
                 fi
             fi
-            
+
+            local needs_rotation_prompt=false
+            if [[ "$has_local_storage" == true ]]; then
+                if [[ "$reconfigure_mode" == "true" ]]; then
+                    needs_rotation_prompt=true
+                elif [[ "$local_rotation_limit_source" == "default" ]]; then
+                    needs_rotation_prompt=true
+                fi
+            fi
+
+            if [[ "$needs_rotation_prompt" == true ]]; then
+                while true; do
+                    printf "Local backup rotation limit [${local_rotation_limit}]: "
+                    read -r rotation_input
+                    rotation_input=${rotation_input:-$local_rotation_limit}
+                    if [[ "$rotation_input" =~ ^(0|[0-9]+|unlimited)$ ]]; then
+                        local_rotation_limit="$rotation_input"
+                        local_rotation_limit_source="interactive"
+                        break
+                    else
+                        log ERROR "Invalid rotation value. Use 0, a positive number, or 'unlimited'."
+                    fi
+                done
+            fi
+
             # Ask about n8n folder structure if workflows are going to remote
-            if [[ "$workflows" == "2" ]] && ([[ -z "$folder_structure" ]] || [[ "$reconfigure_mode" == "true" ]]); then
+            if [[ "$workflows" == "2" ]] && ([[ "$folder_structure_source" == "default" ]] || [[ "$reconfigure_mode" == "true" ]] || [[ "$prompt_workflows" == true ]]); then
                 printf "Create n8n folder structure in Git repository? (yes/no) [no]: "
                 read -r folder_structure_choice
                 if [[ "$folder_structure_choice" == "yes" || "$folder_structure_choice" == "y" ]]; then
@@ -387,6 +466,7 @@ main() {
                 else
                     folder_structure=false
                 fi
+                folder_structure_source="interactive"
 
                 if [[ "$folder_structure" == "true" ]]; then
                     if [[ -z "$n8n_base_url" ]] || [[ "$reconfigure_mode" == "true" ]]; then
@@ -439,8 +519,85 @@ main() {
                     log INFO "✅ Folder structure enabled with n8n API integration"
                 fi
             fi
+
+            # Decide whether to prompt for encrypted credential exports
+            if [[ "$credentials" != "0" ]]; then
+                local prompt_encryption=false
+                if [[ "$reconfigure_mode" == "true" ]]; then
+                    prompt_encryption=true
+                elif [[ "$credentials_encrypted_source" == "default" ]]; then
+                    prompt_encryption=true
+                fi
+
+                if [[ "$prompt_encryption" == true ]]; then
+                    local encryption_default_label="yes"
+                    if [[ "${credentials_encrypted:-true}" == "false" ]]; then
+                        encryption_default_label="no"
+                    fi
+
+                    printf "Export credentials encrypted by n8n (recommended)? (yes/no) [%s]: " "$encryption_default_label"
+                    local encryption_choice
+                    read -r encryption_choice
+                    encryption_choice=${encryption_choice:-$encryption_default_label}
+
+                    if [[ "$encryption_choice" == "yes" || "$encryption_choice" == "y" ]]; then
+                        credentials_encrypted=true
+                        credentials_encrypted_source="interactive"
+                    else
+                        # Warn user about decrypted exports
+                        log WARN "⚠️  Credentials will be exported in decrypted form. Keep the files extremely secure."
+                        if [[ "$credentials" == "2" ]]; then
+                            printf "Decrypted credentials would be stored in Git history. Continue? (yes/no) [no]: "
+                            local decrypted_confirm
+                            read -r decrypted_confirm
+                            decrypted_confirm=${decrypted_confirm:-no}
+                            if [[ "$decrypted_confirm" == "yes" || "$decrypted_confirm" == "y" ]]; then
+                                credentials_encrypted=false
+                                credentials_encrypted_source="interactive"
+                                log WARN "⚠️  Proceeding with decrypted credentials for Git storage."
+                            else
+                                credentials_encrypted=true
+                                credentials_encrypted_source="interactive"
+                                log INFO "Using encrypted credential export instead."
+                            fi
+                        else
+                            credentials_encrypted=false
+                            credentials_encrypted_source="interactive"
+                        fi
+                    fi
+                fi
+            fi
         fi
-        
+
+        # Recalculate derived GitHub requirement after interactive choices
+        if [[ "$action" == "restore" ]]; then
+            needs_github=true
+        else
+            if [[ "$workflows" == "2" ]] || [[ "$credentials" == "2" ]]; then
+                needs_github=true
+            else
+                needs_github=false
+            fi
+        fi
+
+        # Offer dry-run selection when value came from defaults or during reconfigure
+        if [[ "$dry_run_source" == "default" ]] || [[ "$reconfigure_mode" == "true" ]]; then
+            local dry_run_default_label="no"
+            if [[ "$dry_run" == "true" ]]; then
+                dry_run_default_label="yes"
+            fi
+            printf "Run in dry-run mode (no changes will be made)? (yes/no) [%s]: " "$dry_run_default_label"
+            local dry_run_choice
+            read -r dry_run_choice
+            dry_run_choice=${dry_run_choice:-$dry_run_default_label}
+            if [[ "$dry_run_choice" == "yes" || "$dry_run_choice" == "y" ]]; then
+                dry_run=true
+            else
+                dry_run=false
+            fi
+            dry_run_source="interactive"
+        fi
+
         # Get GitHub config only if needed
         if [[ $needs_github == true ]]; then
             get_github_config "$reconfigure_mode"
@@ -467,7 +624,7 @@ main() {
             needs_local_path=true 
         fi
         
-    log DEBUG "Storage settings - workflows: ($workflows) $(format_storage_value $workflows), credentials: ($credentials) $(format_storage_value $credentials), needs_github: $needs_github"
+        log DEBUG "Storage settings - workflows: ($workflows) $(format_storage_value $workflows), credentials: ($credentials) $(format_storage_value $credentials), needs_github: $needs_github"
     fi
 
     # Normalize boolean values after configuration and prompts
@@ -497,7 +654,8 @@ main() {
     fi
 
     if [[ $dry_run_flag == true ]]; then
-        log WARN "DRY RUN MODE ENABLED"
+        local dry_run_origin="${dry_run_source:-unknown}"
+        log WARN "DRY RUN MODE ENABLED (source: $dry_run_origin)"
     fi
 
     if [[ $verbose_flag == true ]]; then
@@ -537,6 +695,29 @@ main() {
         backup)
             if backup "$container" "$github_token" "$github_repo" "$github_branch" "$dated_backups_flag" "$dry_run_flag" "$workflows" "$credentials" "$folder_structure_enabled" "$local_backup_path" "$local_rotation_limit"; then
                 log SUCCESS "Backup operation completed successfully."
+                if [[ "$interactive_mode" == true ]] && [[ "$dry_run_flag" != true ]] && [[ "$credentials" != "0" ]] && [[ "${credentials_encrypted:-true}" != "false" ]]; then
+                    local encryption_key
+                    encryption_key=$(docker exec "$container" printenv N8N_ENCRYPTION_KEY 2>/dev/null | tr -d '\r') || encryption_key=""
+
+                    if [[ -z "$encryption_key" ]]; then
+                        local config_json
+                        config_json=$(docker exec "$container" cat /home/node/.n8n/config 2>/dev/null || true)
+                        if [[ -z "$config_json" ]]; then
+                            config_json=$(docker exec "$container" cat /home/node/.n8n/config.json 2>/dev/null || true)
+                        fi
+                        if [[ -n "$config_json" ]]; then
+                            encryption_key=$(printf '%s' "$config_json" | jq -r '.encryptionKey // empty' 2>/dev/null | tr -d '\r') || encryption_key=""
+                        fi
+                    fi
+
+                    if [[ -n "$encryption_key" ]]; then
+                        printf "\n%s[SECURITY]%s Encryption key for exported credentials: %s\n" "$YELLOW" "$NC" "$encryption_key"
+                        printf "%sIMPORTANT:%s Store this key securely; it's required to decrypt your credential backups.\n" "$RED" "$NC"
+                        printf "%sNote:%s The key is also captured in the local .env backup if environment exports are enabled.\n\n" "$BLUE" "$NC"
+                    else
+                        log WARN "Unable to retrieve N8N_ENCRYPTION_KEY from container. If the key was generated automatically, run 'docker exec -it $container cat /home/node/.n8n/config' and copy the 'encryptionKey' value."
+                    fi
+                fi
             else
                 log ERROR "Backup operation failed."
                 exit 1

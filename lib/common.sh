@@ -15,6 +15,16 @@ DEBUG_TRACE=${DEBUG_TRACE:-false} # Set to true for trace debugging
 git_commit_name=""
 git_commit_email=""
 
+# Ensure configuration source trackers exist even when scripts source this module standalone
+: "${workflows_source:=unset}"
+: "${credentials_source:=unset}"
+: "${local_backup_path_source:=unset}"
+: "${local_rotation_limit_source:=unset}"
+: "${dated_backups_source:=unset}"
+: "${dry_run_source:=unset}"
+: "${folder_structure_source:=unset}"
+: "${credentials_encrypted_source:=unset}"
+
 # ANSI colors for better UI (using printf for robustness)
 printf -v RED     '\033[0;31m'
 printf -v GREEN   '\033[0;32m'
@@ -274,13 +284,17 @@ load_config() {
             
             if [[ "$workflows_config" == "0" || "$workflows_config" == "disabled" ]]; then
                 workflows=0
+                workflows_source="config"
             elif [[ "$workflows_config" == "1" || "$workflows_config" == "local" ]]; then
                 workflows=1
+                workflows_source="config"
             elif [[ "$workflows_config" == "2" || "$workflows_config" == "remote" ]]; then
                 workflows=2
+                workflows_source="config"
             else
                 log WARN "Invalid WORKFLOWS value in config: '$workflows_config'. Must be 0/disabled, 1/local, or 2/remote. Using default: 1 (local)"
                 workflows=1
+                workflows_source="default"
             fi
         fi
         
@@ -292,13 +306,17 @@ load_config() {
             
             if [[ "$credentials_config" == "0" || "$credentials_config" == "disabled" ]]; then
                 credentials=0
+                credentials_source="config"
             elif [[ "$credentials_config" == "1" || "$credentials_config" == "local" ]]; then
                 credentials=1
+                credentials_source="config"
             elif [[ "$credentials_config" == "2" || "$credentials_config" == "remote" ]]; then
                 credentials=2
+                credentials_source="config"
             else
                 log WARN "Invalid CREDENTIALS value in config: '$credentials_config'. Must be 0/disabled, 1/local, or 2/remote. Using default: 1 (local)"
                 credentials=1
+                credentials_source="default"
             fi
         fi
         
@@ -310,11 +328,14 @@ load_config() {
             dated_backups_config=$(echo "$dated_backups_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
             if [[ "$dated_backups_config" == "true" || "$dated_backups_config" == "1" || "$dated_backups_config" == "yes" || "$dated_backups_config" == "on" ]]; then
                 dated_backups=true
+                dated_backups_source="config"
             elif [[ "$dated_backups_config" == "false" || "$dated_backups_config" == "0" || "$dated_backups_config" == "no" || "$dated_backups_config" == "off" ]]; then
                 dated_backups=false
+                dated_backups_source="config"
             else
                 log WARN "Invalid DATED_BACKUPS value in config: '$dated_backups_config'. Must be true/false. Using default: false"
                 dated_backups=false
+                dated_backups_source="default"
             fi
         fi
         
@@ -325,11 +346,14 @@ load_config() {
             folder_structure_config=$(echo "$folder_structure_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
             if [[ "$folder_structure_config" == "true" || "$folder_structure_config" == "1" || "$folder_structure_config" == "yes" || "$folder_structure_config" == "on" ]]; then
                 folder_structure=true
+                folder_structure_source="config"
             elif [[ "$folder_structure_config" == "false" || "$folder_structure_config" == "0" || "$folder_structure_config" == "no" || "$folder_structure_config" == "off" ]]; then
                 folder_structure=false
+                folder_structure_source="config"
             else
                 log WARN "Invalid FOLDER_STRUCTURE value in config: '$folder_structure_config'. Must be true/false. Using default: false"
                 folder_structure=false
+                folder_structure_source="default"
             fi
         fi
         
@@ -355,35 +379,43 @@ load_config() {
             dry_run_config=$(echo "$dry_run_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
             if [[ "$dry_run_config" == "true" || "$dry_run_config" == "1" || "$dry_run_config" == "yes" || "$dry_run_config" == "on" ]]; then
                 dry_run=true
+                dry_run_source="config"
             elif [[ "$dry_run_config" == "false" || "$dry_run_config" == "0" || "$dry_run_config" == "no" || "$dry_run_config" == "off" ]]; then
                 dry_run=false
+                dry_run_source="config"
             else
                 log WARN "Invalid DRY_RUN value in config: '$dry_run_config'. Must be true/false. Using default: false"
                 dry_run=false
+                dry_run_source="default"
             fi
+        fi
 
-            # Handle credentials_encrypted boolean config
-            if [[ -z "$credentials_encrypted" && -n "${CREDENTIALS_ENCRYPTED:-}" ]]; then
-                local credentials_encrypted_config="$CREDENTIALS_ENCRYPTED"
-                credentials_encrypted_config=$(echo "$credentials_encrypted_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
-                if [[ "$credentials_encrypted_config" == "true" || "$credentials_encrypted_config" == "1" || "$credentials_encrypted_config" == "yes" || "$credentials_encrypted_config" == "on" ]]; then
-                    credentials_encrypted=true
-                elif [[ "$credentials_encrypted_config" == "false" || "$credentials_encrypted_config" == "0" || "$credentials_encrypted_config" == "no" || "$credentials_encrypted_config" == "off" ]]; then
-                    credentials_encrypted=false
-                else
-                    log WARN "Invalid CREDENTIALS_ENCRYPTED value in config: '$credentials_encrypted_config'. Must be true/false. Using default: true"
-                    credentials_encrypted=true
-                fi
+        # Handle credentials_encrypted boolean config
+        if [[ -z "$credentials_encrypted" && -n "${CREDENTIALS_ENCRYPTED:-}" ]]; then
+            local credentials_encrypted_config="$CREDENTIALS_ENCRYPTED"
+            credentials_encrypted_config=$(echo "$credentials_encrypted_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
+            if [[ "$credentials_encrypted_config" == "true" || "$credentials_encrypted_config" == "1" || "$credentials_encrypted_config" == "yes" || "$credentials_encrypted_config" == "on" ]]; then
+                credentials_encrypted=true
+                credentials_encrypted_source="config"
+            elif [[ "$credentials_encrypted_config" == "false" || "$credentials_encrypted_config" == "0" || "$credentials_encrypted_config" == "no" || "$credentials_encrypted_config" == "off" ]]; then
+                credentials_encrypted=false
+                credentials_encrypted_source="config"
+            else
+                log WARN "Invalid CREDENTIALS_ENCRYPTED value in config: '$credentials_encrypted_config'. Must be true/false. Using default: true"
+                credentials_encrypted=true
+                credentials_encrypted_source="default"
             fi
         fi
         
         # === PATH SETTINGS ===
         if [[ -z "$local_backup_path" && -n "${LOCAL_BACKUP_PATH:-}" ]]; then
             local_backup_path="$LOCAL_BACKUP_PATH"
+            local_backup_path_source="config"
         fi
         
         if [[ -z "$local_rotation_limit" && -n "${LOCAL_ROTATION_LIMIT:-}" ]]; then
             local_rotation_limit="$LOCAL_ROTATION_LIMIT"
+            local_rotation_limit_source="config"
         fi
         
         # === N8N API SETTINGS ===
@@ -441,19 +473,31 @@ load_config() {
     # Set storage defaults
     if [[ -z "$workflows" ]]; then
         workflows=1  # Default to local
+        if [[ "$workflows_source" == "unset" ]]; then
+            workflows_source="default"
+        fi
     fi
     
     if [[ -z "$credentials" ]]; then
         credentials=1  # Default to local
+        if [[ "$credentials_source" == "unset" ]]; then
+            credentials_source="default"
+        fi
     fi
     
     # Set path defaults
     if [[ -z "$local_backup_path" ]]; then
         local_backup_path="$HOME/n8n-backup"
+        if [[ "$local_backup_path_source" == "unset" ]]; then
+            local_backup_path_source="default"
+        fi
     fi
     
     if [[ -z "$local_rotation_limit" ]]; then
         local_rotation_limit="10"
+        if [[ "$local_rotation_limit_source" == "unset" ]]; then
+            local_rotation_limit_source="default"
+        fi
     fi
     
     # Set other defaults
@@ -483,10 +527,34 @@ load_config() {
         git_commit_email="backup@${base_domain}"
     fi
 
+    if [[ -z "$dated_backups" ]]; then
+        dated_backups=false
+        if [[ "$dated_backups_source" == "unset" ]]; then
+            dated_backups_source="default"
+        fi
+    fi
+
+    if [[ -z "$dry_run" ]]; then
+        dry_run=false
+        if [[ "$dry_run_source" == "unset" ]]; then
+            dry_run_source="default"
+        fi
+    fi
+
+    if [[ -z "$folder_structure" ]]; then
+        folder_structure=false
+        if [[ "$folder_structure_source" == "unset" ]]; then
+            folder_structure_source="default"
+        fi
+    fi
+
     # Default to encrypted credential exports unless explicitly disabled
     if [[ -z "${credentials_encrypted:-}" ]]; then
         credentials_encrypted=true
         log DEBUG "Defaulting to encrypted credential exports: credentials_encrypted=true"
+        if [[ "$credentials_encrypted_source" == "unset" ]]; then
+            credentials_encrypted_source="default"
+        fi
     fi
     
     # === LOG FILE VALIDATION ===

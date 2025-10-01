@@ -15,7 +15,7 @@ create_folder_structure_with_git() {
     local target_dir="$2"
     local git_dir="$3"
     local is_dry_run="$4"
-    local container_credentials_path="/tmp/credentials.json"
+    local container_credentials_path="${5:-/tmp/credentials.json}"
     
     if [[ -z "$container_id" || -z "$target_dir" || -z "$git_dir" ]]; then
         log "ERROR" "Missing required parameters for folder structure creation"
@@ -862,7 +862,11 @@ backup() {
         log WARN "⚠️  Workflows will be stored in Git repository"
     fi
     if [[ $credentials == 2 ]]; then
-        log WARN "⚠️  SECURITY WARNING: Credentials will be pushed to Git repository!"
+        if [[ "${credentials_encrypted:-true}" == "false" ]]; then
+            log WARN "⚠️  SECURITY WARNING: Decrypted credentials will be pushed to Git repository!"
+        else
+            log INFO "🔐 Credentials will be pushed to Git repository encrypted by n8n."
+        fi
     fi
     if [[ $workflows == 1 && $credentials == 1 ]]; then
         log INFO "🔒 Security: Both workflows and credentials stored locally only"
@@ -905,43 +909,58 @@ backup() {
     log DEBUG "Created temporary directory: $tmp_dir"
 
     local container_workflows="/tmp/workflows.json"
-    local container_credentials="/tmp/credentials.json"
+    local container_credentials_encrypted="/tmp/credentials.json"
+    local container_credentials_decrypted="/tmp/credentials.decrypted.json"
     local container_env="/tmp/.env"
 
-    # --- Git Setup First --- 
-    log INFO "Preparing Git repository for backup..."
-    local git_repo_url="https://${github_token}@github.com/${github_repo}.git"
-
-    log DEBUG "Initializing Git repository in $tmp_dir"
-    if ! git -C "$tmp_dir" init -q; then log ERROR "Git init failed."; rm -rf "$tmp_dir"; return 1; fi
-    log DEBUG "Adding remote 'origin' with URL $git_repo_url"
-    if ! git -C "$tmp_dir" remote add origin "$git_repo_url" 2>/dev/null; then
-        log WARN "Git remote 'origin' already exists. Setting URL..."
-        if ! git -C "$tmp_dir" remote set-url origin "$git_repo_url"; then log ERROR "Git set-url failed."; rm -rf "$tmp_dir"; return 1; fi
+    local container_credentials_backup_path="$container_credentials_encrypted"
+    if [[ "${credentials_encrypted:-true}" == "false" ]]; then
+        container_credentials_backup_path="$container_credentials_decrypted"
     fi
 
-    log INFO "Configuring Git user identity for commit..."
-    if ! git -C "$tmp_dir" config user.email "n8n-backup-script@localhost"; then log ERROR "Failed to set Git user email."; rm -rf "$tmp_dir"; return 1; fi
-    if ! git -C "$tmp_dir" config user.name "n8n Backup Script"; then log ERROR "Failed to set Git user name."; rm -rf "$tmp_dir"; return 1; fi
+    local git_required=false
+    if [[ $workflows == 2 ]] || [[ $credentials == 2 ]] || [[ "$folder_structure_enabled" == true ]]; then
+        git_required=true
+    fi
 
-    log INFO "Fetching remote branch '$branch'..."
-    local branch_exists=true
-    if ! git -C "$tmp_dir" fetch --depth 1 origin "$branch" 2>/dev/null; then
-        log WARN "Branch '$branch' not found on remote or repo is empty. Will create branch."
-        branch_exists=false
-        if ! $is_dry_run; then
-             if ! git -C "$tmp_dir" checkout -b "$branch"; then log ERROR "Git checkout -b failed."; rm -rf "$tmp_dir"; return 1; fi
-        else
-             log DRYRUN "Would create and checkout new branch '$branch'"
+    if [[ "$git_required" == true ]]; then
+        # --- Git Setup First --- 
+        log INFO "Preparing Git repository for backup..."
+        local git_repo_url="https://${github_token}@github.com/${github_repo}.git"
+
+        log DEBUG "Initializing Git repository in $tmp_dir"
+        if ! git -C "$tmp_dir" init -q; then log ERROR "Git init failed."; rm -rf "$tmp_dir"; return 1; fi
+        log DEBUG "Adding remote 'origin' with URL $git_repo_url"
+        if ! git -C "$tmp_dir" remote add origin "$git_repo_url" 2>/dev/null; then
+            log WARN "Git remote 'origin' already exists. Setting URL..."
+            if ! git -C "$tmp_dir" remote set-url origin "$git_repo_url"; then log ERROR "Git set-url failed."; rm -rf "$tmp_dir"; return 1; fi
         fi
+
+        log INFO "Configuring Git user identity for commit..."
+        if ! git -C "$tmp_dir" config user.email "n8n-backup-script@localhost"; then log ERROR "Failed to set Git user email."; rm -rf "$tmp_dir"; return 1; fi
+        if ! git -C "$tmp_dir" config user.name "n8n Backup Script"; then log ERROR "Failed to set Git user name."; rm -rf "$tmp_dir"; return 1; fi
+
+        log INFO "Fetching remote branch '$branch'..."
+        local branch_exists=true
+        if ! git -C "$tmp_dir" fetch --depth 1 origin "$branch" 2>/dev/null; then
+            log WARN "Branch '$branch' not found on remote or repo is empty. Will create branch."
+            branch_exists=false
+            if ! $is_dry_run; then
+                 if ! git -C "$tmp_dir" checkout -b "$branch"; then log ERROR "Git checkout -b failed."; rm -rf "$tmp_dir"; return 1; fi
+            else
+                 log DRYRUN "Would create and checkout new branch '$branch'"
+            fi
+        else
+            if ! $is_dry_run; then
+                if ! git -C "$tmp_dir" checkout "$branch"; then log ERROR "Git checkout failed."; rm -rf "$tmp_dir"; return 1; fi
+            else
+                log DRYRUN "Would checkout existing branch '$branch'"
+            fi
+        fi
+        log SUCCESS "Git repository initialized and branch '$branch' checked out."
     else
-        if ! $is_dry_run; then
-            if ! git -C "$tmp_dir" checkout "$branch"; then log ERROR "Git checkout failed."; rm -rf "$tmp_dir"; return 1; fi
-        else
-            log DRYRUN "Would checkout existing branch '$branch'"
-        fi
+        log DEBUG "Skipping Git repository preparation (local-only backup)."
     fi
-    log SUCCESS "Git repository initialized and branch '$branch' checked out."
 
     # --- Export Data --- 
     log INFO "Exporting data from n8n container..."
@@ -981,28 +1000,59 @@ backup() {
         log INFO "Workflows backup disabled - skipping workflow export"
     fi
 
-    # Export credentials based on storage mode
-    if [[ $credentials != 0 ]]; then
-        log INFO "Exporting credentials for $credentials_desc storage..."
-        # Choose export flags based on credentials_encrypted toggle
-        local cred_export_cmd="n8n export:credentials --all --output=$container_credentials"
-        if [[ "${credentials_encrypted:-true}" == "false" ]]; then
-            # Explicitly request decrypted export when user disables encrypted exports
-            cred_export_cmd+=" --decrypted"
-            log WARN "Using decrypted credential export (credentials will be plain JSON)."
-        else
-            # Prefer encrypted export (n8n defaults to encrypted output when using secrets)
-            log DEBUG "Exporting credentials in encrypted form (default)"
+    # Export credentials based on storage mode and folder structure requirements
+    local need_decrypted_credentials=false
+    if [[ "$folder_structure_enabled" == true ]]; then
+        need_decrypted_credentials=true
+    fi
+    if [[ "${credentials_encrypted:-true}" == "false" ]]; then
+        need_decrypted_credentials=true
+    fi
+
+    local decrypted_export_done=false
+    local credentials_available=true
+
+    if [[ $credentials != 0 || $need_decrypted_credentials == true ]]; then
+        if $need_decrypted_credentials; then
+            local decrypted_cmd="n8n export:credentials --all --decrypted --output=$container_credentials_decrypted"
+            if [[ "${credentials_encrypted:-true}" == "false" ]]; then
+                log INFO "Exporting credentials in decrypted form (per configuration)..."
+            else
+                log DEBUG "Exporting temporary decrypted credentials for folder structure authentication..."
+            fi
+
+            if ! dockExec "$container_id" "$decrypted_cmd" false; then
+                local credentials_list_output
+                credentials_list_output=$(docker exec "$container_id" n8n list credentials 2>&1 || true)
+                if printf '%s' "$credentials_list_output" | grep -q "No credentials found"; then
+                    log INFO "No credentials found to backup - this is a clean installation"
+                    no_data_found=true
+                    credentials_available=false
+                else
+                    log ERROR "Failed to export decrypted credentials"
+                    export_failed=true
+                fi
+            else
+                decrypted_export_done=true
+                log DEBUG "Decrypted credentials export stored at $container_credentials_decrypted"
+            fi
         fi
 
-        if ! dockExec "$container_id" "$cred_export_cmd" false; then 
-            # Check if the error is due to no credentials existing
-            if docker exec "$container_id" n8n list credentials 2>&1 | grep -q "No credentials found"; then
-                log INFO "No credentials found to backup - this is a clean installation"
-                no_data_found=true
-            else
-                log ERROR "Failed to export credentials"
-                export_failed=true
+        if [[ $credentials != 0 && "${credentials_encrypted:-true}" != "false" && $credentials_available == true ]]; then
+            log INFO "Exporting credentials for $credentials_desc storage..."
+            log DEBUG "Exporting credentials in encrypted form (default)"
+            local cred_export_cmd="n8n export:credentials --all --output=$container_credentials_encrypted"
+            if ! dockExec "$container_id" "$cred_export_cmd" false; then
+                local credentials_list_output
+                credentials_list_output=$(docker exec "$container_id" n8n list credentials 2>&1 || true)
+                if printf '%s' "$credentials_list_output" | grep -q "No credentials found"; then
+                    log INFO "No credentials found to backup - this is a clean installation"
+                    no_data_found=true
+                    credentials_available=false
+                else
+                    log ERROR "Failed to export credentials"
+                    export_failed=true
+                fi
             fi
         fi
     else
@@ -1025,7 +1075,7 @@ backup() {
     log HEADER "Storing Data Locally"
     
     # Handle workflows locally if requested
-    if [[ $workflows == 1 ]] && docker exec "$container_id" test -f "$container_workflows"; then
+    if [[ $workflows == 1 ]] && docker exec "$container_id" sh -c "[ -f '$container_workflows' ]"; then
         log INFO "Saving workflows to local storage..."
         if $is_dry_run; then
             log DRYRUN "Would copy workflows from container to local storage: $local_workflows_file"
@@ -1067,7 +1117,7 @@ backup() {
     fi
     
     # Handle credentials locally  
-    if [[ $credentials == 1 ]] && docker exec "$container_id" test -f "$container_credentials"; then
+    if [[ $credentials == 1 ]] && docker exec "$container_id" sh -c "[ -f '$container_credentials_backup_path' ]"; then
         log INFO "Saving credentials to local secure storage..."
         if $is_dry_run; then
             log DRYRUN "Would copy credentials from container to local storage: $local_credentials_file"
@@ -1082,7 +1132,7 @@ backup() {
             fi
 
             # Copy new credentials from container to local storage
-            if docker cp "${container_id}:${container_credentials}" "$local_credentials_file"; then
+            if docker cp "${container_id}:${container_credentials_backup_path}" "$local_credentials_file"; then
                 if ! prettify_json_file "$local_credentials_file" "$is_dry_run"; then
                     log WARN "Failed to prettify local credentials JSON"
                 fi
@@ -1108,7 +1158,7 @@ backup() {
     fi
     
     # Store .env file in local storage (always local for security)
-    if docker exec "$container_id" test -f "$container_env"; then
+    if docker exec "$container_id" sh -c "[ -f '$container_env' ]"; then
         log INFO "Backing up environment variables..."
         if $is_dry_run; then
             log DRYRUN "Would copy .env from container to local storage: $local_env_file"
@@ -1184,7 +1234,7 @@ backup() {
                     log DEBUG "Creating n8n folder structure using API..."
                     log DEBUG "n8n URL: $n8n_base_url"
                     export container_id="$container_id"
-                    if create_folder_structure_with_git "$container_id" "$target_dir" "$tmp_dir" "$is_dry_run"; then
+                    if create_folder_structure_with_git "$container_id" "$target_dir" "$tmp_dir" "$is_dry_run" "$container_credentials_decrypted"; then
                         folder_structure_committed=true
                         log SUCCESS "n8n folder structure created in repository with individual commits"
                     else
@@ -1197,7 +1247,7 @@ backup() {
                 if $is_dry_run; then
                     log DRYRUN "Would copy workflows to Git repository: $target_dir/workflows.json"
                 else
-                    if docker exec "$container_id" test -f "$container_workflows"; then
+                    if docker exec "$container_id" sh -c "[ -f '$container_workflows' ]"; then
                         if docker cp "${container_id}:${container_workflows}" "$target_dir/workflows.json"; then
                             if ! prettify_json_file "$target_dir/workflows.json" "$is_dry_run"; then
                                 log WARN "Failed to prettify workflows JSON in Git repository"
@@ -1207,7 +1257,7 @@ backup() {
                             log ERROR "Failed to copy workflows to Git repository"
                             copy_status="failed"
                         fi
-                    elif docker exec "$container_id" test -d "$container_workflows_dir"; then
+                    elif docker exec "$container_id" sh -c "[ -d '$container_workflows_dir' ]"; then
                         if docker cp "${container_id}:${container_workflows_dir}/." "$target_dir/"; then
                             prettify_json_tree "$target_dir" "$is_dry_run" || log WARN "Completed workflow JSON prettify with warnings in Git repository"
                             log SUCCESS "Workflows copied to Git repository from directory export"
@@ -1224,12 +1274,16 @@ backup() {
         fi
 
         # Handle credentials for remote storage
-        if [[ $credentials == 2 ]] && docker exec "$container_id" test -f "$container_credentials"; then
-            log WARN "⚠️ Storing credentials in Git repository (less secure option)"
+    if [[ $credentials == 2 ]] && docker exec "$container_id" sh -c "[ -f '$container_credentials_backup_path' ]"; then
+            if [[ "${credentials_encrypted:-true}" == "false" ]]; then
+                log WARN "⚠️  Storing decrypted credentials in Git repository (high risk)."
+            else
+                log INFO "🔐 Storing encrypted credentials in Git repository."
+            fi
             if $is_dry_run; then
                 log DRYRUN "Would copy credentials to Git repository: $target_dir/credentials.json"
             else
-                if docker cp "${container_id}:${container_credentials}" "$target_dir/credentials.json"; then
+                if docker cp "${container_id}:${container_credentials_backup_path}" "$target_dir/credentials.json"; then
                     if ! prettify_json_file "$target_dir/credentials.json" "$is_dry_run"; then
                         log WARN "Failed to prettify credentials JSON in Git repository"
                     fi
@@ -1307,9 +1361,8 @@ EOF
             rm -rf "$tmp_dir"
             return 1
         fi
-
         log INFO "Cleaning up temporary files in container..."
-        dockExec "$container_id" "rm -f $container_workflows $container_credentials $container_env" "$is_dry_run" || log WARN "Could not clean up temporary files in container."
+        dockExec "$container_id" "rm -f $container_workflows $container_credentials_encrypted $container_credentials_decrypted $container_env" "$is_dry_run" || log WARN "Could not clean up temporary files in container."
 
         # Git Commit and Push
         if [[ $credentials == 2 ]]; then

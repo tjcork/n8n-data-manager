@@ -477,12 +477,6 @@ select_credentials_storage() {
     echo "0) Disabled - Skip credential backup entirely"
     echo "1) Local Storage - Store credentials in secure local storage (RECOMMENDED)"
     echo "2) Remote Storage - Store credentials in Git repository (NOT RECOMMENDED - security risk)"
-    echo
-    echo "⚠️  WARNING: Option 2 stores sensitive credentials in Git repository!"
-    echo "   This may expose passwords, API keys, and other secrets."
-    echo "   Only use option 2 if you understand and accept this security risk."
-    echo
-    
     local choice
     while true; do
         printf "Select credentials backup mode (0-2) [default: 1]: "

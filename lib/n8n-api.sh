@@ -78,7 +78,7 @@ ensure_n8n_session_credentials() {
     local credential_payload=""
 
     if [[ -n "$container_credentials_path" ]]; then
-        if docker exec "$container_id" test -f "$container_credentials_path" 2>/dev/null; then
+        if docker exec "$container_id" sh -c "[ -f '$container_credentials_path' ]" 2>/dev/null; then
             if ! credential_payload=$(docker exec "$container_id" sh -c "cat $container_credentials_path" 2>/dev/null); then
                 credential_payload=""
             fi
