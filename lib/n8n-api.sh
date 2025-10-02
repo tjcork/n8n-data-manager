@@ -505,6 +505,7 @@ fetch_workflows_with_folders() {
 
 # Global variable to store session cookie file path
 N8N_SESSION_COOKIE_FILE="/tmp/n8n-session-cookies-$$"
+N8N_API_AUTH_MODE=""
 
 # Authenticate with n8n and get session cookie for REST API endpoints
 authenticate_n8n_session() {
@@ -725,4 +726,143 @@ cleanup_n8n_session() {
         rm -f "$N8N_SESSION_COOKIE_FILE"
         log DEBUG "Cleaned up session cookie file"
     fi
+}
+
+prepare_n8n_api_auth() {
+    local container_id="$1"
+    local container_credentials_path="${2:-}"
+
+    if [[ -z "$n8n_base_url" ]]; then
+        log ERROR "n8n base URL is required to interact with the API."
+        return 1
+    fi
+
+    n8n_base_url="${n8n_base_url%/}"
+
+    if [[ -n "${n8n_api_key:-}" ]]; then
+        N8N_API_AUTH_MODE="api_key"
+        return 0
+    fi
+
+    if [[ -z "${n8n_session_credential:-}" ]]; then
+        log ERROR "n8n session credential name not configured; cannot authenticate without API key."
+        return 1
+    fi
+
+    if ! ensure_n8n_session_credentials "$container_id" "$n8n_session_credential" "$container_credentials_path"; then
+        return 1
+    fi
+
+    if ! authenticate_n8n_session "$n8n_base_url" "$n8n_email" "$n8n_password" 1; then
+        log ERROR "Unable to authenticate with n8n session for folder structure operations."
+        return 1
+    fi
+
+    N8N_API_AUTH_MODE="session"
+    return 0
+}
+
+finalize_n8n_api_auth() {
+    if [[ "$N8N_API_AUTH_MODE" == "session" ]]; then
+        cleanup_n8n_session
+    fi
+    N8N_API_AUTH_MODE=""
+}
+
+n8n_api_request() {
+    local method="$1"
+    local endpoint="$2"
+    local payload="${3:-}"
+
+    if [[ -z "$N8N_API_AUTH_MODE" ]]; then
+        log ERROR "n8n API authentication not initialised."
+        return 1
+    fi
+
+    local url="$n8n_base_url/rest${endpoint}"
+    local -a curl_args=("-sS" "-w" "\n%{http_code}" "-X" "$method" "$url")
+
+    if [[ "$method" != "GET" ]]; then
+        curl_args+=("-H" "Content-Type: application/json")
+    fi
+
+    curl_args+=("-H" "Accept: application/json")
+
+    if [[ "$N8N_API_AUTH_MODE" == "api_key" ]]; then
+        curl_args+=("-H" "X-N8N-API-KEY: $n8n_api_key")
+    else
+        curl_args+=("-b" "$N8N_SESSION_COOKIE_FILE")
+    fi
+
+    if [[ -n "$payload" ]]; then
+        curl_args+=("-d" "$payload")
+    fi
+
+    local response
+    if ! response=$(curl "${curl_args[@]}" 2>/dev/null); then
+        log ERROR "Failed to contact n8n API endpoint $endpoint"
+        return 1
+    fi
+
+    local http_status
+    http_status=$(echo "$response" | tail -n1)
+    local body
+    body=$(echo "$response" | head -n -1)
+
+    if [[ "$http_status" != 2* && "$http_status" != 3* ]]; then
+        log ERROR "n8n API request failed (HTTP $http_status) for $endpoint"
+        if [[ -n "$body" ]]; then
+            log DEBUG "n8n API response: $body"
+        fi
+        return 1
+    fi
+
+    printf '%s' "$body"
+    return 0
+}
+
+n8n_api_get_projects() {
+    n8n_api_request "GET" "/projects?skip=0&take=250"
+}
+
+n8n_api_get_folders() {
+    n8n_api_request "GET" "/folders?skip=0&take=1000"
+}
+
+n8n_api_create_folder() {
+    local name="$1"
+    local project_id="$2"
+    local parent_id="${3:-}"
+
+    local payload
+    payload=$(jq -n \
+        --arg name "$name" \
+        --arg projectId "$project_id" \
+        --arg parentId "${parent_id:-}" \
+        '{
+            name: $name,
+            projectId: $projectId,
+            parentFolderId: (if $parentId == "" then null else $parentId end)
+        }')
+
+    n8n_api_request "POST" "/folders" "$payload"
+}
+
+n8n_api_update_workflow_assignment() {
+    local workflow_id="$1"
+    local project_id="$2"
+    local folder_id="${3:-}"
+
+    local payload
+    payload=$(jq -n \
+        --arg projectId "$project_id" \
+        --arg folderId "${folder_id:-}" \
+        '{
+            homeProject: {
+                id: $projectId
+            },
+            parentFolderId: (if $folderId == "" then null else $folderId end)
+        }')
+
+    n8n_api_request "PATCH" "/workflows/$workflow_id" "$payload"
 }

@@ -413,6 +413,7 @@ organize_workflows_by_folders() {
     local unchanged_count=0
     local deleted_count=0
     local commit_fail=false
+    local -a manifest_entries=()
 
     local git_prefix="${git_dir%/}/"
     local -A expected_files=()
@@ -434,6 +435,17 @@ organize_workflows_by_folders() {
         relative_path=$(jq -r --arg id "$workflow_id" '.workflowsById[$id].relativePath // empty' "$mapping_file" 2>/dev/null)
         local display_path
         display_path=$(jq -r --arg id "$workflow_id" '.workflowsById[$id].displayPath // empty' "$mapping_file" 2>/dev/null)
+        local project_id
+        project_id=$(jq -r --arg id "$workflow_id" '.workflowsById[$id].project.id // empty' "$mapping_file" 2>/dev/null)
+        local project_name
+        project_name=$(jq -r --arg id "$workflow_id" '.workflowsById[$id].project.name // empty' "$mapping_file" 2>/dev/null)
+        local project_slug
+        project_slug=$(jq -r --arg id "$workflow_id" '.workflowsById[$id].project.slug // empty' "$mapping_file" 2>/dev/null)
+        local folder_segments_json
+        folder_segments_json=$(jq -c --arg id "$workflow_id" '.workflowsById[$id].folders // []' "$mapping_file" 2>/dev/null)
+        if [[ -z "$folder_segments_json" || "$folder_segments_json" == "null" ]]; then
+            folder_segments_json="[]"
+        fi
 
         if [[ -z "$relative_path" || "$relative_path" == "null" ]]; then
             relative_path="Personal"
@@ -455,6 +467,32 @@ organize_workflows_by_folders() {
 
         local generated_filename
         generated_filename=$(generate_unique_workflow_filename "$destination_dir" "$workflow_id" "$workflow_name" filename_registry)
+
+        local manifest_entry
+        manifest_entry=$(jq -n \
+            --arg id "$workflow_id" \
+            --arg name "$workflow_name" \
+            --arg filename "$generated_filename" \
+            --arg relative "$relative_path" \
+            --arg display "$display_path" \
+            --arg projectId "$project_id" \
+            --arg projectName "$project_name" \
+            --arg projectSlug "$project_slug" \
+            --argjson folders "$folder_segments_json" \
+            '{
+                id: $id,
+                name: $name,
+                filename: $filename,
+                relativePath: $relative,
+                displayPath: $display,
+                project: {
+                    id: $projectId,
+                    name: $projectName,
+                    slug: $projectSlug
+                },
+                folders: $folders
+            }')
+        manifest_entries+=("$manifest_entry")
 
         if [[ -z "$generated_filename" ]]; then
             log WARN "Skipping workflow ${workflow_id:-unknown} - unable to determine filename"
@@ -546,6 +584,29 @@ organize_workflows_by_folders() {
         [[ "$empty_dir" == "$target_dir" ]] && continue
         rmdir "$empty_dir" 2>/dev/null || true
     done < <(find "$target_dir" -type d -empty -not -path "*/.git/*" -print0)
+
+    local manifest_json
+    if ((${#manifest_entries[@]} > 0)); then
+        manifest_json=$(printf '%s\n' "${manifest_entries[@]}" | jq -s '.')
+    else
+        manifest_json='[]'
+    fi
+
+    local manifest_payload
+    manifest_payload=$(jq -n \
+        --arg exportedAt "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+        --arg source "n8n-data-manager" \
+        --argjson workflows "$manifest_json" \
+        '{
+            version: 1,
+            exportedAt: $exportedAt,
+            source: $source,
+            workflows: $workflows
+        }')
+
+    local manifest_path="$target_dir/.n8n-folder-structure.json"
+    printf '%s\n' "$manifest_payload" > "$manifest_path"
+    log DEBUG "Written folder structure manifest: $manifest_path"
 
     log INFO "Workflow organization summary:"
     log INFO "  • New workflows: $new_count"
@@ -824,6 +885,12 @@ backup() {
     local folder_structure_enabled=${9:-false} # Boolean: true if folder structure enabled
     local local_backup_path="${10:-$HOME/n8n-backup}"  # Local backup path (default: ~/n8n-backup)
     local local_rotation_limit="${11:-10}"  # Local rotation limit (default: 10)
+    local credentials_folder_name="${12:-.credentials}"
+
+    credentials_folder_name="${credentials_folder_name%/}"
+    if [[ -z "$credentials_folder_name" ]]; then
+        credentials_folder_name=".credentials"
+    fi
     
     # Make container_id globally available for API functions
     export container_id="$container_id"
@@ -1280,11 +1347,13 @@ backup() {
             else
                 log INFO "🔐 Storing encrypted credentials in Git repository."
             fi
+            local credentials_git_dir="$target_dir/$credentials_folder_name"
+            local credentials_git_path="$credentials_git_dir/credentials.json"
             if $is_dry_run; then
-                log DRYRUN "Would copy credentials to Git repository: $target_dir/credentials.json"
+                log DRYRUN "Would copy credentials to Git repository: $credentials_git_path"
             else
-                if docker cp "${container_id}:${container_credentials_backup_path}" "$target_dir/credentials.json"; then
-                    if ! prettify_json_file "$target_dir/credentials.json" "$is_dry_run"; then
+                if mkdir -p "$credentials_git_dir" && docker cp "${container_id}:${container_credentials_backup_path}" "$credentials_git_path"; then
+                    if ! prettify_json_file "$credentials_git_path" "$is_dry_run"; then
                         log WARN "Failed to prettify credentials JSON in Git repository"
                     fi
                     log SUCCESS "Credentials copied to Git repository"
@@ -1417,7 +1486,7 @@ EOF
                     local files_added=0
                     # Find all workflow JSON files and add them
                     find . -name "*.json" -type f | while read -r json_file; do
-                        if [[ "$json_file" != "./credentials.json" ]]; then
+                        if [[ "$json_file" != "./$credentials_folder_name/credentials.json" ]]; then
                             log DEBUG "Adding workflow file: $json_file"
                             git add "$json_file"
                             files_added=$((files_added + 1))
@@ -1435,9 +1504,9 @@ EOF
                 fi
                 
                 # Handle credentials separately if needed
-                if [[ $credentials == 2 ]] && [ -f "credentials.json" ]; then
+                if [[ $credentials == 2 ]] && [ -f "$credentials_folder_name/credentials.json" ]; then
                     log DEBUG "Adding credentials file to Git"
-                    if ! git add credentials.json; then
+                    if ! git add "$credentials_folder_name/credentials.json"; then
                         log ERROR "Git add failed for credentials file"
                         cd - > /dev/null || true
                         rm -rf "$tmp_dir"

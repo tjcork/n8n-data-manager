@@ -15,6 +15,9 @@ DEBUG_TRACE=${DEBUG_TRACE:-false} # Set to true for trace debugging
 git_commit_name=""
 git_commit_email=""
 
+# Default location for storing credentials inside Git repositories
+: "${credentials_folder_name:=.credentials}"
+
 # Ensure configuration source trackers exist even when scripts source this module standalone
 : "${workflows_source:=unset}"
 : "${credentials_source:=unset}"
@@ -404,6 +407,20 @@ load_config() {
                 log WARN "Invalid CREDENTIALS_ENCRYPTED value in config: '$credentials_encrypted_config'. Must be true/false. Using default: true"
                 credentials_encrypted=true
                 credentials_encrypted_source="default"
+            fi
+        fi
+
+        # Handle alternate credentials folder name for Git backups/restores
+        if [[ -n "${CREDENTIALS_FOLDER_NAME:-}" ]]; then
+            local credentials_folder_config="$CREDENTIALS_FOLDER_NAME"
+            credentials_folder_config=$(echo "$credentials_folder_config" | tr -d '"\047' | xargs)
+            credentials_folder_config="${credentials_folder_config%%/}"
+            if [[ -z "$credentials_folder_config" ]]; then
+                log WARN "CREDENTIALS_FOLDER_NAME in config is empty after normalization. Using default: .credentials"
+                credentials_folder_name=".credentials"
+            else
+                credentials_folder_name="$credentials_folder_config"
+                log DEBUG "Using configured credentials folder: $credentials_folder_name"
             fi
         fi
         

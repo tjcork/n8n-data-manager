@@ -200,7 +200,7 @@ n8n-manager.sh \
 3.  **Git Prep:** Clones or fetches the specified branch into a temporary directory.
 4.  **Export:** Executes `n8n export:workflow` and `n8n export:credentials` inside the container.
 5.  **Environment:** Captures `N8N_` environment variables from the container.
-6.  **Copy:** Copies exported `workflows.json`, `credentials.json`, and `.env` files to the temporary Git directory (optionally into a dated subdirectory).
+6.  **Copy:** Copies exported `workflows.json`, `.env`, and (when enabled) the credentials file into the temporary Git directory. Remote credentials are written to the configurable credentials folder (default: `.credentials/credentials.json`), while `workflows.json` remains at the repository root unless folder-structured exports are enabled.
 7.  **Commit:** Commits the changes with a descriptive message including the n8n version and timestamp.
 8.  **Push:** Pushes the commit to the specified GitHub repository and branch.
 9.  **Cleanup:** Removes temporary files and directories.
@@ -212,7 +212,7 @@ n8n-manager.sh \
 3.  **Confirmation:** Prompts the user for confirmation in interactive mode.
 4.  **Pre-Restore Backup:** Exports current workflows and credentials from the container to a temporary local directory (for rollback).
 5.  **Fetch:** Clones the specified branch from the GitHub repository.
-6.  **Copy to Container:** Copies the `workflows.json` and/or `credentials.json` from the cloned repo to the container.
+6.  **Copy to Container:** Copies the `workflows.json` and/or credentials file (from the configured folder, default `.credentials/credentials.json`) from the cloned repo to the container.
 7.  **Import:** Executes `n8n import:workflow` and/or `n8n import:credentials` inside the container.
 8.  **Cleanup:** Removes temporary files and directories.
 9.  **Rollback (on failure):** If any step after the pre-restore backup fails, the script attempts to import the backed-up data back into n8n.

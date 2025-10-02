@@ -85,6 +85,11 @@ n8n_password=""               # Optional - for session auth
 # Logging and misc
 log_file=""                # Custom log file path
 restore_type="all"            # all|workflows|credentials
+restore_workflows_mode=""     # 0=skip, 1=local, 2=remote Git
+restore_credentials_mode=""   # 0=skip, 1=local, 2=remote Git
+restore_folder_structure_preference="" # true/false preference for applying folder manifest
+restore_folder_structure_preference_source="unset"
+credentials_folder_name="${credentials_folder_name:-.credentials}" # default credentials folder for remote storage
 config_file=""                # Custom config file path
 
 # Load all modules
@@ -185,10 +190,43 @@ main() {
     log DEBUG "Branch: $github_branch, Workflows: ($workflows) $(format_storage_value $workflows), Credentials: ($credentials) $(format_storage_value $credentials)"
     log DEBUG "Local Path: $local_backup_path, Rotation: $local_rotation_limit"
     
+    if [[ "$action" == "restore" ]]; then
+        case "$restore_type" in
+            workflows)
+                restore_workflows_mode=${restore_workflows_mode:-2}
+                restore_credentials_mode=${restore_credentials_mode:-0}
+                ;;
+            credentials)
+                restore_workflows_mode=${restore_workflows_mode:-0}
+                restore_credentials_mode=${restore_credentials_mode:-1}
+                ;;
+            all|*)
+                restore_workflows_mode=${restore_workflows_mode:-2}
+                restore_credentials_mode=${restore_credentials_mode:-1}
+                ;;
+        esac
+
+        if [[ -z "$restore_folder_structure_preference" ]]; then
+            if [[ "$folder_structure" == "true" ]]; then
+                restore_folder_structure_preference="true"
+                restore_folder_structure_preference_source="${folder_structure_source:-config}"
+            else
+                restore_folder_structure_preference="false"
+                restore_folder_structure_preference_source="${folder_structure_source:-default}"
+            fi
+        fi
+    fi
+
     # Calculate if GitHub access is needed
     needs_github=false
-    if [[ "$action" == "restore" ]] || [[ "$workflows" == "2" ]] || [[ "$credentials" == "2" ]]; then 
-        needs_github=true 
+    if [[ "$action" == "restore" ]]; then
+        if [[ "${restore_workflows_mode:-0}" == "2" ]] || [[ "${restore_credentials_mode:-0}" == "2" ]]; then
+            needs_github=true
+        fi
+    else
+        if [[ "$workflows" == "2" ]] || [[ "$credentials" == "2" ]]; then
+            needs_github=true
+        fi
     fi
 
     # Set intelligent defaults for backup (only if not already configured)
@@ -608,12 +646,21 @@ main() {
             github_branch="main"
         fi
         
-        # Interactive restore type selection
-        if [[ "$action" == "restore" ]] && ([[ "$restore_type" == "all" ]] || [[ "$reconfigure_mode" == "true" ]]); then
+        if [[ "$action" == "restore" ]]; then
+            RESTORE_APPLY_FOLDER_STRUCTURE="${restore_folder_structure_preference:-false}"
+            RESTORE_APPLY_FOLDER_STRUCTURE_SOURCE="${restore_folder_structure_preference_source:-default}"
             select_restore_type
             restore_type="$SELECTED_RESTORE_TYPE"
-        elif [[ "$action" == "restore" ]]; then
-             log INFO "Using restore type: $restore_type"
+            restore_workflows_mode="$RESTORE_WORKFLOWS_MODE"
+            restore_credentials_mode="$RESTORE_CREDENTIALS_MODE"
+            restore_folder_structure_preference="$RESTORE_APPLY_FOLDER_STRUCTURE"
+            restore_folder_structure_preference_source="$RESTORE_APPLY_FOLDER_STRUCTURE_SOURCE"
+
+            if [[ "$restore_workflows_mode" == "2" || "$restore_credentials_mode" == "2" ]]; then
+                needs_github=true
+            else
+                needs_github=false
+            fi
         fi
         
         # Derive convenience flags from numeric storage settings (avoid repeated comparisons)
@@ -693,17 +740,25 @@ main() {
     log INFO "Starting action: $action"
     case "$action" in
         backup)
-            if backup "$container" "$github_token" "$github_repo" "$github_branch" "$dated_backups_flag" "$dry_run_flag" "$workflows" "$credentials" "$folder_structure_enabled" "$local_backup_path" "$local_rotation_limit"; then
+            if backup "$container" "$github_token" "$github_repo" "$github_branch" "$dated_backups_flag" "$dry_run_flag" "$workflows" "$credentials" "$folder_structure_enabled" "$local_backup_path" "$local_rotation_limit" "$credentials_folder_name"; then
                 log SUCCESS "Backup operation completed successfully."
                 if [[ "$interactive_mode" == true ]] && [[ "$dry_run_flag" != true ]] && [[ "$credentials" != "0" ]] && [[ "${credentials_encrypted:-true}" != "false" ]]; then
-                    local encryption_key
-                    encryption_key=$(docker exec "$container" printenv N8N_ENCRYPTION_KEY 2>/dev/null | tr -d '\r') || encryption_key=""
+                    local encryption_key=""
+                    if encryption_key=$(docker exec "$container" sh -c 'printenv N8N_ENCRYPTION_KEY' 2>/dev/null | tr -d '\r'); then
+                        :
+                    else
+                        encryption_key=""
+                    fi
 
                     if [[ -z "$encryption_key" ]]; then
-                        local config_json
-                        config_json=$(docker exec "$container" cat /home/node/.n8n/config 2>/dev/null || true)
+                        local config_json=""
+                        if ! config_json=$(docker exec "$container" sh -c 'cat /home/node/.n8n/config' 2>/dev/null); then
+                            config_json=""
+                        fi
                         if [[ -z "$config_json" ]]; then
-                            config_json=$(docker exec "$container" cat /home/node/.n8n/config.json 2>/dev/null || true)
+                            if ! config_json=$(docker exec "$container" sh -c 'cat /home/node/.n8n/config.json' 2>/dev/null); then
+                                config_json=""
+                            fi
                         fi
                         if [[ -n "$config_json" ]]; then
                             encryption_key=$(printf '%s' "$config_json" | jq -r '.encryptionKey // empty' 2>/dev/null | tr -d '\r') || encryption_key=""
@@ -715,7 +770,7 @@ main() {
                         printf "%sIMPORTANT:%s Store this key securely; it's required to decrypt your credential backups.\n" "$RED" "$NC"
                         printf "%sNote:%s The key is also captured in the local .env backup if environment exports are enabled.\n\n" "$BLUE" "$NC"
                     else
-                        log WARN "Unable to retrieve N8N_ENCRYPTION_KEY from container. If the key was generated automatically, run 'docker exec -it $container cat /home/node/.n8n/config' and copy the 'encryptionKey' value."
+                        log WARN "Unable to retrieve N8N_ENCRYPTION_KEY from container. If the key was generated automatically, run 'docker exec -it $container sh -c "cat /home/node/.n8n/config"' (or the .json variant) and copy the 'encryptionKey' value."
                     fi
                 fi
             else
@@ -724,7 +779,7 @@ main() {
             fi
             ;;
         restore)
-            if restore "$container" "$github_token" "$github_repo" "$github_branch" "$restore_type" "$dry_run_flag"; then
+          if restore "$container" "$github_token" "$github_repo" "$github_branch" "${restore_workflows_mode:-2}" "${restore_credentials_mode:-1}" "${restore_folder_structure_preference:-false}" "$dry_run_flag" "$credentials_folder_name"; then
                  log SUCCESS "Restore operation completed successfully."
             else
                  log ERROR "Restore operation failed."

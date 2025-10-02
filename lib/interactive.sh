@@ -292,48 +292,91 @@ select_action() {
 }
 
 select_restore_type() {
-    log HEADER "Choose Restore Type"
-    
-    # Check credential availability for better UX
+    log HEADER "Choose Restore Components"
+
     local local_backup_dir="$HOME/n8n-backup"
+    local local_workflows_file="$local_backup_dir/workflows.json"
     local local_credentials_file="$local_backup_dir/credentials.json"
-    local has_local_creds=false
-    local has_git_creds=false
-    
-    if [ -f "$local_credentials_file" ] && [ -s "$local_credentials_file" ]; then
-        has_local_creds=true
-    fi
-    
-    # Note: We can't check Git credentials here since we haven't downloaded the repo yet
-    # This will be handled during the restore process
-    
-    echo "1) All (Workflows & Credentials)"
-    if $has_local_creds; then
-        echo "   📄 Workflows from Git repository + 🔒 Credentials from local secure storage"
+
+    local workflows_default="${RESTORE_WORKFLOWS_MODE:-${restore_workflows_mode:-2}}"
+    local credentials_default="${RESTORE_CREDENTIALS_MODE:-${restore_credentials_mode:-1}}"
+    local workflows_choice=""
+    local credentials_choice=""
+
+    while true; do
+        echo "Workflows restore mode:"
+        echo "0) Disabled - Skip workflow restore"
+        echo "1) Local Storage - Restore from local backup ($local_workflows_file)"
+        echo "2) Remote Storage - Restore from Git repository"
+        printf "\nSelect workflows restore mode (0-2) [default: %s]: " "$workflows_default"
+        read -r workflows_choice
+        workflows_choice=${workflows_choice:-$workflows_default}
+        case "$workflows_choice" in
+            0|1|2) : ;; 
+            *) log ERROR "Invalid option. Please enter 0, 1, or 2."; continue ;;
+        esac
+
+        echo
+        echo "Credentials restore mode:"
+        echo "0) Disabled - Skip credential restore"
+        echo "1) Local Secure Storage - Restore from local backup ($local_credentials_file)"
+        echo "2) Remote Storage - Restore from Git repository (legacy)"
+        printf "\nSelect credentials restore mode (0-2) [default: %s]: " "$credentials_default"
+        read -r credentials_choice
+        credentials_choice=${credentials_choice:-$credentials_default}
+        case "$credentials_choice" in
+            0|1|2) : ;;
+            *) log ERROR "Invalid option. Please enter 0, 1, or 2."; echo; continue ;;
+        esac
+
+        if [[ "$workflows_choice" == "0" && "$credentials_choice" == "0" ]]; then
+            log WARN "At least one component must be selected for restore."
+            echo
+            continue
+        fi
+
+        break
+    done
+
+    RESTORE_WORKFLOWS_MODE="$workflows_choice"
+    RESTORE_CREDENTIALS_MODE="$credentials_choice"
+
+    if [[ "$RESTORE_WORKFLOWS_MODE" != "0" && "$RESTORE_CREDENTIALS_MODE" != "0" ]]; then
+        SELECTED_RESTORE_TYPE="all"
+    elif [[ "$RESTORE_WORKFLOWS_MODE" != "0" ]]; then
+        SELECTED_RESTORE_TYPE="workflows"
     else
-        echo "   📄 Workflows from Git repository + 🔒 Credentials from available source"
-    fi
-    echo "2) Workflows Only"
-    echo "   📄 Workflows from Git repository (credentials unchanged)"
-    echo "3) Credentials Only"
-    if $has_local_creds; then
-        echo "   🔒 Credentials from local secure storage (workflows unchanged)"
-    else
-        echo "   🔒 Credentials from available source (workflows unchanged)"
+        SELECTED_RESTORE_TYPE="credentials"
     fi
 
-    local choice
-    while true; do
-        printf "\nSelect an option (1-3) [default: 1]: "
-        read -r choice
-        choice=${choice:-1}
-        case "$choice" in
-            1) SELECTED_RESTORE_TYPE="all"; return ;; 
-            2) SELECTED_RESTORE_TYPE="workflows"; return ;; 
-            3) SELECTED_RESTORE_TYPE="credentials"; return ;; 
-            *) log ERROR "Invalid option. Please select 1, 2, or 3." ;; 
-        esac
-    done
+    if [[ "$RESTORE_WORKFLOWS_MODE" == "2" ]]; then
+        local folder_default_label="no"
+        if [[ "${RESTORE_APPLY_FOLDER_STRUCTURE:-false}" == "true" ]]; then
+            folder_default_label="yes"
+        fi
+
+        local folder_pref_source="${RESTORE_APPLY_FOLDER_STRUCTURE_SOURCE:-default}"
+        if [[ "$folder_pref_source" == "config" || "$folder_pref_source" == "cli" ]]; then
+            log INFO "Folder structure preference inherited (${RESTORE_APPLY_FOLDER_STRUCTURE})"
+        else
+            printf "\nApply n8n folder structure manifest if available? (yes/no) [%s]: " "$folder_default_label"
+            local folder_choice
+            read -r folder_choice
+            folder_choice=${folder_choice:-$folder_default_label}
+            if [[ "$folder_choice" == "yes" || "$folder_choice" == "y" ]]; then
+                RESTORE_APPLY_FOLDER_STRUCTURE="true"
+                RESTORE_APPLY_FOLDER_STRUCTURE_SOURCE="interactive"
+            else
+                RESTORE_APPLY_FOLDER_STRUCTURE="false"
+                RESTORE_APPLY_FOLDER_STRUCTURE_SOURCE="interactive"
+            fi
+        fi
+    else
+        RESTORE_APPLY_FOLDER_STRUCTURE="false"
+        RESTORE_APPLY_FOLDER_STRUCTURE_SOURCE="default"
+    fi
+
+    log INFO "Selected restore configuration: Workflows=($RESTORE_WORKFLOWS_MODE) $(format_storage_value $RESTORE_WORKFLOWS_MODE), Credentials=($RESTORE_CREDENTIALS_MODE) $(format_storage_value $RESTORE_CREDENTIALS_MODE)"
 }
 
 select_credential_source() {
@@ -375,31 +418,41 @@ select_credential_source() {
 }
 
 show_restore_plan() {
-    local restore_type="$1"
+    local restore_scope="$1"
     local github_repo="$2"
     local branch="$3"
-    
+    local workflows_mode="${4:-${RESTORE_WORKFLOWS_MODE:-2}}"
+    local credentials_mode="${5:-${RESTORE_CREDENTIALS_MODE:-1}}"
+
     log HEADER "📋 Restore Plan"
-    log INFO "Repository: $github_repo (branch: $branch)"
-    
-    case "$restore_type" in
+    if [[ -n "$github_repo" ]]; then
+        log INFO "Repository: $github_repo (branch: $branch)"
+    fi
+
+    case "$workflows_mode" in
+        0) log INFO "📄 Workflows: Will remain unchanged" ;;
+        1) log INFO "📄 Workflows: Will be restored from local backup (~/.n8n-backup/workflows.json)" ;;
+        2) log INFO "� Workflows: Will be restored from Git repository" ;;
+    esac
+
+    case "$credentials_mode" in
+        0) log INFO "🔒 Credentials: Will remain unchanged" ;;
+        1) log INFO "🔒 Credentials: Will be restored from local secure storage (~/.n8n-backup/credentials.json)" ;;
+        2) log INFO "� Credentials: Will be restored from Git repository (legacy)" ;;
+    esac
+
+    case "$restore_scope" in
         "all")
-            log INFO "📄 Workflows: Will be restored from Git repository"
-            log INFO "🔒 Credentials: Will be restored from available source (local preferred)"
             log WARN "⚠️  This will REPLACE your current workflows and credentials"
             ;;
         "workflows")
-            log INFO "📄 Workflows: Will be restored from Git repository"
-            log INFO "🔒 Credentials: Will remain unchanged"
             log WARN "⚠️  This will REPLACE your current workflows only"
             ;;
         "credentials")
-            log INFO "📄 Workflows: Will remain unchanged"
-            log INFO "🔒 Credentials: Will be restored from available source (local preferred)"
             log WARN "⚠️  This will REPLACE your current credentials only"
             ;;
     esac
-    
+
     return 0
 }
 

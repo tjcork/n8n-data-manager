@@ -30,7 +30,7 @@ GITHUB_BRANCH="main"
 
 # === BACKUP BEHAVIOR SETTINGS ===
 # Create timestamped backup directories (true/false, defaults to false)
-DATED_BACKUPS=true
+DATED_BACKUPS=false
 
 # Workflows backup mode: 0/disabled, 1/local, or 2/remote
 # Both numeric (0/1/2) and descriptive (disabled/local/remote) values are supported
@@ -55,7 +55,7 @@ LOCAL_ROTATION_LIMIT="10"
 
 # === n8n FOLDER STRUCTURE SETTINGS ===
 # Enable n8n folder structure mirroring in Git (requires n8n API access)
-FOLDER_STRUCTURE=false
+FOLDER_STRUCTURE=true
 
 # n8n instance URL (required if FOLDER_STRUCTURE=true)
 N8N_BASE_URL="http://localhost:5678"
@@ -66,10 +66,6 @@ N8N_API_KEY="n8n_api_1234567890abcdef1234567890abcdef"
 # n8n credential name for session-based login (stored inside n8n credentials)
 # Used when API key is not provided. Example: Basic Auth credential named "N8N REST BACKUP"
 N8N_LOGIN_CREDENTIAL_NAME="N8N REST BACKUP"
-
-# === RESTORE BEHAVIOR SETTINGS ===
-# Default restore type: "all", "workflows", or "credentials" (defaults to 'all')
-RESTORE_TYPE="all"
 
 # === LOGGING SETTINGS ===
 # Enable verbose debug logging (true/false, defaults to false)
