@@ -1536,11 +1536,44 @@ EOF
             git status --short || true
         fi
 
+        # Prepare credentials commit descriptor if needed
+        local credentials_commit_descriptor=""
+        if $credentials_staged; then
+            local credentials_status_line
+            credentials_status_line=$(git diff --cached --name-status -- "$credentials_folder_name/credentials.json" 2>/dev/null | head -n 1)
+            local credentials_status_code=""
+            if [[ -n "$credentials_status_line" ]]; then
+                credentials_status_code="${credentials_status_line%%$'\t'*}"
+            fi
+
+            case "$credentials_status_code" in
+                A)
+                    credentials_commit_descriptor="[new] Credentials"
+                    ;;
+                M)
+                    credentials_commit_descriptor="[updated] Credentials"
+                    ;;
+                D)
+                    credentials_commit_descriptor="[deleted] Credentials"
+                    ;;
+                R*)
+                    credentials_commit_descriptor="[renamed] Credentials"
+                    ;;
+                *)
+                    credentials_commit_descriptor="[updated] Credentials"
+                    ;;
+            esac
+
+            if [[ -z "$credentials_commit_descriptor" ]]; then
+                credentials_commit_descriptor="[updated] Credentials"
+            fi
+        fi
+
         # Generate smart commit message
         local commit_msg
         if [[ $folder_structure_committed == true ]]; then
             if $credentials_staged; then
-                commit_msg="Credentials backup - $(date +"%Y-%m-%d_%H-%M-%S")"
+                commit_msg="$credentials_commit_descriptor"
             else
                 commit_msg="Workflow backup update"
             fi
@@ -1548,20 +1581,24 @@ EOF
             local workflow_changes
             workflow_changes=$(generate_workflow_commit_message "$target_dir" "$is_dry_run")
             if [[ $credentials == 2 ]]; then
-                commit_msg="$workflow_changes + credentials"
+                if [[ -n "$credentials_commit_descriptor" ]]; then
+                    commit_msg="$workflow_changes + $credentials_commit_descriptor"
+                else
+                    commit_msg="$workflow_changes + credentials"
+                fi
             else
                 commit_msg="$workflow_changes"
             fi
         else
             # Only credentials in Git (unlikely but possible)
-            commit_msg="Credentials backup - $(date +"%Y-%m-%d_%H-%M-%S")"
+            if [[ -n "$credentials_commit_descriptor" ]]; then
+                commit_msg="$credentials_commit_descriptor"
+            else
+                commit_msg="Credentials backup - $(date +"%Y-%m-%d_%H-%M-%S")"
+            fi
         fi
         
-        # Add n8n version and backup info
-        local n8n_ver
-        n8n_ver=$(docker exec "$container_id" n8n --version 2>/dev/null | grep -o 'n8n@[0-9.]*' | cut -d'@' -f2 || echo "unknown")
-        commit_msg="$commit_msg (n8n v$n8n_ver)"
-        
+        # Add backup metadata
         if [[ $use_dated_backup == true ]]; then
             commit_msg="$commit_msg [$backup_timestamp]"
         fi
