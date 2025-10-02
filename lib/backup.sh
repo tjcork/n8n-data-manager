@@ -1441,6 +1441,8 @@ EOF
         fi
         log INFO "Adding files to Git repository..."
         
+        local credentials_staged=false
+
         if $is_dry_run; then
             log DRYRUN "Would add workflow folder structure and files to Git index"
             if [[ $credentials == 2 ]]; then
@@ -1512,6 +1514,7 @@ EOF
                         rm -rf "$tmp_dir"
                         return 1
                     fi
+                    credentials_staged=true
                 fi
             fi
             
@@ -1535,7 +1538,13 @@ EOF
 
         # Generate smart commit message
         local commit_msg
-        if [[ $workflows == 2 ]]; then
+        if [[ $folder_structure_committed == true ]]; then
+            if $credentials_staged; then
+                commit_msg="Credentials backup - $(date +"%Y-%m-%d_%H-%M-%S")"
+            else
+                commit_msg="Workflow backup update"
+            fi
+        elif [[ $workflows == 2 ]]; then
             local workflow_changes
             workflow_changes=$(generate_workflow_commit_message "$target_dir" "$is_dry_run")
             if [[ $credentials == 2 ]]; then
@@ -1574,6 +1583,18 @@ EOF
             fi
             
             if $folder_structure_committed; then
+                if ! git diff --cached --quiet; then
+                    if git commit -m "$commit_msg"; then
+                        log SUCCESS "Credentials commit created successfully"
+                    else
+                        log ERROR "Failed to commit credentials backup"
+                        rm -rf "$tmp_dir"
+                        return 1
+                    fi
+                else
+                    log DEBUG "No staged changes after folder-structure commits"
+                fi
+
                 log INFO "Pushing workflow commits to remote repository..."
                 if git push origin "$branch"; then
                     log SUCCESS "✅ Backup pushed to GitHub repository successfully!"
