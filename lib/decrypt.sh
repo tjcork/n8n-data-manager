@@ -21,8 +21,14 @@ readonly SALTED_HEADER="53616c7465645f5f"  # "Salted__" in hex
 
 # Print error message to stderr and exit
 die() {
-    echo "Error: $1" >&2
-    exit "${2:-1}"
+    local message="$1"
+    local code="${2:-1}"
+    echo "Error: $message" >&2
+    if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+        exit "$code"
+    else
+        return "$code"
+    fi
 }
 
 # Check required dependencies
@@ -35,6 +41,7 @@ check_dependencies() {
     
     if [ ${#missing[@]} -gt 0 ]; then
         die "Missing required dependencies: ${missing[*]}" 2
+        return 2
     fi
 }
 
@@ -153,17 +160,24 @@ decrypt_credentials_file() {
     local output_file="$3"
     
     # Validate inputs
-    [ -z "$passphrase" ] && die "Encryption key is required"
-    [ ! -f "$input_file" ] && die "Input file not found: $input_file"
+    if [ -z "$passphrase" ]; then
+        die "Encryption key is required"
+        return 1
+    fi
+    if [ ! -f "$input_file" ]; then
+        die "Input file not found: $input_file"
+        return 1
+    fi
     
     # Create temporary directory
     local tmpdir
     tmpdir=$(mktemp -d 2>/dev/null || mktemp -d -t n8n-decrypt-XXXXXX)
-    trap "rm -rf '$tmpdir'" EXIT
+    trap 'rm -rf "'$tmpdir'"; trap - RETURN' RETURN
     
     # Convert JSON array to line-delimited entries
     if ! jq -c 'if type=="array" then .[] else . end' "$input_file" > "$tmpdir/entries.txt"; then
         die "Failed to parse input JSON file"
+        return 1
     fi
     
     # Process each credential entry
@@ -208,14 +222,17 @@ decrypt_credentials_file() {
     output_json="${output_json}]"
     
     # Write output file
-    echo "$output_json" | jq '.' > "$output_file"
+    printf '%s' "$output_json" | jq '.' > "$output_file"
     
     # Report results
     echo "Decryption complete:" >&2
     echo "  ✓ Decrypted: $success_count" >&2
     echo "  ⊘ Skipped: $skip_count" >&2
-    [ $fail_count -gt 0 ] && echo "  ✗ Failed: $fail_count" >&2
-    
+    if [ $fail_count -gt 0 ]; then
+        echo "  ✗ Failed: $fail_count" >&2
+        return 1
+    fi
+
     return 0
 }
 

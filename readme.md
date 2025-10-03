@@ -21,8 +21,7 @@ This script provides both interactive and non-interactive modes, making it suita
     *   **Standard Backup:** Overwrites the latest backup files on the specified branch.
     *   **Dated Backups (`--dated`):** Creates timestamped subdirectories (e.g., `backup_YYYY-MM-DD_HH-MM-SS/`) for each backup, preserving history.
 *   **Restore Options:**
-    *   **Full Restore:** Restores both workflows and credentials.
-    *   **Selective Restore (`--restore-type`):** Restore only `workflows` or only `credentials`.
+    *   **Selective Restore:** Use `--credentials` to restore only credentials, or `--workflow` to restore only workflows. You can specify either or both flags to control exactly what gets restored.
 *   **Container Compatibility:**
     *   **Alpine Support:** Fully compatible with n8n containers based on Alpine Linux.
     *   **Ubuntu Support:** Works seamlessly with containers based on Ubuntu/Debian.
@@ -106,9 +105,6 @@ DEFAULT_CONTAINER="my-n8n-container"
 # Use Dated Backups by default (Optional, true/false, defaults to false)
 DATED_BACKUPS=true
 
-# Default Restore Type (Optional, all/workflows/credentials, defaults to all)
-RESTORE_TYPE="all"
-
 # Enable Verbose Logging by default (Optional, true/false, defaults to false)
 VERBOSE=false
 
@@ -158,7 +154,7 @@ n8n-manager.sh --action <action> --container <id|name> --token <pat> --repo <use
 
 *   `--branch <branch>`: GitHub branch to use (defaults to `main`).
 *   `--dated`: (Backup only) Create a timestamped subdirectory for the backup.
-*   `--restore-type <type>`: (Restore only) Choose what to restore: `all` (default), `workflows`, or `credentials`.
+*   `--environment <mode>`: Control environment backups (`0` disabled, `1` local, `2` remote Git).
 *   `--dry-run`: Simulate the action without making changes.
 *   `--verbose`: Enable detailed debug logging for troubleshooting.
 *   `--trace`: Enable in-depth script debugging with bash execution trace.
@@ -187,8 +183,7 @@ n8n-manager.sh \
   --container my-n8n-container \
   --token "ghp_YourToken" \
   --repo "myuser/my-n8n-backup" \
-  --branch main \
-  --restore-type workflows
+  --branch main
 ```
 
 ## 🔄 Backup & Restore Process
@@ -199,9 +194,9 @@ n8n-manager.sh \
 2.  **Pre-Checks:** Verifies GitHub token, scopes, and repository access.
 3.  **Git Prep:** Clones or fetches the specified branch into a temporary directory.
 4.  **Export:** Executes `n8n export:workflow` and `n8n export:credentials` inside the container.
-5.  **Environment:** Captures `N8N_` environment variables from the container.
-6.  **Copy:** Copies exported `workflows.json`, `.env`, and (when enabled) the credentials file into the temporary Git directory. Remote credentials are written to the configurable credentials folder (default: `.credentials/credentials.json`), while `workflows.json` remains at the repository root unless folder-structured exports are enabled.
-7.  **Commit:** Commits the changes with a descriptive message including the n8n version and timestamp.
+5.  **Environment (optional):** Captures `N8N_` environment variables when environment backups are enabled.
+6.  **Copy:** Copies the selected artifacts (`workflows.json`, credentials, `.env`) into either local secure storage or the temporary Git directory, respecting each component's storage mode. Remote credentials are written to the configurable credentials folder (default: `.credentials/credentials.json`), while workflow exports remain at the repository root unless folder-structured exports are enabled.
+7.  **Commit:** Commits the staged changes with a descriptive message summarizing the updated artifacts (optionally suffixed with the backup timestamp).
 8.  **Push:** Pushes the commit to the specified GitHub repository and branch.
 9.  **Cleanup:** Removes temporary files and directories.
 

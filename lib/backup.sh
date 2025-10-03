@@ -898,6 +898,7 @@ backup() {
     # Derive storage descriptions for logging
     local workflows_desc="disabled"
     local credentials_desc="disabled"
+    local environment_desc="disabled"
     case "$workflows" in
         0) workflows_desc="disabled" ;;
         1) workflows_desc="local" ;;
@@ -908,18 +909,22 @@ backup() {
         1) credentials_desc="local" ;;
         2) credentials_desc="remote" ;;
     esac
-    
-    # Derive convenience boolean flags for easier logic
-    local workflows_enabled=$( [[ $workflows != 0 ]] && echo true || echo false )
-    local credentials_enabled=$( [[ $credentials != 0 ]] && echo true || echo false )
-    local needs_github=$( [[ $workflows == 2 ]] || [[ $credentials == 2 ]] && echo true || echo false )
-    local needs_local_path=$( [[ $workflows == 1 ]] || [[ $credentials == 1 ]] && echo true || echo false )
-    
-    log HEADER "Performing Backup - Workflows: $workflows_desc, Credentials: $credentials_desc"
+    case "$environment" in
+        0) environment_desc="disabled" ;;
+        1) environment_desc="local" ;;
+        2) environment_desc="remote" ;;
+    esac
+
+    local needs_local_path=false
+    if [[ "$workflows" == "1" || "$credentials" == "1" || "$environment" == "1" ]]; then
+        needs_local_path=true
+    fi
+
+    log HEADER "Performing Backup - Workflows: $workflows_desc, Credentials: $credentials_desc, Environment: $environment_desc"
     if $is_dry_run; then log WARN "DRY RUN MODE ENABLED - NO CHANGES WILL BE MADE"; fi
     
     # Validate that at least one backup type is enabled
-    if [[ $workflows == 0 && $credentials == 0 ]]; then
+    if [[ $workflows == 0 && $credentials == 0 && $environment == 0 ]]; then
         log ERROR "Both workflows and credentials are disabled. Nothing to backup!"
         return 1
     fi
@@ -935,40 +940,50 @@ backup() {
             log INFO "🔐 Credentials will be pushed to Git repository encrypted by n8n."
         fi
     fi
-    if [[ $workflows == 1 && $credentials == 1 ]]; then
+    if [[ $environment == 2 ]]; then
+        log WARN "⚠️  Environment variables will be pushed to Git repository (consider secrets exposure)."
+    fi
+    if [[ $workflows == 1 && $credentials == 1 && $environment != 2 ]]; then
         log INFO "🔒 Security: Both workflows and credentials stored locally only"
     fi
 
     # Setup local backup storage directory with optional timestamping
     local base_backup_dir="$local_backup_path"
     local local_backup_dir="$base_backup_dir"
+    local backup_timestamp=""
     
     # Apply timestamping to local storage if requested
-    if [[ $use_dated_backup == true ]] && [[ $needs_local_path == true ]]; then
-        local backup_timestamp=$(date +"%Y-%m-%d_%H-%M-%S")
-        local_backup_dir="$base_backup_dir/$backup_timestamp"
-        log INFO "📅 Using timestamped local backup directory: $backup_timestamp"
+    if [[ $use_dated_backup == true ]]; then
+        backup_timestamp=$(date +"%Y-%m-%d_%H-%M-%S")
+        if [[ $needs_local_path == true ]]; then
+            local_backup_dir="$base_backup_dir/$backup_timestamp"
+            log INFO "📅 Using timestamped local backup directory: $backup_timestamp"
+        fi
     fi
     
     local local_workflows_file="$local_backup_dir/workflows.json"
     local local_credentials_file="$local_backup_dir/credentials.json"
     local local_env_file="$local_backup_dir/.env"
     
-    if ! $is_dry_run; then
-        if ! mkdir -p "$local_backup_dir"; then
-            log ERROR "Failed to create local backup directory: $local_backup_dir"
-            return 1
+    if [[ $needs_local_path == true ]]; then
+        if ! $is_dry_run; then
+            if ! mkdir -p "$local_backup_dir"; then
+                log ERROR "Failed to create local backup directory: $local_backup_dir"
+                return 1
+            fi
+            chmod 700 "$local_backup_dir" || log WARN "Could not set permissions on local backup directory"
+
+            # Also ensure base directory has proper permissions
+            if [[ "$local_backup_dir" != "$base_backup_dir" ]]; then
+                chmod 700 "$base_backup_dir" || log WARN "Could not set permissions on base backup directory"
+            fi
+
+            log SUCCESS "Local backup directory ready: $local_backup_dir"
+        else
+            log DRYRUN "Would create local backup directory: $local_backup_dir"
         fi
-        chmod 700 "$local_backup_dir" || log WARN "Could not set permissions on local backup directory"
-        
-        # Also ensure base directory has proper permissions
-        if [[ "$local_backup_dir" != "$base_backup_dir" ]]; then
-            chmod 700 "$base_backup_dir" || log WARN "Could not set permissions on base backup directory"
-        fi
-        
-        log SUCCESS "Local backup directory ready: $local_backup_dir"
     else
-        log DRYRUN "Would create local backup directory: $local_backup_dir"
+        log DEBUG "No local storage components selected - skipping local directory preparation"
     fi
 
     local tmp_dir
@@ -979,14 +994,24 @@ backup() {
     local container_credentials_encrypted="/tmp/credentials.json"
     local container_credentials_decrypted="/tmp/credentials.decrypted.json"
     local container_env="/tmp/.env"
+    local environment_exported=false
 
     local container_credentials_backup_path="$container_credentials_encrypted"
     if [[ "${credentials_encrypted:-true}" == "false" ]]; then
         container_credentials_backup_path="$container_credentials_decrypted"
     fi
 
+    local local_workflows_saved=false
+    local local_credentials_saved=false
+    local local_env_saved=false
+    local remote_workflows_saved=false
+    local remote_credentials_saved=false
+    local remote_environment_saved=false
+    local folder_structure_committed=false
+    local environment_git_relative_path=""
+
     local git_required=false
-    if [[ $workflows == 2 ]] || [[ $credentials == 2 ]] || [[ "$folder_structure_enabled" == true ]]; then
+    if [[ $workflows == 2 ]] || [[ $credentials == 2 ]] || [[ $environment == 2 ]] || [[ "$folder_structure_enabled" == true ]]; then
         git_required=true
     fi
 
@@ -1132,14 +1157,28 @@ backup() {
         return 1
     fi
 
-    # Handle environment variables (will be stored locally only - NOT pushed to Git)
-    log INFO "Capturing environment variables for local storage only (NOT pushed to Git)..."
-    if ! dockExec "$container_id" "printenv | grep ^N8N_ > $container_env" false; then
-        log WARN "Could not capture N8N_ environment variables from container."
+    # Handle environment variables depending on configured storage mode
+    if [[ $environment != 0 ]]; then
+        local env_scope="local storage"
+        if [[ $environment == 2 ]]; then
+            env_scope="Git repository backup"
+        fi
+        log INFO "Capturing environment variables for $env_scope..."
+        if dockExec "$container_id" "printenv | grep ^N8N_ > $container_env" false; then
+            environment_exported=true
+        else
+            log WARN "Could not capture N8N_ environment variables from container."
+        fi
+    else
+        log DEBUG "Environment backup disabled - skipping environment capture"
     fi
 
     # --- Process Local Storage ---
-    log HEADER "Storing Data Locally"
+    local performed_local_storage=false
+    if [[ $workflows == 1 || $credentials == 1 || $environment == 1 ]]; then
+        performed_local_storage=true
+        log HEADER "Storing Data Locally"
+    fi
     
     # Handle workflows locally if requested
     if [[ $workflows == 1 ]] && docker exec "$container_id" sh -c "[ -f '$container_workflows' ]"; then
@@ -1164,6 +1203,7 @@ backup() {
                 fi
                 chmod 600 "$local_workflows_file" || log WARN "Could not set permissions on workflows file"
                 log SUCCESS "Workflows stored securely in local storage: $local_workflows_file"
+                local_workflows_saved=true
             else
                 log ERROR "Failed to copy workflows to local storage"
                 rm -rf "$tmp_dir"
@@ -1171,12 +1211,13 @@ backup() {
             fi
         fi
     elif [[ $workflows == 1 ]]; then
-        log INFO "No workflows file found in container"
+    log INFO "No workflows file found in container"
         if $no_data_found; then
             if ! $is_dry_run; then
                 echo "[]" > "$local_workflows_file"
                 chmod 600 "$local_workflows_file"
                 log INFO "Created empty workflows file in local storage"
+                local_workflows_saved=true
             else
                 log DRYRUN "Would create empty workflows file in local storage"
             fi
@@ -1205,6 +1246,7 @@ backup() {
                 fi
                 chmod 600 "$local_credentials_file" || log WARN "Could not set permissions on credentials file"
                 log SUCCESS "Credentials stored securely in local storage: $local_credentials_file"
+                local_credentials_saved=true
             else
                 log ERROR "Failed to copy credentials to local storage"
                 rm -rf "$tmp_dir"
@@ -1218,6 +1260,7 @@ backup() {
                 echo "{}" > "$local_credentials_file"
                 chmod 600 "$local_credentials_file"
                 log INFO "Created empty credentials file in local storage"
+                local_credentials_saved=true
             else
                 log DRYRUN "Would create empty credentials file in local storage"
             fi
@@ -1225,24 +1268,29 @@ backup() {
     fi
     
     # Store .env file in local storage (always local for security)
-    if docker exec "$container_id" sh -c "[ -f '$container_env' ]"; then
-        log INFO "Backing up environment variables..."
-        if $is_dry_run; then
-            log DRYRUN "Would copy .env from container to local storage: $local_env_file"
-            log DRYRUN "Would set permissions 600 on .env file"
-        else
-            if docker cp "${container_id}:${container_env}" "$local_env_file"; then
-                chmod 600 "$local_env_file" || log WARN "Could not set permissions on .env file"
-                log SUCCESS ".env file stored securely in local storage: $local_env_file"
+    if [[ $environment == 1 && $environment_exported == true ]]; then
+        if docker exec "$container_id" sh -c "[ -f '$container_env' ]"; then
+            log INFO "Backing up environment variables to local storage..."
+            if $is_dry_run; then
+                log DRYRUN "Would copy .env from container to local storage: $local_env_file"
+                log DRYRUN "Would set permissions 600 on .env file"
             else
-                log WARN "Failed to copy .env file to local storage"
+                if docker cp "${container_id}:${container_env}" "$local_env_file"; then
+                    chmod 600 "$local_env_file" || log WARN "Could not set permissions on .env file"
+                    log SUCCESS ".env file stored securely in local storage: $local_env_file"
+                    local_env_saved=true
+                else
+                    log WARN "Failed to copy .env file to local storage"
+                fi
             fi
+        else
+            log INFO "No .env file found in container"
         fi
-    else
-        log INFO "No .env file found in container"
     fi
 
-    log SUCCESS "Local backup operations completed successfully"
+    if [[ $performed_local_storage == true ]]; then
+        log SUCCESS "Local backup operations completed successfully"
+    fi
     
     # --- Git Repository Backup (Conditional) ---
     if [[ $workflows == 2 ]] || [[ $credentials == 2 ]]; then
@@ -1289,7 +1337,6 @@ backup() {
 
         # Copy files to Git repository
     local copy_status="success"
-    local folder_structure_committed=false
         
         # Handle workflows for remote storage
         if [[ $workflows == 2 ]]; then
@@ -1304,6 +1351,7 @@ backup() {
                     if create_folder_structure_with_git "$container_id" "$target_dir" "$tmp_dir" "$is_dry_run" "$container_credentials_decrypted"; then
                         folder_structure_committed=true
                         log SUCCESS "n8n folder structure created in repository with individual commits"
+                        remote_workflows_saved=true
                     else
                         log ERROR "Failed to create folder structure, attempting flat structure fallback"
                     fi
@@ -1320,6 +1368,7 @@ backup() {
                                 log WARN "Failed to prettify workflows JSON in Git repository"
                             fi
                             log SUCCESS "Workflows copied to Git repository"
+                            remote_workflows_saved=true
                         else
                             log ERROR "Failed to copy workflows to Git repository"
                             copy_status="failed"
@@ -1328,6 +1377,7 @@ backup() {
                         if docker cp "${container_id}:${container_workflows_dir}/." "$target_dir/"; then
                             prettify_json_tree "$target_dir" "$is_dry_run" || log WARN "Completed workflow JSON prettify with warnings in Git repository"
                             log SUCCESS "Workflows copied to Git repository from directory export"
+                            remote_workflows_saved=true
                         else
                             log ERROR "Failed to copy workflow directory to Git repository"
                             copy_status="failed"
@@ -1357,9 +1407,35 @@ backup() {
                         log WARN "Failed to prettify credentials JSON in Git repository"
                     fi
                     log SUCCESS "Credentials copied to Git repository"
+                    remote_credentials_saved=true
                 else
                     log ERROR "Failed to copy credentials to Git repository"
                     copy_status="failed"
+                fi
+            fi
+        fi
+
+        # Handle environment variables for remote storage
+        if [[ $environment == 2 ]]; then
+            if [[ $environment_exported != true ]]; then
+                log WARN "Environment backup configured for Git, but no variables were captured. Skipping."
+            else
+                local env_git_path="$target_dir/.env"
+                if $is_dry_run; then
+                    log DRYRUN "Would copy environment variables to Git repository: $env_git_path"
+                else
+                    if mkdir -p "$target_dir" 2>/dev/null && docker cp "${container_id}:${container_env}" "$env_git_path"; then
+                        log WARN "Environment variables stored in Git repository. Review access controls carefully."
+                        remote_environment_saved=true
+                        if [[ $use_dated_backup == true ]]; then
+                            environment_git_relative_path="$backup_timestamp/.env"
+                        else
+                            environment_git_relative_path=".env"
+                        fi
+                    else
+                        log ERROR "Failed to copy environment variables to Git repository"
+                        copy_status="failed"
+                    fi
                 fi
             fi
         fi
@@ -1421,6 +1497,16 @@ credentials.json
 EOF
                 fi
                 log SUCCESS "Created .gitignore to prevent sensitive data from being committed"
+            fi
+
+            if [[ $environment == 2 ]]; then
+                cat >> "$gitignore_file" << 'EOF'
+
+# Allow tracked environment backups (explicitly enabled)
+!.env
+!**/.env
+EOF
+                log WARN "Updated .gitignore to allow environment files for remote backup"
             fi
         fi
 
@@ -1674,33 +1760,95 @@ EOF
 
     # --- Final Summary ---
     log HEADER "Backup Summary"
-    
-    if [[ $workflows == 2 && $credentials == 2 ]]; then
-    log SUCCESS "✅ Complete backup successful!"
-    log SUCCESS "📄 Workflows: Stored in GitHub repository with folder structure"
-    log SUCCESS "🔒 Credentials: Stored in GitHub repository (less secure)"
-    elif [[ $workflows == 2 && $credentials == 1 ]]; then
-    log SUCCESS "✅ Hybrid backup successful!"
-    log SUCCESS "📄 Workflows: Stored in GitHub repository with folder structure"
-    log SUCCESS "🔒 Credentials: Stored securely in local storage ($local_credentials_file)"
-    elif [[ $workflows == 1 && $credentials == 1 ]]; then
-    log SUCCESS "✅ Local backup successful!"
-    log SUCCESS "📄 Workflows: Stored securely in local storage ($local_workflows_file)"
-    log SUCCESS "🔒 Credentials: Stored securely in local storage ($local_credentials_file)"
-    elif [[ $workflows == 1 && $credentials == 2 ]]; then
-    log SUCCESS "✅ Mixed backup successful!"
-    log SUCCESS "📄 Workflows: Stored securely in local storage ($local_workflows_file)"
-    log SUCCESS "🔒 Credentials: Stored in GitHub repository (less secure)"
+
+    local summary_failed=false
+
+    # Workflows summary
+    if [[ $workflows == 0 ]]; then
+        log INFO "📄 Workflows: Backup disabled"
+    elif [[ $workflows == 1 ]]; then
+        if $local_workflows_saved; then
+            log SUCCESS "📄 Workflows: Stored securely in local storage ($local_workflows_file)"
+        else
+            log WARN "📄 Workflows: Local backup requested but no file was saved"
+            summary_failed=true
+        fi
+    elif [[ $workflows == 2 ]]; then
+        if $remote_workflows_saved; then
+            if [[ $folder_structure_committed == true ]]; then
+                log SUCCESS "📄 Workflows: Stored in Git repository with folder structure"
+            else
+                log SUCCESS "� Workflows: Stored in Git repository"
+            fi
+        else
+            log WARN "📄 Workflows: Git backup requested but no files were committed"
+            summary_failed=true
+        fi
     fi
-    
-    log SUCCESS "🌱 Environment: Stored securely in local storage ($local_env_file)"
+
+    # Credentials summary
+    if [[ $credentials == 0 ]]; then
+        log INFO "🔒 Credentials: Backup disabled"
+    elif [[ $credentials == 1 ]]; then
+        if $local_credentials_saved; then
+            log SUCCESS "🔒 Credentials: Stored securely in local storage ($local_credentials_file)"
+        else
+            log WARN "🔒 Credentials: Local backup requested but no file was saved"
+            summary_failed=true
+        fi
+    elif [[ $credentials == 2 ]]; then
+        if $remote_credentials_saved; then
+            if [[ "${credentials_encrypted:-true}" == "false" ]]; then
+                log WARN "� Credentials: Stored in Git repository (decrypted export - high risk)"
+            else
+                log SUCCESS "🔒 Credentials: Stored in Git repository (encrypted export)"
+            fi
+        else
+            log WARN "🔒 Credentials: Git backup requested but no files were committed"
+            summary_failed=true
+        fi
+    fi
+
+    # Environment summary
+    if [[ $environment == 0 ]]; then
+        log INFO "🌱 Environment: Backup disabled"
+    elif [[ $environment == 1 ]]; then
+        if $local_env_saved; then
+            log SUCCESS "🌱 Environment: Stored securely in local storage ($local_env_file)"
+        elif [[ $environment_exported == true ]]; then
+            log WARN "🌱 Environment: Captured variables but failed to save locally"
+            summary_failed=true
+        else
+            log INFO "🌱 Environment: No environment variables detected in container"
+        fi
+    elif [[ $environment == 2 ]]; then
+        if $remote_environment_saved; then
+            if [[ -n "$environment_git_relative_path" ]]; then
+                log WARN "🌱 Environment: Stored in Git repository at $environment_git_relative_path (review access controls)"
+            else
+                log WARN "🌱 Environment: Stored in Git repository (review access controls)"
+            fi
+        elif [[ $environment_exported == true ]]; then
+            log WARN "🌱 Environment: Captured variables but failed to copy to Git repository"
+            summary_failed=true
+        else
+            log WARN "🌱 Environment: Git backup requested but no environment variables were captured"
+            summary_failed=true
+        fi
+    fi
+
+    if $summary_failed; then
+        log WARN "Backup completed with warnings. Review the details above."
+    else
+        log SUCCESS "✅ Backup operation completed successfully."
+    fi
     
     if [ "$use_dated_backup" = "true" ]; then
         log INFO "📅 Dated backup created: $backup_timestamp"
     fi
     
     # Display rotation information for local backups
-    if [[ $workflows == 1 ]] || [[ $credentials == 1 ]]; then
+    if [[ $workflows == 1 ]] || [[ $credentials == 1 ]] || [[ $environment == 1 ]]; then
         if [[ "$local_rotation_limit" == "0" ]]; then
             log INFO "🔄 Rotation: Disabled (current backup overwrites previous)"
         elif [[ "$local_rotation_limit" == "unlimited" ]]; then

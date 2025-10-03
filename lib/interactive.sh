@@ -14,6 +14,7 @@ show_config_summary() {
     # Backup configuration - use numeric system if available
     local workflows_desc="not set"
     local credentials_desc="not set"
+    local environment_desc="not set"
     
     # Determine workflows description from numeric value
     if [[ -n "${workflows:-}" ]]; then
@@ -38,9 +39,18 @@ show_config_summary() {
             2) credentials_desc="remote Git repository (security risk!)" ;;
         esac
     fi
+
+    if [[ -n "${environment:-}" ]]; then
+        case "$environment" in
+            0) environment_desc="disabled" ;;
+            1) environment_desc="local secure storage" ;;
+            2) environment_desc="remote Git repository (high risk)" ;;
+        esac
+    fi
     
     log INFO "   📄 Workflows: $workflows_desc"
     log INFO "   🔒 Credentials: $credentials_desc"
+    log INFO "   🌱 Environment: $environment_desc"
     
     if [[ -n "$github_repo" ]]; then
         log INFO "   📚 GitHub: $github_repo (branch: ${github_branch:-main})"
@@ -58,7 +68,7 @@ show_config_summary() {
     elif [[ -n "$n8n_session_credential" ]]; then
         log INFO "   🔐 n8n session credential: $n8n_session_credential"
     elif [[ -n "$n8n_email" || -n "$n8n_password" ]]; then
-        log INFO "   🔐 n8n session login: direct email/password (legacy)"
+        log INFO "   🔐 n8n session login: direct email/password"
     fi
 
     if [[ "${dated_backups_flag:-false}" == "true" ]] || [[ "$dated_backups" == "true" ]]; then
@@ -97,18 +107,17 @@ Options:
   --dated               Create timestamped subdirectory for backups (e.g., YYYY-MM-DD_HH-MM-SS/).
   --workflows [mode]    Include workflows in backup. Mode: 0 (disabled), 1 (local, default), 2 (remote Git repo).
   --credentials [mode]  Include credentials in backup. Mode: 0 (disabled), 1 (local, default), 2 (remote Git repo).
+    --environment [mode]  Include environment variables. Mode: 0 (disabled, default), 1 (local), 2 (remote Git repo).
   --path <path>         Local backup directory path (defaults to '~/n8n-backup').
-    --encrypted-credentials <true|false>
-                                                If true (default), prefer encrypted credential exports from n8n.
-                                                Set to false to force decrypted credential exports (legacy, less secure).
+  --decrypt <true|false>    If true, export credentials decrypted from n8n (not recommended, less secure).
+                        Defaults to false to ensure encrypted credential exports.
   --rotation <limit>    Local backup rotation: '0' (overwrite), number (keep N most recent), 'unlimited' (keep all).
   --folder-structure    Enable n8n folder structure mirroring in Git (requires API access).
   --n8n-url <url>       n8n instance URL (e.g., 'http://localhost:5678').
   --n8n-api-key <key>   n8n API key for folder structure access.
-    --n8n-cred <name>   n8n credential name providing Basic Auth for session login when API key is absent.
-  --restore-type <type> Type of restore: 'all' (default), 'workflows', or 'credentials' (legacy).
-                        Overrides RESTORE_TYPE in config file.
+  --n8n-cred <name>     n8n credential name providing Basic Auth for session login when API key is absent.
   --dry-run             Simulate the action without making any changes.
+    --defaults            Assume defaults for any missing inputs (non-interactive automation).
   --verbose             Enable detailed debug logging.
   --log-file <path>     Path to a file to append logs to.
   --config <path>       Path to a custom configuration file.
@@ -143,10 +152,17 @@ Configuration Files (checked in order):
     
     # Credentials storage: 0=disabled, 1=local (secure), 2=remote (Git repo)
     CREDENTIALS=1
+
+    # Environment storage: 0=disabled, 1=local (secure), 2=remote (Git repo - high risk)
+    ENVIRONMENT=0
     
-        # Export credentials encrypted by default (true/false). When true, the backup
-        # process will prefer encrypted exports. To use legacy decrypted exports set to false.
-        CREDENTIALS_ENCRYPTED=true
+    # Decrypt credentials during export (true/false, defaults to false).
+    # When false (recommended), credentials are exported encrypted by n8n.
+    # Set to true fordecrypted exports in trusted environments.
+    DECRYPT_CREDENTIALS=false
+
+    # Assume defaults for any missing CLI values (skip prompts in automation)
+    ASSUME_DEFAULTS=false
     
     # === LOCAL BACKUP SETTINGS ===
     # Custom local backup directory path (defaults to ~/n8n-backup)
@@ -168,10 +184,6 @@ Configuration Files (checked in order):
     # n8n credential name for session-based login (alternative to API key)
     # Example: Basic Auth credential named "N8N REST BACKUP"
     N8N_LOGIN_CREDENTIAL_NAME="N8N REST BACKUP"
-    
-    # === RESTORE BEHAVIOR SETTINGS ===
-    # Default restore type: "all", "workflows", or "credentials" (defaults to 'all')
-    RESTORE_TYPE="all"
     
     # === LOGGING SETTINGS ===
     # Enable verbose debug logging (true/false, defaults to false)
@@ -320,7 +332,7 @@ select_restore_type() {
         echo "Credentials restore mode:"
         echo "0) Disabled - Skip credential restore"
         echo "1) Local Secure Storage - Restore from local backup ($local_credentials_file)"
-        echo "2) Remote Storage - Restore from Git repository (legacy)"
+        echo "2) Remote Storage - Restore from Git repository"
         printf "\nSelect credentials restore mode (0-2) [default: %s]: " "$credentials_default"
         read -r credentials_choice
         credentials_choice=${credentials_choice:-$credentials_default}
@@ -386,12 +398,12 @@ select_credential_source() {
     
     log HEADER "Multiple Credential Sources Found"
     log INFO "Both local and Git repository credentials are available."
-    echo "1) Local Secure Storage (Recommended)"
+    echo "1) Local Storage"
     echo "   📍 $local_file"
     echo "   🔒 Stored securely with proper file permissions"
-    echo "2) Git Repository (Legacy)"
+    echo "2) Git Repository"
     echo "   📍 $git_file"
-    echo "   ⚠️  Less secure - credentials stored in Git history"
+    echo "   ⚠️  Ensure to maintain encryption for security - credentials stored in Git history"
     
     local choice
     while true; do
@@ -438,7 +450,7 @@ show_restore_plan() {
     case "$credentials_mode" in
         0) log INFO "🔒 Credentials: Will remain unchanged" ;;
         1) log INFO "🔒 Credentials: Will be restored from local secure storage (~/.n8n-backup/credentials.json)" ;;
-        2) log INFO "� Credentials: Will be restored from Git repository (legacy)" ;;
+        2) log INFO "� Credentials: Will be restored from Git repository" ;;
     esac
 
     case "$restore_scope" in
@@ -549,6 +561,39 @@ select_credentials_storage() {
                 else
                     log INFO "Staying with secure local storage."
                     credentials=1
+                    return
+                fi
+                ;;
+            *) echo "Invalid choice. Please enter 0, 1, or 2." ;;
+        esac
+    done
+}
+
+select_environment_storage() {
+    log HEADER "Choose Environment Backup Mode"
+    echo "0) Disabled - Skip environment variable backup"
+    echo "1) Local Storage - Store environment variables in local secure storage"
+    echo "2) Remote Storage - Store environment variables in Git repository (NOT RECOMMENDED)"
+
+    local choice
+    while true; do
+        printf "Select environment backup mode (0-2) [default: 0]: "
+        read -r choice
+        choice=${choice:-0}
+        case "$choice" in
+            0) environment=0; log INFO "Environment backup: (0) disabled"; return ;;
+            1) environment=1; log INFO "Environment backup: (1) local"; return ;;
+            2)
+                log WARN "You selected REMOTE STORAGE for environment variables!"
+                printf "Are you sure you want to commit environment variables to Git? (y/N): "
+                read -r confirm_env
+                if [[ "$confirm_env" =~ ^[Yy]$ ]]; then
+                    environment=2
+                    log WARN "Environment backup: (2) remote (high risk)"
+                    return
+                else
+                    log INFO "Environment backup remains disabled."
+                    environment=0
                     return
                 fi
                 ;;

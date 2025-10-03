@@ -76,43 +76,55 @@ ensure_n8n_session_credentials() {
     fi
 
     local credential_payload=""
+    local credential_entry=""
 
     if [[ -n "$container_credentials_path" ]]; then
         if docker exec "$container_id" sh -c "[ -f '$container_credentials_path' ]" 2>/dev/null; then
-            if ! credential_payload=$(docker exec "$container_id" sh -c "cat $container_credentials_path" 2>/dev/null); then
-                credential_payload=""
+            credential_payload=$(docker exec "$container_id" sh -c "cat $container_credentials_path" 2>/dev/null || printf '')
+            if [[ -n "$credential_payload" ]]; then
+                if ! credential_entry=$(printf '%s' "$credential_payload" | jq -c --arg name "$credential_name" '
+                    (if type == "object" and has("data") then .data else . end)
+                    | (if type == "array" then . else [] end)
+                    | map(select((.name // "") == $name))
+                    | first // empty
+                ' 2>/dev/null); then
+                    log WARN "Failed to parse provided credential bundle while locating '$credential_name'; will export from container instead."
+                    credential_entry=""
+                fi
+
+                if [[ -z "$credential_entry" || "$credential_entry" == "null" ]]; then
+                    log DEBUG "Credential '$credential_name' not present in imported bundle; exporting from n8n instance."
+                    credential_entry=""
+                fi
             fi
         fi
+        credential_payload=""
     fi
 
-    if [[ -z "$credential_payload" ]]; then
+    if [[ -z "$credential_entry" ]]; then
         local temp_path="/tmp/n8n-session-credential-$$.json"
         if ! docker exec "$container_id" sh -c "n8n export:credentials --all --decrypted --output=$temp_path >/dev/null 2>&1"; then
             log ERROR "Failed to export credentials from n8n container to locate '$credential_name'."
             return 1
         fi
 
-        if ! credential_payload=$(docker exec "$container_id" sh -c "cat $temp_path" 2>/dev/null); then
-            credential_payload=""
+        credential_payload=$(docker exec "$container_id" sh -c "cat $temp_path" 2>/dev/null || printf '')
+        docker exec "$container_id" sh -c "rm -f $temp_path" >/dev/null 2>&1 || true
+
+        if [[ -z "$credential_payload" ]]; then
+            log ERROR "Unable to read exported credentials when searching for '$credential_name'."
+            return 1
         fi
 
-        docker exec "$container_id" sh -c "rm -f $temp_path" >/dev/null 2>&1 || true
-    fi
-
-    if [[ -z "$credential_payload" ]]; then
-        log ERROR "Unable to read exported credentials when searching for '$credential_name'."
-        return 1
-    fi
-
-    local credential_entry
-    if ! credential_entry=$(printf '%s' "$credential_payload" | jq -c --arg name "$credential_name" '
-        (if type == "object" and has("data") then .data else . end)
-        | (if type == "array" then . else [] end)
-        | map(select((.name // "") == $name))
-        | first // empty
-    ' 2>/dev/null); then
-        log ERROR "Failed to parse credentials JSON while locating '$credential_name'."
-        return 1
+        if ! credential_entry=$(printf '%s' "$credential_payload" | jq -c --arg name "$credential_name" '
+            (if type == "object" and has("data") then .data else . end)
+            | (if type == "array" then . else [] end)
+            | map(select((.name // "") == $name))
+            | first // empty
+        ' 2>/dev/null); then
+            log ERROR "Failed to parse credentials JSON while locating '$credential_name'."
+            return 1
+        fi
     fi
 
     if [[ -z "$credential_entry" || "$credential_entry" == "null" ]]; then
@@ -829,6 +841,10 @@ n8n_api_get_folders() {
     n8n_api_request "GET" "/folders?skip=0&take=1000"
 }
 
+n8n_api_get_workflows() {
+    n8n_api_request "GET" "/workflows?includeScopes=true&includeFolders=true&filter=%7B%22isArchived%22%3Afalse%7D&skip=0&take=2000&sortBy=updatedAt%3Adesc"
+}
+
 n8n_api_create_folder() {
     local name="$1"
     local project_id="$2"
@@ -845,23 +861,61 @@ n8n_api_create_folder() {
             parentFolderId: (if $parentId == "" then null else $parentId end)
         }')
 
-    n8n_api_request "POST" "/folders" "$payload"
+    if [[ -z "$project_id" ]]; then
+        log ERROR "Project ID required when creating n8n folder '$name'"
+        return 1
+    fi
+
+    n8n_api_request "POST" "/projects/$project_id/folders" "$payload"
+}
+
+n8n_api_update_folder_parent() {
+    local project_id="$1"
+    local folder_id="$2"
+    local parent_id="${3:-}"
+
+    if [[ -z "$project_id" ]]; then
+        log ERROR "Project ID required when updating folder $folder_id"
+        return 1
+    fi
+
+    if [[ -z "$folder_id" ]]; then
+        log ERROR "Folder ID required when updating project $project_id"
+        return 1
+    fi
+
+    local payload
+    payload=$(jq -n \
+        --arg parentId "${parent_id:-}" \
+        '{
+            parentFolderId: (if $parentId == "" then null else $parentId end)
+        }')
+
+    n8n_api_request "PATCH" "/projects/$project_id/folders/$folder_id" "$payload"
 }
 
 n8n_api_update_workflow_assignment() {
     local workflow_id="$1"
     local project_id="$2"
     local folder_id="${3:-}"
+    local version_id="${4:-}"
+
+    if [[ -z "$version_id" ]]; then
+        log WARN "Skipping workflow $workflow_id assignment update - missing version id"
+        return 1
+    fi
 
     local payload
     payload=$(jq -n \
         --arg projectId "$project_id" \
         --arg folderId "${folder_id:-}" \
+        --arg versionId "$version_id" \
         '{
             homeProject: {
                 id: $projectId
             },
-            parentFolderId: (if $folderId == "" then null else $folderId end)
+            parentFolderId: (if $folderId == "" then null else $folderId end),
+            versionId: $versionId
         }')
 
     n8n_api_request "PATCH" "/workflows/$workflow_id" "$payload"

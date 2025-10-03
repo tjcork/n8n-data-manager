@@ -46,7 +46,8 @@ SELECTED_RESTORE_TYPE="all"
 action=""
 container=""
 default_container=""           # Default container from config
-credentials_encrypted=""      # empty = unset, true/false = explicitly configured
+credentials_encrypted=""      # empty = unset, true=encrypted (default), false=decrypted (loaded from DECRYPT_CREDENTIALS config, inverted)
+assume_defaults=""            # empty = unset, true/false = explicitly configured
 # Control flags
 dry_run=""     # empty = unset, true/false = explicitly configured
 verbose=""     # empty = unset, true/false = explicitly configured
@@ -61,18 +62,21 @@ dated_backups=""  # empty = unset, true/false = explicitly configured
 # Storage settings (handled by numeric config)
 workflows=""              # empty = unset, 0=disabled, 1=local, 2=remote
 credentials=""            # empty = unset, 0=disabled, 1=local, 2=remote
+environment=""            # empty = unset, 0=disabled, 1=local, 2=remote
 local_backup_path="$HOME/n8n-backup"
 local_rotation_limit="10"
 
 # Track configuration value sources (cli/config/default/interactive)
 workflows_source="unset"
 credentials_source="unset"
+environment_source="unset"
 local_backup_path_source="unset"
 local_rotation_limit_source="unset"
 dated_backups_source="unset"
 dry_run_source="unset"
 folder_structure_source="unset"
 credentials_encrypted_source="unset"
+assume_defaults_source="unset"
 
 # Advanced features
 folder_structure=""            # empty = unset, true/false = explicitly configured
@@ -130,13 +134,22 @@ main() {
                        exit 1 ;;
                 esac
                 ;;
+            --environment)
+                case "${2,,}" in
+                    0|disabled) environment=0; environment_source="cli"; shift 2 ;;
+                    1|local) environment=1; environment_source="cli"; shift 2 ;;
+                    2|remote) environment=2; environment_source="cli"; shift 2 ;;
+                    *) log ERROR "Invalid environment value: $2. Must be 0/disabled, 1/local, or 2/remote"
+                       exit 1 ;;
+                esac
+                ;;
             --path) local_backup_path="$2"; local_backup_path_source="cli"; shift 2 ;;
-            --encrypted-credentials)
+            --decrypt)
                 # Enable/disable encrypted credentials export on CLI
                 case "${2,,}" in
                     true|1|yes|on) credentials_encrypted=true; credentials_encrypted_source="cli"; shift 2 ;;
                     false|0|no|off) credentials_encrypted=false; credentials_encrypted_source="cli"; shift 2 ;;
-                    *) log ERROR "Invalid value for --encrypted-credentials: $2. Use true/false"; exit 1 ;;
+                    *) log ERROR "Invalid value for --decrypt: $2. Use true/false"; exit 1 ;;
                 esac
                 ;;
             --rotation)
@@ -151,19 +164,11 @@ main() {
                     exit 1
                 fi
                 ;;
-            --restore-type)
-                if [[ "$2" =~ ^(all|workflows|credentials)$ ]]; then
-                    restore_type="$2"
-                    shift 2
-                else
-                    echo -e "${RED}[ERROR]${NC} Invalid restore type: $2. Valid options: all, workflows, credentials" >&2
-                    exit 1
-                fi
-                ;;
             --dry-run) dry_run=true; dry_run_source="cli"; shift 1 ;;
             --verbose) verbose=true; shift 1 ;; 
             --log-file) log_file="$2"; shift 2 ;; 
             --folder-structure) folder_structure=true; folder_structure_source="cli"; shift 1 ;;
+            --defaults) assume_defaults=true; assume_defaults_source="cli"; shift 1 ;;
             --n8n-url) n8n_base_url="$2"; shift 2 ;;
             --n8n-api-key) n8n_api_key="$2"; shift 2 ;;
             --n8n-cred) n8n_session_credential="$2"; shift 2 ;;
@@ -175,14 +180,34 @@ main() {
     # Load config file (must happen after parsing args)
     load_config
 
+    if [[ -z "$environment" ]]; then
+        environment=0
+        environment_source="default"
+    fi
+
     log HEADER "n8n Backup/Restore Manager v$VERSION"
     log INFO "🚀 Flexible backup storage: local files or Git repository"
     
     check_host_dependencies
 
-    local interactive_mode=false
+    if [[ -z "$assume_defaults" ]]; then
+        assume_defaults=false
+        assume_defaults_source="${assume_defaults_source:-default}"
+    fi
+
+    local stdin_is_tty=false
     if [ -t 0 ]; then
+        stdin_is_tty=true
+    fi
+
+    local interactive_mode=false
+    if [[ "$stdin_is_tty" == "true" && "$assume_defaults" != "true" ]]; then
         interactive_mode=true
+    fi
+
+    if [[ "$assume_defaults" == "true" && -z "$credentials_encrypted" ]]; then
+        credentials_encrypted=true
+        credentials_encrypted_source="${credentials_encrypted_source:-defaults}"
     fi
 
     # Runtime variables are now lowercase and used directly
@@ -224,7 +249,7 @@ main() {
             needs_github=true
         fi
     else
-        if [[ "$workflows" == "2" ]] || [[ "$credentials" == "2" ]]; then
+        if [[ "$workflows" == "2" ]] || [[ "$credentials" == "2" ]] || [[ "$environment" == "2" ]]; then
             needs_github=true
         fi
     fi
@@ -232,7 +257,7 @@ main() {
     # Set intelligent defaults for backup (only if not already configured)
     if [[ "$action" == "backup" ]]; then
         # Check if both are disabled after config loading
-        if [[ "$workflows" == "0" && "$credentials" == "0" ]]; then
+        if [[ "$workflows" == "0" && "$credentials" == "0" && "$environment" == "0" ]]; then
             log ERROR "Both workflows and credentials are disabled. Nothing to backup!"
             log INFO "Please specify backup options:"
             log INFO "  --workflows 1 --credentials 1     (both stored locally - secure)"
@@ -241,6 +266,8 @@ main() {
             log INFO "  --workflows 2 --credentials 2     (both to Git - less secure)"
             log INFO "  --workflows 1                     (workflows local only, skip credentials)"
             log INFO "  --credentials 1                   (credentials local only, skip workflows)"
+            log INFO "  --environment 1                   (capture environment variables locally)"
+            log INFO "  --environment 2                   (push environment variables to Git - high risk)"
             exit 1
         fi
         
@@ -256,11 +283,11 @@ main() {
 
     # Debug logging
     log DEBUG "Action: $action, Container: $container, Repo: $github_repo"
-    log DEBUG "Branch: $github_branch, Workflows: ($workflows) $(format_storage_value $workflows), Credentials: ($credentials) $(format_storage_value $credentials)"
+    log DEBUG "Branch: $github_branch, Workflows: ($workflows) $(format_storage_value $workflows), Credentials: ($credentials) $(format_storage_value $credentials), Environment: ($environment) $(format_storage_value $environment)"
     log DEBUG "Local Path: $local_backup_path, Rotation: $local_rotation_limit"
 
     # Check if running non-interactively
-    if ! [ -t 0 ]; then
+    if [[ "$interactive_mode" != "true" ]]; then
         log DEBUG "Running in non-interactive mode."
         
         # Set defaults for boolean variables if still empty (not configured)
@@ -413,10 +440,12 @@ main() {
         if [[ "$action" == "backup" ]]; then
             local prompt_workflows=false
             local prompt_credentials=false
+            local prompt_environment=false
 
             if [[ "$reconfigure_mode" == "true" ]]; then
                 prompt_workflows=true
                 prompt_credentials=true
+                prompt_environment=true
             else
                 if [[ "$workflows_source" == "default" ]]; then
                     prompt_workflows=true
@@ -424,9 +453,12 @@ main() {
                 if [[ "$credentials_source" == "default" ]]; then
                     prompt_credentials=true
                 fi
+                if [[ "$environment_source" == "default" ]]; then
+                    prompt_environment=true
+                fi
             fi
 
-            if [[ "$prompt_workflows" == true ]] || [[ "$prompt_credentials" == true ]]; then
+            if [[ "$prompt_workflows" == true ]] || [[ "$prompt_credentials" == true ]] || [[ "$prompt_environment" == true ]]; then
                 log INFO "Configure backup storage locations:"
             fi
 
@@ -440,20 +472,25 @@ main() {
                 credentials_source="interactive"
             fi
 
-            if [[ "$prompt_workflows" == true ]] || [[ "$prompt_credentials" == true ]]; then
-                log INFO "Selected: Workflows=($workflows) $(format_storage_value $workflows), Credentials=($credentials) $(format_storage_value $credentials)"
+            if [[ "$prompt_environment" == true ]]; then
+                select_environment_storage
+                environment_source="interactive"
+            fi
+
+            if [[ "$prompt_workflows" == true ]] || [[ "$prompt_credentials" == true ]] || [[ "$prompt_environment" == true ]]; then
+                log INFO "Selected: Workflows=($workflows) $(format_storage_value $workflows), Credentials=($credentials) $(format_storage_value $credentials), Environment=($environment) $(format_storage_value $environment)"
             fi
 
             local needs_local_path_prompt=false
             local has_local_storage=false
-            if [[ "$workflows" == "1" ]] || [[ "$credentials" == "1" ]]; then
+            if [[ "$workflows" == "1" ]] || [[ "$credentials" == "1" ]] || [[ "$environment" == "1" ]]; then
                 has_local_storage=true
             fi
 
             if [[ "$has_local_storage" == true ]]; then
                 if [[ "$reconfigure_mode" == "true" ]]; then
                     needs_local_path_prompt=true
-                elif [[ "$local_backup_path_source" == "default" ]] || [[ "$prompt_workflows" == true ]] || [[ "$prompt_credentials" == true ]]; then
+                elif [[ "$local_backup_path_source" == "default" ]] || [[ "$prompt_workflows" == true ]] || [[ "$prompt_credentials" == true ]] || [[ "$prompt_environment" == true ]]; then
                     needs_local_path_prompt=true
                 fi
             fi
@@ -560,47 +597,55 @@ main() {
 
             # Decide whether to prompt for encrypted credential exports
             if [[ "$credentials" != "0" ]]; then
-                local prompt_encryption=false
-                if [[ "$reconfigure_mode" == "true" ]]; then
-                    prompt_encryption=true
-                elif [[ "$credentials_encrypted_source" == "default" ]]; then
-                    prompt_encryption=true
-                fi
-
-                if [[ "$prompt_encryption" == true ]]; then
-                    local encryption_default_label="yes"
-                    if [[ "${credentials_encrypted:-true}" == "false" ]]; then
-                        encryption_default_label="no"
+                if [[ "$assume_defaults" == "true" ]]; then
+                    if [[ -z "$credentials_encrypted" ]]; then
+                        credentials_encrypted=true
+                        credentials_encrypted_source="defaults"
+                    fi
+                    log DEBUG "Defaults mode enabled - keeping credentials encrypted without prompting."
+                else
+                    local prompt_encryption=false
+                    if [[ "$reconfigure_mode" == "true" ]]; then
+                        prompt_encryption=true
+                    elif [[ "$credentials_encrypted_source" == "default" ]]; then
+                        prompt_encryption=true
                     fi
 
-                    printf "Export credentials encrypted by n8n (recommended)? (yes/no) [%s]: " "$encryption_default_label"
-                    local encryption_choice
-                    read -r encryption_choice
-                    encryption_choice=${encryption_choice:-$encryption_default_label}
+                    if [[ "$prompt_encryption" == true ]]; then
+                        local encryption_default_label="yes"
+                        if [[ "${credentials_encrypted:-true}" == "false" ]]; then
+                            encryption_default_label="no"
+                        fi
 
-                    if [[ "$encryption_choice" == "yes" || "$encryption_choice" == "y" ]]; then
-                        credentials_encrypted=true
-                        credentials_encrypted_source="interactive"
-                    else
-                        # Warn user about decrypted exports
-                        log WARN "⚠️  Credentials will be exported in decrypted form. Keep the files extremely secure."
-                        if [[ "$credentials" == "2" ]]; then
-                            printf "Decrypted credentials would be stored in Git history. Continue? (yes/no) [no]: "
-                            local decrypted_confirm
-                            read -r decrypted_confirm
-                            decrypted_confirm=${decrypted_confirm:-no}
-                            if [[ "$decrypted_confirm" == "yes" || "$decrypted_confirm" == "y" ]]; then
+                        printf "Export credentials encrypted by n8n (recommended)? (yes/no) [%s]: " "$encryption_default_label"
+                        local encryption_choice
+                        read -r encryption_choice
+                        encryption_choice=${encryption_choice:-$encryption_default_label}
+
+                        if [[ "$encryption_choice" == "yes" || "$encryption_choice" == "y" ]]; then
+                            credentials_encrypted=true
+                            credentials_encrypted_source="interactive"
+                        else
+                            # Warn user about decrypted exports
+                            log WARN "⚠️  Credentials will be exported in decrypted form. Keep the files extremely secure."
+                            if [[ "$credentials" == "2" ]]; then
+                                printf "Decrypted credentials would be stored in Git history. Continue? (yes/no) [no]: "
+                                local decrypted_confirm
+                                read -r decrypted_confirm
+                                decrypted_confirm=${decrypted_confirm:-no}
+                                if [[ "$decrypted_confirm" == "yes" || "$decrypted_confirm" == "y" ]]; then
+                                    credentials_encrypted=false
+                                    credentials_encrypted_source="interactive"
+                                    log WARN "⚠️  Proceeding with decrypted credentials for Git storage."
+                                else
+                                    credentials_encrypted=true
+                                    credentials_encrypted_source="interactive"
+                                    log INFO "Using encrypted credential export instead."
+                                fi
+                            else
                                 credentials_encrypted=false
                                 credentials_encrypted_source="interactive"
-                                log WARN "⚠️  Proceeding with decrypted credentials for Git storage."
-                            else
-                                credentials_encrypted=true
-                                credentials_encrypted_source="interactive"
-                                log INFO "Using encrypted credential export instead."
                             fi
-                        else
-                            credentials_encrypted=false
-                            credentials_encrypted_source="interactive"
                         fi
                     fi
                 fi

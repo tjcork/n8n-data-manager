@@ -46,6 +46,12 @@ WORKFLOWS=1
 # - 2/remote: Store credentials in Git repository (use with caution for security)
 CREDENTIALS=1
 
+# Environment backup mode: 0/disabled (default), 1/local, or 2/remote
+# - 0/disabled: Skip environment variable capture entirely
+# - 1/local: Store environment variables in local secure storage
+# - 2/remote: Store environment variables in Git repository (not recommended)
+ENVIRONMENT=0
+
 # === LOCAL BACKUP SETTINGS ===
 # Custom local backup directory path (defaults to ~/n8n-backup)
 LOCAL_BACKUP_PATH="/custom/backup/path"

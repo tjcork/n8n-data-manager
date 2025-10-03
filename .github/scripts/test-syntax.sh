@@ -15,4 +15,7 @@ chmod +x $SCRIPT_FILE
 ./$SCRIPT_FILE --help || true
 
 echo "Testing script execution with --dry-run flag..."
-./$SCRIPT_FILE --action backup --dry-run --verbose || true
+./$SCRIPT_FILE --action backup --dry-run --verbose --defaults || true
+
+echo "Testing script execution with --dry-run flag..."
+./$SCRIPT_FILE --action restore --dry-run --verbose --defaults || true

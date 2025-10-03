@@ -25,8 +25,11 @@ git_commit_email=""
 : "${local_rotation_limit_source:=unset}"
 : "${dated_backups_source:=unset}"
 : "${dry_run_source:=unset}"
+: "${assume_defaults:=}"
 : "${folder_structure_source:=unset}"
 : "${credentials_encrypted_source:=unset}"
+: "${assume_defaults_source:=unset}"
+: "${environment_source:=unset}"
 
 # ANSI colors for better UI (using printf for robustness)
 printf -v RED     '\033[0;31m'
@@ -322,6 +325,27 @@ load_config() {
                 credentials_source="default"
             fi
         fi
+
+        # Handle environment storage with flexible input (numeric or descriptive)
+        if [[ -z "$environment" && -n "${ENVIRONMENT:-}" ]]; then
+            local environment_config="$ENVIRONMENT"
+            environment_config=$(echo "$environment_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
+
+            if [[ "$environment_config" == "0" || "$environment_config" == "disabled" ]]; then
+                environment=0
+                environment_source="config"
+            elif [[ "$environment_config" == "1" || "$environment_config" == "local" ]]; then
+                environment=1
+                environment_source="config"
+            elif [[ "$environment_config" == "2" || "$environment_config" == "remote" ]]; then
+                environment=2
+                environment_source="config"
+            else
+                log WARN "Invalid ENVIRONMENT value in config: '$environment_config'. Must be 0/disabled, 1/local, or 2/remote. Using default: 0 (disabled)"
+                environment=0
+                environment_source="default"
+            fi
+        fi
         
         # === BOOLEAN SETTINGS ===
         # Handle dated_backups boolean config
@@ -393,20 +417,36 @@ load_config() {
             fi
         fi
 
-        # Handle credentials_encrypted boolean config
-        if [[ -z "$credentials_encrypted" && -n "${CREDENTIALS_ENCRYPTED:-}" ]]; then
-            local credentials_encrypted_config="$CREDENTIALS_ENCRYPTED"
-            credentials_encrypted_config=$(echo "$credentials_encrypted_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
-            if [[ "$credentials_encrypted_config" == "true" || "$credentials_encrypted_config" == "1" || "$credentials_encrypted_config" == "yes" || "$credentials_encrypted_config" == "on" ]]; then
-                credentials_encrypted=true
-                credentials_encrypted_source="config"
-            elif [[ "$credentials_encrypted_config" == "false" || "$credentials_encrypted_config" == "0" || "$credentials_encrypted_config" == "no" || "$credentials_encrypted_config" == "off" ]]; then
+        # Handle credentials_encrypted boolean config (loaded from DECRYPT_CREDENTIALS with inverted logic)
+        if [[ -z "$credentials_encrypted" && -n "${DECRYPT_CREDENTIALS:-}" ]]; then
+            local decrypt_credentials_config="$DECRYPT_CREDENTIALS"
+            decrypt_credentials_config=$(echo "$decrypt_credentials_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
+            if [[ "$decrypt_credentials_config" == "true" || "$decrypt_credentials_config" == "1" || "$decrypt_credentials_config" == "yes" || "$decrypt_credentials_config" == "on" ]]; then
                 credentials_encrypted=false
                 credentials_encrypted_source="config"
+            elif [[ "$decrypt_credentials_config" == "false" || "$decrypt_credentials_config" == "0" || "$decrypt_credentials_config" == "no" || "$decrypt_credentials_config" == "off" ]]; then
+                credentials_encrypted=true
+                credentials_encrypted_source="config"
             else
-                log WARN "Invalid CREDENTIALS_ENCRYPTED value in config: '$credentials_encrypted_config'. Must be true/false. Using default: true"
+                log WARN "Invalid DECRYPT_CREDENTIALS value in config: '$decrypt_credentials_config'. Must be true/false. Using default: false (encrypted)"
                 credentials_encrypted=true
                 credentials_encrypted_source="default"
+            fi
+        fi
+
+        if [[ -z "$assume_defaults" && -n "${ASSUME_DEFAULTS:-}" ]]; then
+            local assume_defaults_config="$ASSUME_DEFAULTS"
+            assume_defaults_config=$(echo "$assume_defaults_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
+            if [[ "$assume_defaults_config" == "true" || "$assume_defaults_config" == "1" || "$assume_defaults_config" == "yes" || "$assume_defaults_config" == "on" ]]; then
+                assume_defaults=true
+                assume_defaults_source="config"
+            elif [[ "$assume_defaults_config" == "false" || "$assume_defaults_config" == "0" || "$assume_defaults_config" == "no" || "$assume_defaults_config" == "off" ]]; then
+                assume_defaults=false
+                assume_defaults_source="config"
+            else
+                log WARN "Invalid ASSUME_DEFAULTS value in config: '$assume_defaults_config'. Must be true/false. Using default: false"
+                assume_defaults=false
+                assume_defaults_source="default"
             fi
         fi
 
