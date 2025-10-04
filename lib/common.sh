@@ -30,6 +30,9 @@ git_commit_email=""
 : "${credentials_encrypted_source:=unset}"
 : "${assume_defaults_source:=unset}"
 : "${environment_source:=unset}"
+: "${github_path_source:=unset}"
+
+github_path="${github_path:-}"
 
 # ANSI colors for better UI (using printf for robustness)
 printf -v RED     '\033[0;31m'
@@ -194,6 +197,129 @@ sanitize_workflow_filename_part() {
     fi
 
     printf '%s\n' "$sanitized"
+}
+
+normalize_github_path_prefix() {
+    local raw_input="$1"
+    if [[ -z "$raw_input" ]]; then
+        printf '%s\n' ""
+        return
+    fi
+
+    local cleaned
+    cleaned="${raw_input//\\//}"
+    cleaned="$(printf '%s' "$cleaned" | tr -d '\r\n\t')"
+    cleaned="$(printf '%s' "$cleaned" | sed 's#[[:space:]]\+# #g')"
+    cleaned="$(printf '%s' "$cleaned" | sed 's#^ *##;s# *$##')"
+    cleaned="$(printf '%s' "$cleaned" | tr -s '/')"
+    cleaned="${cleaned#/}"
+    cleaned="${cleaned%/}"
+
+    local -a sanitized_parts=()
+    if [[ -n "$cleaned" ]]; then
+        IFS='/' read -r -a parts <<< "$cleaned"
+        local segment
+        for segment in "${parts[@]}"; do
+            if [[ -z "$segment" || "$segment" == "." || "$segment" == ".." ]]; then
+                continue
+            fi
+            local normalized_segment
+            normalized_segment="$(sanitize_filename_component "$segment" 96)"
+            normalized_segment="${normalized_segment// /-}"
+            normalized_segment="${normalized_segment//--/-}"
+            normalized_segment="${normalized_segment//__/_}"
+            normalized_segment="${normalized_segment//[^A-Za-z0-9._-]/}"
+            normalized_segment="$(printf '%s' "$normalized_segment" | sed 's/^-\+//;s/-\+$//')"
+            if [[ -z "$normalized_segment" || "$normalized_segment" == "." || "$normalized_segment" == ".." ]]; then
+                continue
+            fi
+            sanitized_parts+=("$normalized_segment")
+        done
+    fi
+
+    if ((${#sanitized_parts[@]} == 0)); then
+        printf '%s\n' ""
+    else
+        (IFS=/; printf '%s\n' "${sanitized_parts[*]}")
+    fi
+}
+
+apply_github_path_prefix() {
+    local relative="$1"
+    local trimmed="${relative#/}"
+    trimmed="${trimmed%/}"
+
+    if [[ -n "$github_path" ]]; then
+        local prefix="$github_path"
+        if [[ "$trimmed" == "$prefix" || "$trimmed" == "$prefix"/* ]]; then
+            printf '%s\n' "$trimmed"
+            return
+        fi
+        if [[ -n "$trimmed" ]]; then
+            printf '%s/%s\n' "$prefix" "$trimmed"
+        else
+            printf '%s\n' "$prefix"
+        fi
+    else
+        printf '%s\n' "$trimmed"
+    fi
+}
+
+strip_github_path_prefix() {
+    local path_value="$1"
+    local normalized="${path_value#/}"
+    normalized="${normalized%/}"
+
+    if [[ -z "$github_path" ]]; then
+        printf '%s\n' "$normalized"
+        return
+    fi
+
+    local prefix="$github_path"
+    if [[ "$normalized" == "$prefix" ]]; then
+        printf '%s\n' ""
+        return
+    fi
+
+    if [[ "$normalized" == "$prefix"/* ]]; then
+        local remainder="${normalized#${prefix}/}"
+        printf '%s\n' "$remainder"
+        return
+    fi
+
+    printf '%s\n' "$normalized"
+}
+
+path_matches_github_prefix() {
+    local candidate="$1"
+    local normalized="${candidate#/}"
+    normalized="${normalized%/}"
+
+    if [[ -z "$github_path" ]]; then
+        return 0
+    fi
+
+    local prefix="$github_path"
+    if [[ "$normalized" == "$prefix" ]] || [[ "$normalized" == "$prefix"/* ]]; then
+        return 0
+    fi
+
+    return 1
+}
+
+resolve_github_storage_root() {
+    local base_dir="$1"
+    if [[ -z "$github_path" ]]; then
+        printf '%s\n' "${base_dir%/}"
+        return
+    fi
+
+    if [[ -z "$base_dir" ]]; then
+        printf '%s\n' "$github_path"
+        return
+    fi
+
+    printf '%s/%s\n' "${base_dir%/}" "$github_path"
 }
 
 # --- Helper Functions (using new log function) ---
@@ -474,6 +600,24 @@ load_config() {
             local_rotation_limit="$LOCAL_ROTATION_LIMIT"
             local_rotation_limit_source="config"
         fi
+
+        if [[ -z "$github_path" && -n "${GITHUB_PATH:-}" ]]; then
+            local raw_github_path="$GITHUB_PATH"
+            local normalized_github_path
+            normalized_github_path="$(normalize_github_path_prefix "$raw_github_path")"
+            if [[ -z "$normalized_github_path" ]]; then
+                if [[ -n "$raw_github_path" ]]; then
+                    log WARN "Configured GITHUB_PATH '$raw_github_path' contained no usable characters after normalization; ignoring."
+                fi
+                github_path=""
+            else
+                if [[ "$normalized_github_path" != "${raw_github_path#/}" && "$verbose" == "true" ]]; then
+                    log DEBUG "Normalized GITHUB_PATH from '$raw_github_path' to '$normalized_github_path'"
+                fi
+                github_path="$normalized_github_path"
+                github_path_source="config"
+            fi
+        fi
         
         # === N8N API SETTINGS ===
         if [[ -z "$n8n_base_url" && -n "${N8N_BASE_URL:-}" ]]; then
@@ -555,6 +699,10 @@ load_config() {
         if [[ "$local_rotation_limit_source" == "unset" ]]; then
             local_rotation_limit_source="default"
         fi
+    fi
+
+    if [[ "$github_path_source" == "unset" ]]; then
+        github_path_source="default"
     fi
     
     # Set other defaults
@@ -642,8 +790,16 @@ load_config() {
     if [[ "$config_found" == "true" ]]; then
         log DEBUG "Configuration loaded successfully"
         log DEBUG "Storage: workflows=($workflows) $(format_storage_value $workflows), credentials=($credentials) $(format_storage_value $credentials)"
+        if [[ -n "$github_path" ]]; then
+            log DEBUG "GitHub path prefix: $github_path"
+        else
+            log DEBUG "GitHub path prefix: <none>"
+        fi
     else
         log DEBUG "No configuration file loaded, using defaults"
+        if [[ -n "$github_path" ]]; then
+            log DEBUG "GitHub path prefix: $github_path"
+        fi
     fi
 }
 
@@ -710,6 +866,36 @@ dockExec() {
             return 1
         fi
         
+        return 0
+    fi
+}
+
+dockExecAsRoot() {
+    local container_id="$1"
+    local cmd="$2"
+    local is_dry_run=$3
+    local output=""
+    local exit_code=0
+
+    if $is_dry_run; then
+        log DRYRUN "Would execute as root in container $container_id: $cmd"
+        return 0
+    else
+        log DEBUG "Executing as root in container $container_id: $cmd"
+        output=$(docker exec --user root "$container_id" sh -c "$cmd" 2>&1) || exit_code=$?
+
+        if [ "$verbose" = "true" ] && [ -n "$output" ]; then
+            log DEBUG "Container output (root):\n$(echo "$output" | sed 's/^/  /')"
+        fi
+
+        if [ $exit_code -ne 0 ]; then
+            log ERROR "Command failed as root in container (Exit Code: $exit_code): $cmd"
+            if [ "$verbose" != "true" ] && [ -n "$output" ]; then
+                log ERROR "Container output (root):\n$(echo "$output" | sed 's/^/  /')"
+            fi
+            return 1
+        fi
+
         return 0
     fi
 }

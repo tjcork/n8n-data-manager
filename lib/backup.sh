@@ -323,8 +323,13 @@ copy_workflows_flat_with_names() {
         return 1
     fi
 
-    if ! mkdir -p "$target_dir"; then
-        log WARN "Fallback copy failed - could not ensure target directory: $target_dir"
+    local root_dir="$target_dir"
+    if [[ -n "$github_path" ]]; then
+        root_dir="$target_dir/$github_path"
+    fi
+
+    if ! mkdir -p "$root_dir"; then
+        log WARN "Fallback copy failed - could not ensure target directory: $root_dir"
         return 1
     fi
 
@@ -338,7 +343,7 @@ copy_workflows_flat_with_names() {
         workflow_name=$(jq -r '.name // "Unnamed Workflow"' "$workflow_file" 2>/dev/null)
 
         local filename
-        filename=$(generate_unique_workflow_filename "$target_dir" "$workflow_id" "$workflow_name" registry)
+        filename=$(generate_unique_workflow_filename "$root_dir" "$workflow_id" "$workflow_name" registry)
 
         if [[ -z "$filename" ]]; then
             log WARN "Skipped workflow during fallback - could not derive filename"
@@ -346,13 +351,13 @@ copy_workflows_flat_with_names() {
             continue
         fi
 
-        if ! cp "$workflow_file" "$target_dir/$filename"; then
+        if ! cp "$workflow_file" "$root_dir/$filename"; then
             log WARN "Failed to copy workflow to fallback target: $filename"
             success=false
             continue
         fi
 
-        if ! prettify_json_file "$target_dir/$filename"; then
+        if ! prettify_json_file "$root_dir/$filename"; then
             log WARN "Failed to prettify workflow JSON: $filename"
             success=false
             continue
@@ -458,7 +463,13 @@ organize_workflows_by_folders() {
         relative_path="${relative_path#/}"
         relative_path="${relative_path%/}"
 
-        local destination_dir="$target_dir/$relative_path"
+        local storage_relative_path
+        storage_relative_path="$(apply_github_path_prefix "$relative_path")"
+
+        local destination_dir="$target_dir"
+        if [[ -n "$storage_relative_path" ]]; then
+            destination_dir="$target_dir/$storage_relative_path"
+        fi
         if ! mkdir -p "$destination_dir"; then
             log WARN "Failed to create destination directory: $destination_dir"
             commit_fail=true
@@ -474,6 +485,7 @@ organize_workflows_by_folders() {
             --arg name "$workflow_name" \
             --arg filename "$generated_filename" \
             --arg relative "$relative_path" \
+            --arg storage "$storage_relative_path" \
             --arg display "$display_path" \
             --arg projectId "$project_id" \
             --arg projectName "$project_name" \
@@ -484,6 +496,7 @@ organize_workflows_by_folders() {
                 name: $name,
                 filename: $filename,
                 relativePath: $relative,
+                storagePath: $storage,
                 displayPath: $display,
                 project: {
                     id: $projectId,

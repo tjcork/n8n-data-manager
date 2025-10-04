@@ -52,8 +52,10 @@ validate_credentials_payload() {
     local jq_temp_err
     jq_temp_err=$(mktemp -t n8n-cred-validate-err-XXXXXXXX.log)
     if ! jq empty "$credentials_path" 2>"$jq_temp_err"; then
-        jq_error=$(<"$jq_temp_err")
-        rm -f "$jq_temp_err"
+        local relative_path
+        relative_path=$(printf '%s' "$entry" | jq -r '.relativePath // empty' 2>/dev/null)
+        local storage_path
+        storage_path=$(printf '%s' "$entry" | jq -r '.storagePath // empty' 2>/dev/null)
         log ERROR "Unable to parse credentials file for validation: $credentials_path"
         if [[ -n "$jq_error" ]]; then
             log DEBUG "jq parse error: $jq_error"
@@ -64,25 +66,6 @@ validate_credentials_payload() {
 
     local normalized_json
     normalized_json=$(mktemp -t n8n-cred-validate-normalized-XXXXXXXX.json)
-    local normalize_filter='[ if type=="array" then .[] elif (type=="object" and has("data") and (.data|type=="array")) then (.data[]) else empty end ]'
-    if ! jq "$normalize_filter" "$credentials_path" > "$normalized_json" 2>>"$jq_temp_err"; then
-        jq_error=$(<"$jq_temp_err")
-        rm -f "$jq_temp_err" "$normalized_json"
-        log ERROR "Unable to normalize credentials file for validation: $credentials_path"
-        if [[ -n "$jq_error" ]]; then
-            log DEBUG "jq normalize error: $jq_error"
-        fi
-        return 1
-    fi
-
-    local invalid_filter_file
-    invalid_filter_file=$(mktemp -t n8n-cred-invalid-filter-XXXXXXXX.jq)
-    cat <<'JQ_FILTER' > "$invalid_filter_file"
-[ .[]
-    | select(has("data") and (.data | type != "object"))
-    | (.name // (if has("id") then ("ID:" + (.id|tostring)) else "unknown" end))
-] | unique | join(", ")
-JQ_FILTER
 
     local invalid_entries
     invalid_entries=$(jq -r -f "$invalid_filter_file" "$normalized_json") || invalid_entries=""
@@ -165,7 +148,12 @@ apply_folder_structure_from_manifest() {
     fi
 
     local folders_json
-    if ! folders_json=$(n8n_api_get_folders); then
+    if ! folders_json=$(n8n_api_get_folders 2>&1); then
+        if echo "$folders_json" | grep -q "404"; then
+            log WARN "Folder structure not supported by this n8n version (HTTP 404). Skipping folder restoration."
+            finalize_n8n_api_auth
+            return 0
+        fi
         finalize_n8n_api_auth
         log ERROR "Failed to fetch folders from n8n API."
         return 1
@@ -182,6 +170,7 @@ apply_folder_structure_from_manifest() {
     declare -A project_slug_map=()
     declare -A project_id_map=()
     local default_project_id=""
+    local personal_project_id=""
 
     while IFS= read -r project_entry; do
         local pid
@@ -195,9 +184,21 @@ apply_folder_structure_from_manifest() {
         key=$(printf '%s' "$pname" | tr '[:upper:]' '[:lower:]')
         project_name_map["$key"]="$pid"
         local pslug
-        pslug=$(sanitize_slug "$pname")
+        pslug=$(printf '%s' "$project_entry" | jq -r '.slug // empty' 2>/dev/null)
+        if [[ -z "$pslug" || "$pslug" == "null" ]]; then
+            pslug=$(sanitize_slug "$pname")
+        fi
         if [[ -n "$pslug" ]]; then
             project_slug_map["$(printf '%s' "$pslug" | tr '[:upper:]' '[:lower:]')"]="$pid"
+        fi
+        local ptype
+        ptype=$(printf '%s' "$project_entry" | jq -r '.type // empty' 2>/dev/null)
+        if [[ -z "$personal_project_id" ]]; then
+            if [[ "$ptype" == "personal" ]]; then
+                personal_project_id="$pid"
+            elif [[ "$key" == "personal" ]]; then
+                personal_project_id="$pid"
+            fi
         fi
         project_id_map["$pid"]="$pname"
         if [[ -z "$default_project_id" ]]; then
@@ -209,6 +210,10 @@ apply_folder_structure_from_manifest() {
         finalize_n8n_api_auth
         log ERROR "No projects available in n8n instance; cannot restore folder structure."
         return 1
+    fi
+
+    if [[ -n "$personal_project_id" ]]; then
+        default_project_id="$personal_project_id"
     fi
 
     declare -A folder_name_lookup=()
@@ -288,6 +293,10 @@ apply_folder_structure_from_manifest() {
 
     local moved_count=0
     local overall_success=true
+    local project_created_count=0
+    local folder_created_count=0
+    local folder_moved_count=0
+    local workflow_assignment_count=0
 
     while IFS= read -r entry; do
         local workflow_id
@@ -296,6 +305,20 @@ apply_folder_structure_from_manifest() {
         workflow_name=$(printf '%s' "$entry" | jq -r '.name // "Workflow"' 2>/dev/null)
         local display_path
         display_path=$(printf '%s' "$entry" | jq -r '.displayPath // empty' 2>/dev/null)
+
+        local storage_path
+        storage_path=$(printf '%s' "$entry" | jq -r '.storagePath // empty' 2>/dev/null)
+        local relative_path_entry
+        relative_path_entry=$(printf '%s' "$entry" | jq -r '.relativePath // empty' 2>/dev/null)
+        local effective_storage_path="$storage_path"
+        if [[ -z "$effective_storage_path" || "$effective_storage_path" == "null" ]]; then
+            effective_storage_path="$(apply_github_path_prefix "$relative_path_entry")"
+        fi
+
+        if ! path_matches_github_prefix "$effective_storage_path"; then
+            log DEBUG "Skipping workflow ${workflow_id:-unknown} outside configured GITHUB_PATH prefix"
+            continue
+        fi
 
         local project_name
         project_name=$(printf '%s' "$entry" | jq -r '.project.name // empty' 2>/dev/null)
@@ -332,8 +355,10 @@ apply_folder_structure_from_manifest() {
 
         if [[ -z "$target_project_id" ]]; then
             target_project_id="$default_project_id"
-            if [[ -n "$project_name" ]]; then
-                log WARN "Project '$project_name' not found; assigning workflow '$workflow_name' to default project."
+            if [[ -n "$project_name" && "$project_name" != "null" ]]; then
+                log INFO "Mapping manifest project '$project_name' to default personal project for workflow '$workflow_name'."
+            elif [[ -n "$project_slug" && "$project_slug" != "null" ]]; then
+                log INFO "Mapping manifest project slug '$project_slug' to default personal project for workflow '$workflow_name'."
             fi
         fi
 
@@ -422,6 +447,7 @@ apply_folder_structure_from_manifest() {
                         folder_parent_lookup["$global_candidate"]="$parent_key"
                         folder_project_lookup["$global_candidate"]="$target_project_id"
                         log INFO "Moved existing n8n folder '${folder_name:-$folder_slug}' to new parent"
+                        folder_moved_count=$((folder_moved_count + 1))
                     fi
                     existing_folder_id="$global_candidate"
                 fi
@@ -438,24 +464,27 @@ apply_folder_structure_from_manifest() {
                     folder_failure=true
                     break
                 fi
-                existing_folder_id=$(printf '%s' "$create_response" | jq -r '.id // empty' 2>/dev/null)
+                local create_data
+                create_data=$(printf '%s' "$create_response" | jq '.data // .' 2>/dev/null)
+                existing_folder_id=$(printf '%s' "$create_data" | jq -r '.id // empty' 2>/dev/null)
                 if [[ -z "$existing_folder_id" ]]; then
                     log ERROR "n8n API did not return an ID when creating folder '$create_name'"
                     folder_failure=true
+                    overall_success=false
                     break
                 fi
                 local response_name
-                response_name=$(printf '%s' "$create_response" | jq -r '.name // empty' 2>/dev/null)
+                response_name=$(printf '%s' "$create_data" | jq -r '.name // empty' 2>/dev/null)
                 if [[ -n "$response_name" && "$response_name" != "null" ]]; then
                     folder_name="$response_name"
                 fi
                 local response_slug
-                response_slug=$(printf '%s' "$create_response" | jq -r '.slug // empty' 2>/dev/null)
+                response_slug=$(printf '%s' "$create_data" | jq -r '.slug // empty' 2>/dev/null)
                 if [[ -n "$response_slug" && "$response_slug" != "null" ]]; then
                     folder_slug="$response_slug"
                 fi
                 local response_parent
-                response_parent=$(printf '%s' "$create_response" | jq -r '.parentFolderId // empty' 2>/dev/null)
+                response_parent=$(printf '%s' "$create_data" | jq -r '.parentFolderId // empty' 2>/dev/null)
                 if [[ "$response_parent" == "null" ]]; then
                     response_parent=""
                 fi
@@ -465,6 +494,7 @@ apply_folder_structure_from_manifest() {
                 folder_slug_by_id["$existing_folder_id"]="$folder_slug"
                 folder_name_by_id["$existing_folder_id"]="$folder_name"
                 log INFO "Created n8n folder '$create_name' in project '${project_id_map[$target_project_id]:-Default}'"
+                folder_created_count=$((folder_created_count + 1))
             fi
 
             # Recompute lower-case keys in case name or slug changed (e.g. after creation)
@@ -543,12 +573,15 @@ apply_folder_structure_from_manifest() {
         workflow_project_lookup["$workflow_id"]="$target_project_id"
         workflow_parent_lookup["$workflow_id"]="$assignment_folder_id"
         moved_count=$((moved_count + 1))
+        workflow_assignment_count=$((workflow_assignment_count + 1))
     done < <(jq -c '.workflows[]' "$manifest_path" 2>/dev/null)
 
     finalize_n8n_api_auth
 
+    log INFO "Folder synchronization summary: ${project_created_count} project(s) created, ${folder_created_count} folder(s) created, ${folder_moved_count} folder(s) repositioned, ${workflow_assignment_count} workflow(s) reassigned."
+
     if ! $overall_success; then
-        log WARN "Folder structure restoration completed with warnings ($moved_count/$total_count workflows updated)."
+        log WARN "Folder structure restoration completed with warnings (${moved_count}/${total_count} workflows updated)."
         return 1
     fi
 
@@ -590,6 +623,8 @@ copy_manifest_workflows_to_container() {
         workflow_id=$(printf '%s' "$entry" | jq -r '.id // empty' 2>/dev/null)
         local relative_path
         relative_path=$(printf '%s' "$entry" | jq -r '.relativePath // empty' 2>/dev/null)
+        local storage_path
+        storage_path=$(printf '%s' "$entry" | jq -r '.storagePath // empty' 2>/dev/null)
 
         if [[ -z "$filename" || "$filename" == "null" ]]; then
             log WARN "Manifest entry $entry_index missing filename; skipping"
@@ -601,18 +636,28 @@ copy_manifest_workflows_to_container() {
             relative_path=""
         fi
 
-        local sanitized_relative="${relative_path#/}"
-        sanitized_relative="${sanitized_relative%/}"
+        local effective_storage_path="$storage_path"
+        if [[ -z "$effective_storage_path" || "$effective_storage_path" == "null" ]]; then
+            effective_storage_path="$(apply_github_path_prefix "$relative_path")"
+        fi
 
-        if [[ "$sanitized_relative" == *".."* ]]; then
-            log WARN "Skipping manifest entry $entry_index due to unsafe relative path: $sanitized_relative"
+        if ! path_matches_github_prefix "$effective_storage_path"; then
+            log DEBUG "Skipping manifest entry $entry_index outside configured GITHUB_PATH prefix"
+            continue
+        fi
+
+        local sanitized_storage="${effective_storage_path#/}"
+        sanitized_storage="${sanitized_storage%/}"
+
+        if [[ "$sanitized_storage" == *".."* ]]; then
+            log WARN "Skipping manifest entry $entry_index due to unsafe storage path: $sanitized_storage"
             copy_success=false
             continue
         fi
 
         local source_dir="$manifest_base"
-        if [[ -n "$sanitized_relative" ]]; then
-            source_dir="$source_dir/$sanitized_relative"
+        if [[ -n "$sanitized_storage" ]]; then
+            source_dir="$source_dir/$sanitized_storage"
         fi
 
         local source_path="$source_dir/$filename"
@@ -711,6 +756,15 @@ generate_folder_manifest_from_directory() {
         fi
         relative_dir="${relative_dir%/}"
 
+        local storage_path="$relative_dir"
+        storage_path="${storage_path#/}"
+        storage_path="${storage_path%/}"
+
+        local relative_dir_without_prefix
+        relative_dir_without_prefix="$(strip_github_path_prefix "$storage_path")"
+        relative_dir_without_prefix="${relative_dir_without_prefix#/}"
+        relative_dir_without_prefix="${relative_dir_without_prefix%/}"
+
         local workflow_id
         workflow_id=$(jq -r '.id // empty' "$workflow_file" 2>/dev/null)
         if [[ -z "$workflow_id" ]]; then
@@ -723,8 +777,8 @@ generate_folder_manifest_from_directory() {
         workflow_name=$(jq -r '.name // "Unnamed Workflow"' "$workflow_file" 2>/dev/null)
 
         local -a path_parts=()
-        if [[ -n "$relative_dir" ]]; then
-            IFS='/' read -r -a path_parts <<< "$relative_dir"
+        if [[ -n "$relative_dir_without_prefix" ]]; then
+            IFS='/' read -r -a path_parts <<< "$relative_dir_without_prefix"
         fi
 
         local -a slug_parts=()
@@ -756,7 +810,7 @@ generate_folder_manifest_from_directory() {
             folder_slugs=("${slug_parts[@]:1}")
         fi
 
-        local relative_path="$relative_dir"
+    local relative_path="$relative_dir_without_prefix"
 
         local project_name
         project_name=$(unslug_to_title "$project_slug")
@@ -798,6 +852,7 @@ generate_folder_manifest_from_directory() {
             --arg name "$workflow_name" \
             --arg filename "$filename" \
             --arg relative "$relative_path" \
+            --arg storage "$storage_path" \
             --arg display "$display_path" \
             --arg projectSlug "$project_slug" \
             --arg projectName "$project_name" \
@@ -807,6 +862,7 @@ generate_folder_manifest_from_directory() {
                 name: $name,
                 filename: $filename,
                 relativePath: $relative,
+                storagePath: $storage,
                 displayPath: $display,
                 project: {
                     id: null,
@@ -974,124 +1030,8 @@ restore() {
     if $is_dry_run; then log WARN "DRY RUN MODE ENABLED - NO CHANGES WILL BE MADE"; fi
     
     # Show restore plan for clarity
-    if [ -t 0 ] && [[ "${assume_defaults:-false}" != "true" ]] && ! $is_dry_run; then
-        show_restore_plan "$restore_scope" "$github_repo" "$branch" "$workflows_mode" "$credentials_mode"
-    fi
-
-    if [ -t 0 ] && [[ "${assume_defaults:-false}" != "true" ]] && ! $is_dry_run; then
-        printf "Are you sure you want to proceed? (yes/no): "
-        local confirm
-        read -r confirm
-        if [[ "$confirm" != "yes" && "$confirm" != "y" ]]; then
-            log INFO "Restore cancelled by user."
-            return 0
-        fi
-    elif ! $is_dry_run; then
-        log WARN "Running restore non-interactively (workflows mode: $(format_storage_value $workflows_mode), credentials mode: $(format_storage_value $credentials_mode)). Proceeding without confirmation."
-    fi
-
-    # --- 1. Pre-restore Backup --- 
-    log HEADER "Step 1: Creating Pre-restore Backup"
-    local pre_restore_dir=""
-    pre_restore_dir=$(mktemp -d -t n8n-prerestore-XXXXXXXXXX)
-    log DEBUG "Created pre-restore backup directory: $pre_restore_dir"
-
-    local pre_workflows="${pre_restore_dir}/workflows.json"
-    local pre_credentials="${pre_restore_dir}/credentials.json"
-    local container_pre_workflows="/tmp/pre_workflows.json"
-    local container_pre_credentials="/tmp/pre_credentials.json"
-
-    local backup_failed=false
-    local no_existing_data=false
-    log INFO "Exporting current n8n data for backup..."
-    
-    # Function to check if output indicates no data
-    check_no_data() {
-        local output="$1"
-        if echo "$output" | grep -q "No workflows found" || echo "$output" | grep -q "No credentials found"; then
-            return 0
-        fi
-        return 1
-    }
-
-    if [[ "$workflows_mode" != "0" ]]; then
-        local workflow_output
-    workflow_output=$(docker exec "$container_id" sh -c "n8n export:workflow --all --output=$container_pre_workflows" 2>&1) || {
-            if check_no_data "$workflow_output"; then
-                log INFO "No existing workflows found - this is a clean installation"
-                no_existing_data=true
-                # Create empty workflows file
-                echo "[]" | docker exec -i "$container_id" sh -c "cat > $container_pre_workflows"
-            else
-                log ERROR "Failed to export workflows: $workflow_output"
-                backup_failed=true
-            fi
-        }
-    fi
-
-    if [[ "$credentials_mode" != "0" ]]; then
-        if ! $backup_failed; then
-            local cred_output
-            cred_output=$(docker exec "$container_id" sh -c "n8n export:credentials --all --decrypted --output=$container_pre_credentials" 2>&1) || {
-                if check_no_data "$cred_output"; then
-                    log INFO "No existing credentials found - this is a clean installation"
-                    no_existing_data=true
-                    # Create empty credentials file
-                    echo "[]" | docker exec -i "$container_id" sh -c "cat > $container_pre_credentials"
-                else
-                    log ERROR "Failed to export credentials: $cred_output"
-                    backup_failed=true
-                fi
-            }
-        fi
-    fi
-
-    if $backup_failed; then
-        log WARN "Could not export current data completely. Cannot create pre-restore backup."
-        dockExec "$container_id" "rm -f $container_pre_workflows $container_pre_credentials" false || true
-        rm -rf "$pre_restore_dir"
-        pre_restore_dir=""
-        if ! $is_dry_run; then
-            log ERROR "Cannot proceed with restore safely without pre-restore backup."
-            return 1
-        fi
-    elif $no_existing_data; then
-        log INFO "No existing data found - proceeding with restore without pre-restore backup"
-        # Copy the empty files we created to the backup directory
-        if [[ "$workflows_mode" != "0" ]]; then
-            docker cp "${container_id}:${container_pre_workflows}" "$pre_workflows" || true
-        fi
-        if [[ "$credentials_mode" != "0" ]]; then
-            docker cp "${container_id}:${container_pre_credentials}" "$pre_credentials" || true
-        fi
-        dockExec "$container_id" "rm -f $container_pre_workflows $container_pre_credentials" false || true
-    else
-        log INFO "Copying current data to host backup directory..."
-        local copy_failed=false
-        if [[ "$workflows_mode" != "0" ]]; then
-            if $is_dry_run; then
-                log DRYRUN "Would copy ${container_id}:${container_pre_workflows} to $pre_workflows"
-            elif ! docker cp "${container_id}:${container_pre_workflows}" "$pre_workflows"; then copy_failed=true; fi
-        fi
-        if [[ "$credentials_mode" != "0" ]]; then
-             if $is_dry_run; then
-                 log DRYRUN "Would copy ${container_id}:${container_pre_credentials} to $pre_credentials"
-             elif ! docker cp "${container_id}:${container_pre_credentials}" "$pre_credentials"; then copy_failed=true; fi
-        fi
-        
-        dockExec "$container_id" "rm -f $container_pre_workflows $container_pre_credentials" "$is_dry_run" || true
-
-        if $copy_failed; then
-            log ERROR "Failed to copy backup files from container. Cannot proceed with restore safely."
-            rm -rf "$pre_restore_dir"
-            return 1
-        else
-            log SUCCESS "Pre-restore backup created successfully."
-        fi
-    fi
-
-    # --- 2. Prepare backup sources based on selected modes ---
-    log HEADER "Step 2: Preparing Backup Sources"
+    # --- 1. Prepare backup sources based on selected modes ---
+    log HEADER "Step 1: Preparing Backup Sources"
 
     if [[ "$workflows_mode" == "2" || "$credentials_mode" == "2" ]]; then
         requires_remote=true
@@ -1107,7 +1047,6 @@ restore() {
         if ! git clone --depth 1 --branch "$branch" "$git_repo_url" "$download_dir"; then
             log ERROR "Failed to clone repository. Check URL, token, branch, and permissions."
             rm -rf "$download_dir"
-            if [ -n "$pre_restore_dir" ]; then log WARN "Pre-restore backup kept at: $pre_restore_dir"; fi
             return 1
         fi
 
@@ -1116,7 +1055,6 @@ restore() {
         cd "$download_dir" || {
             log ERROR "Failed to change to download directory"
             rm -rf "$download_dir"
-            if [ -n "$pre_restore_dir" ]; then log WARN "Pre-restore backup kept at: $pre_restore_dir"; fi
             return 1
         }
 
@@ -1302,17 +1240,30 @@ restore() {
                     log ERROR "Structured workflow directory not found for import"
                     file_validation_passed=false
                 else
-                    local separated_count
-                    separated_count=$(find "$structured_workflows_dir" -type f -name "*.json" \
-                        ! -path "*/.credentials/*" \
-                        ! -name "credentials.json" \
-                        ! -name "workflows.json" \
-                        -print | wc -l | tr -d ' ')
-                    if [[ "$separated_count" -eq 0 ]]; then
-                        log ERROR "No workflow JSON files found for directory import in $structured_workflows_dir"
+                    local validation_dir="$structured_workflows_dir"
+                    if [[ -n "$github_path" ]]; then
+                        validation_dir="$(resolve_github_storage_root "$validation_dir")"
+                    fi
+
+                    if [[ -z "$validation_dir" || ! -d "$validation_dir" ]]; then
+                        log ERROR "Structured workflow directory for configured GITHUB_PATH not found"
                         file_validation_passed=false
-                    else
-                        log SUCCESS "Detected $separated_count workflow JSON file(s) for directory import"
+                        validation_dir=""
+                    fi
+
+                    if [[ -n "$validation_dir" ]]; then
+                        local separated_count
+                        separated_count=$(find "$validation_dir" -type f -name "*.json" \
+                            ! -path "*/.credentials/*" \
+                            ! -name "credentials.json" \
+                            ! -name "workflows.json" \
+                            -print | wc -l | tr -d ' ')
+                        if [[ "$separated_count" -eq 0 ]]; then
+                            log ERROR "No workflow JSON files found for directory import in $validation_dir"
+                            file_validation_passed=false
+                        else
+                            log SUCCESS "Detected $separated_count workflow JSON file(s) for directory import"
+                        fi
                     fi
                 fi
             fi
@@ -1366,12 +1317,22 @@ restore() {
         if [[ -n "$download_dir" ]]; then
             rm -rf "$download_dir"
         fi
-        if [ -n "$pre_restore_dir" ]; then log WARN "Pre-restore backup kept at: $pre_restore_dir"; fi
         return 1
     fi
     
-    # --- 3. Import Data ---
-    log HEADER "Step 3: Importing Data into n8n"
+    # --- 2. Import Data ---
+    log HEADER "Step 2: Importing Data into n8n"
+    
+    local pre_import_workflow_count=0
+    if [[ "$workflows_mode" != "0" ]] && [ "$is_dry_run" != "true" ]; then
+        local count_output
+        count_output=$(docker exec "$container_id" sh -c "n8n export:workflow --all --output=/tmp/pre_count.json 2>&1" || echo "")
+        if [[ -n "$count_output" ]] && ! echo "$count_output" | grep -q "Error\|No workflows"; then
+            pre_import_workflow_count=$(docker exec "$container_id" sh -c "cat /tmp/pre_count.json 2>/dev/null | jq 'length' 2>/dev/null || echo 0")
+            docker exec "$container_id" sh -c "rm -f /tmp/pre_count.json" 2>/dev/null || true
+        fi
+        log DEBUG "Pre-import workflow count: $pre_import_workflow_count"
+    fi
 
     local container_import_workflows=""
     local workflow_import_mode="file"
@@ -1401,7 +1362,6 @@ restore() {
                     if [[ -n "$download_dir" ]]; then
                         rm -rf "$download_dir"
                     fi
-                    if [ -n "$pre_restore_dir" ]; then log WARN "Pre-restore backup kept at: $pre_restore_dir"; fi
                     return 1
                 fi
                 # shellcheck source=lib/decrypt.sh
@@ -1419,7 +1379,6 @@ restore() {
                     if [[ -n "$download_dir" ]]; then
                         rm -rf "$download_dir"
                     fi
-                    if [ -n "$pre_restore_dir" ]; then log WARN "Pre-restore backup kept at: $pre_restore_dir"; fi
                     return 1
                 fi
                 printf '\n' >"$prompt_device" 2>/dev/null || echo >&2
@@ -1430,7 +1389,6 @@ restore() {
                         if [[ -n "$download_dir" ]]; then
                             rm -rf "$download_dir"
                         fi
-                        if [ -n "$pre_restore_dir" ]; then log WARN "Pre-restore backup kept at: $pre_restore_dir"; fi
                         return 1
                     fi
                     log SUCCESS "Credentials decrypted successfully."
@@ -1441,7 +1399,6 @@ restore() {
                     if [[ -n "$download_dir" ]]; then
                         rm -rf "$download_dir"
                     fi
-                    if [ -n "$pre_restore_dir" ]; then log WARN "Pre-restore backup kept at: $pre_restore_dir"; fi
                     return 1
                 fi
             fi
@@ -1456,7 +1413,6 @@ restore() {
             if [[ -n "$download_dir" ]]; then
                 rm -rf "$download_dir"
             fi
-            if [ -n "$pre_restore_dir" ]; then log WARN "Pre-restore backup kept at: $pre_restore_dir"; fi
             return 1
         fi
     fi
@@ -1471,7 +1427,11 @@ restore() {
                 if $folder_manifest_available; then
                     log DRYRUN "Would stage structured workflows in ${container_import_workflows} using manifest $folder_manifest_path"
                 else
-                    log DRYRUN "Would stage structured workflows in ${container_import_workflows} by scanning directory $structured_workflows_dir"
+                    local stage_source_dir="$structured_workflows_dir"
+                    if [[ -n "$github_path" ]]; then
+                        stage_source_dir="$(resolve_github_storage_root "$stage_source_dir")"
+                    fi
+                    log DRYRUN "Would stage structured workflows in ${container_import_workflows} by scanning directory $stage_source_dir"
                 fi
             else
                 if ! dockExec "$container_id" "rm -rf $container_import_workflows && mkdir -p $container_import_workflows" false; then
@@ -1486,7 +1446,14 @@ restore() {
                             log SUCCESS "Structured workflow files prepared in container directory $container_import_workflows"
                         fi
                     else
-                        if ! stage_directory_workflows_to_container "$structured_workflows_dir" "$container_id" "$container_import_workflows"; then
+                        local stage_source_dir="$structured_workflows_dir"
+                        if [[ -n "$github_path" ]]; then
+                            stage_source_dir="$(resolve_github_storage_root "$stage_source_dir")"
+                        fi
+                        if [[ -z "$stage_source_dir" || ! -d "$stage_source_dir" ]]; then
+                            log ERROR "Structured workflow directory not found for prefix-filtered import: ${stage_source_dir:-<empty>}"
+                            copy_status="failed"
+                        elif ! stage_directory_workflows_to_container "$stage_source_dir" "$container_id" "$container_import_workflows"; then
                             log ERROR "Failed to copy structured workflow files into container."
                             copy_status="failed"
                         else
@@ -1536,8 +1503,16 @@ restore() {
         if [[ -n "$generated_manifest_path" ]]; then
             rm -f "$generated_manifest_path"
         fi
-        if [ -n "$pre_restore_dir" ]; then log WARN "Pre-restore backup kept at: $pre_restore_dir"; fi
         return 1
+    fi
+
+    if [ "$is_dry_run" != "true" ]; then
+        if [[ "$workflows_mode" != "0" ]]; then
+            dockExecAsRoot "$container_id" "if [ -d '$container_import_workflows' ]; then chown -R node:node '$container_import_workflows'; fi" false || log WARN "Unable to adjust ownership for workflow import directory"
+        fi
+        if [[ "$credentials_mode" != "0" ]]; then
+            dockExecAsRoot "$container_id" "if [ -e '$container_import_credentials' ]; then chown -R node:node '$container_import_credentials'; fi" false || log WARN "Unable to adjust ownership for credentials import file"
+        fi
     fi
     
     # Import data
@@ -1548,18 +1523,44 @@ restore() {
     if [[ "$workflows_mode" != "0" ]]; then
         if [ "$is_dry_run" = "true" ]; then
             if [[ "$workflow_import_mode" == "directory" ]]; then
-                log DRYRUN "Would run: n8n import:workflow --separate --input=$container_import_workflows"
+                log DRYRUN "Would enumerate structured workflow JSON files under $container_import_workflows and import each individually"
             else
                 log DRYRUN "Would run: n8n import:workflow --input=$container_import_workflows"
             fi
         else
             log INFO "Importing workflows..."
             if [[ "$workflow_import_mode" == "directory" ]]; then
-                if ! dockExec "$container_id" "n8n import:workflow --separate --input=$container_import_workflows" "$is_dry_run"; then
-                    log ERROR "Failed to import workflows from structured directory"
+                local -a container_workflow_files=()
+                if ! mapfile -t container_workflow_files < <(docker exec "$container_id" sh -c "find '$container_import_workflows' -type f -name '*.json' -print 2>/dev/null | sort" ); then
+                    log ERROR "Unable to enumerate staged workflows in $container_import_workflows"
+                    import_status="failed"
+                elif ((${#container_workflow_files[@]} == 0)); then
+                    log ERROR "No workflow JSON files found in $container_import_workflows to import"
                     import_status="failed"
                 else
-                    log SUCCESS "Structured workflows imported successfully"
+                    local imported_count=0
+                    local failed_count=0
+                    for workflow_file in "${container_workflow_files[@]}"; do
+                        if [[ -z "$workflow_file" ]]; then
+                            continue
+                        fi
+                        log INFO "Importing workflow file: $workflow_file"
+                        local escaped_file
+                        escaped_file=$(printf '%q' "$workflow_file")
+                        if ! dockExec "$container_id" "n8n import:workflow --input=$escaped_file" false; then
+                            log ERROR "Failed to import workflow file: $workflow_file"
+                            failed_count=$((failed_count + 1))
+                        else
+                            imported_count=$((imported_count + 1))
+                        fi
+                    done
+
+                    if (( failed_count > 0 )); then
+                        log ERROR "Failed to import $failed_count workflow file(s) from $container_import_workflows"
+                        import_status="failed"
+                    else
+                        log SUCCESS "Imported $imported_count structured workflow file(s)"
+                    fi
                 fi
             else
                 if ! dockExec "$container_id" "n8n import:workflow --input=$container_import_workflows" "$is_dry_run"; then
@@ -1611,7 +1612,7 @@ restore() {
     # Clean up temporary files in container
     if [ "$is_dry_run" != "true" ]; then
         log INFO "Cleaning up temporary files in container..."
-        dockExec "$container_id" "chmod -R u+w $container_import_workflows $container_import_credentials 2>/dev/null || true; rm -rf $container_import_workflows $container_import_credentials || true" "$is_dry_run" || true
+    dockExecAsRoot "$container_id" "rm -rf $container_import_workflows $container_import_credentials 2>/dev/null || true" "$is_dry_run" || true
     fi
     
     # Clean up downloaded repository
@@ -1622,16 +1623,27 @@ restore() {
     # Handle restore result
     if [ "$import_status" = "failed" ]; then
         log WARN "Restore partially completed with some errors. Check logs for details."
-        if [ -n "$pre_restore_dir" ]; then 
-            log WARN "Pre-restore backup kept at: $pre_restore_dir" 
-        fi
         return 1
     fi
     
-    # Success - cleanup pre-restore backup
-    if [ -n "$pre_restore_dir" ] && [ "$is_dry_run" != "true" ]; then
-        rm -rf "$pre_restore_dir"
-        log INFO "Pre-restore backup cleaned up."
+    # Report workflow import results
+    if [[ "$workflows_mode" != "0" ]] && [ "$is_dry_run" != "true" ]; then
+        local post_import_workflow_count=0
+        local count_output
+        count_output=$(docker exec "$container_id" sh -c "n8n export:workflow --all --output=/tmp/post_count.json 2>&1" || echo "")
+        if [[ -n "$count_output" ]] && ! echo "$count_output" | grep -q "Error"; then
+            post_import_workflow_count=$(docker exec "$container_id" sh -c "cat /tmp/post_count.json 2>/dev/null | jq 'length' 2>/dev/null || echo 0")
+            docker exec "$container_id" sh -c "rm -f /tmp/post_count.json" 2>/dev/null || true
+        fi
+        
+        local newly_added=$((post_import_workflow_count - pre_import_workflow_count))
+        if [[ $newly_added -gt 0 ]]; then
+            log SUCCESS "Imported $newly_added new workflow(s). Total workflows in instance: $post_import_workflow_count"
+        elif [[ $post_import_workflow_count -gt 0 ]]; then
+            log INFO "No new workflows imported; instance currently has $post_import_workflow_count workflow(s)."
+        else
+            log INFO "No workflows found after import."
+        fi
     fi
     
     log HEADER "Restore Summary"

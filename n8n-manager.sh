@@ -53,6 +53,9 @@ dry_run=""     # empty = unset, true/false = explicitly configured
 verbose=""     # empty = unset, true/false = explicitly configured
 needs_github="" # tracks if GitHub access is required
 
+github_path=""
+github_path_source="unset"
+
 # Git/GitHub settings  
 github_token=""
 github_repo=""
@@ -144,6 +147,14 @@ main() {
                 esac
                 ;;
             --path) local_backup_path="$2"; local_backup_path_source="cli"; shift 2 ;;
+            --github-path)
+                local raw_github_path="$2"
+                github_path="$(normalize_github_path_prefix "$raw_github_path")"
+                if [[ -z "$github_path" && -n "$raw_github_path" ]]; then
+                    log WARN "--github-path value '$raw_github_path' normalized to empty; clearing prefix."
+                fi
+                github_path_source="cli"
+                shift 2 ;;
             --decrypt)
                 # Enable/disable encrypted credentials export on CLI
                 case "${2,,}" in
@@ -185,6 +196,13 @@ main() {
         environment_source="default"
     fi
 
+    if [[ -z "$github_path" ]]; then
+        github_path=""
+    fi
+    if [[ "$github_path_source" == "unset" ]]; then
+        github_path_source="default"
+    fi
+
     log HEADER "n8n Backup/Restore Manager v$VERSION"
     log INFO "🚀 Flexible backup storage: local files or Git repository"
     
@@ -214,8 +232,19 @@ main() {
     log DEBUG "Action: $action, Container: $container, Repo: $github_repo"
     log DEBUG "Branch: $github_branch, Workflows: ($workflows) $(format_storage_value $workflows), Credentials: ($credentials) $(format_storage_value $credentials)"
     log DEBUG "Local Path: $local_backup_path, Rotation: $local_rotation_limit"
+    if [[ -n "$github_path" ]]; then
+        log DEBUG "GitHub path prefix: $github_path (source: $github_path_source)"
+    else
+        log DEBUG "GitHub path prefix: <none> (source: $github_path_source)"
+    fi
     
     if [[ "$action" == "restore" ]]; then
+        if [[ -z "$restore_workflows_mode" && -n "$workflows" ]]; then
+            restore_workflows_mode="$workflows"
+        fi
+        if [[ -z "$restore_credentials_mode" && -n "$credentials" ]]; then
+            restore_credentials_mode="$credentials"
+        fi
         case "$restore_type" in
             workflows)
                 restore_workflows_mode=${restore_workflows_mode:-2}

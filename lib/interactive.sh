@@ -51,6 +51,11 @@ show_config_summary() {
     log INFO "   📄 Workflows: $workflows_desc"
     log INFO "   🔒 Credentials: $credentials_desc"
     log INFO "   🌱 Environment: $environment_desc"
+    if [[ -n "$github_path" ]]; then
+        log INFO "   🗂️ GitHub path prefix: $github_path"
+    else
+        log INFO "   🗂️ GitHub path prefix: <none>"
+    fi
     
     if [[ -n "$github_repo" ]]; then
         log INFO "   📚 GitHub: $github_repo (branch: ${github_branch:-main})"
@@ -108,6 +113,7 @@ Options:
   --workflows [mode]    Include workflows in backup. Mode: 0 (disabled), 1 (local, default), 2 (remote Git repo).
   --credentials [mode]  Include credentials in backup. Mode: 0 (disabled), 1 (local, default), 2 (remote Git repo).
     --environment [mode]  Include environment variables. Mode: 0 (disabled, default), 1 (local), 2 (remote Git repo).
+    --github-path <path>  Organize Git-backed files under the given repository subdirectory (defaults to project name).
   --path <path>         Local backup directory path (defaults to '~/n8n-backup').
   --decrypt <true|false>    If true, export credentials decrypted from n8n (not recommended, less secure).
                         Defaults to false to ensure encrypted credential exports.
@@ -451,18 +457,6 @@ show_restore_plan() {
         0) log INFO "🔒 Credentials: Will remain unchanged" ;;
         1) log INFO "🔒 Credentials: Will be restored from local secure storage (~/.n8n-backup/credentials.json)" ;;
         2) log INFO "� Credentials: Will be restored from Git repository" ;;
-    esac
-
-    case "$restore_scope" in
-        "all")
-            log WARN "⚠️  This will REPLACE your current workflows and credentials"
-            ;;
-        "workflows")
-            log WARN "⚠️  This will REPLACE your current workflows only"
-            ;;
-        "credentials")
-            log WARN "⚠️  This will REPLACE your current credentials only"
-            ;;
     esac
 
     return 0

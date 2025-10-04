@@ -8,6 +8,9 @@
 # Source common utilities
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
+# Track last HTTP status from n8n API request helper
+N8N_API_LAST_STATUS=""
+
 # Test n8n API connection using appropriate authentication method
 test_n8n_api_connection() {
     local base_url="$1"
@@ -21,7 +24,7 @@ test_n8n_api_connection() {
     # Test API connection with basic endpoint
     local response
     local http_status
-    if ! response=$(curl -s -w "\\n%{http_code}" -H "X-N8N-API-KEY: $api_key" "$base_url/rest/workflows?limit=1" 2>/dev/null); then
+    if ! response=$(curl -s -w "\n%{http_code}" -H "X-N8N-API-KEY: $api_key" "$base_url/rest/workflows?limit=1" 2>/dev/null); then
         log ERROR "Failed to connect to n8n API at: $base_url"
         return 1
     fi
@@ -811,6 +814,8 @@ n8n_api_request() {
     fi
 
     local response
+    N8N_API_LAST_STATUS=""
+
     if ! response=$(curl "${curl_args[@]}" 2>/dev/null); then
         log ERROR "Failed to contact n8n API endpoint $endpoint"
         return 1
@@ -818,6 +823,7 @@ n8n_api_request() {
 
     local http_status
     http_status=$(echo "$response" | tail -n1)
+    N8N_API_LAST_STATUS="$http_status"
     local body
     body=$(echo "$response" | head -n -1)
 
@@ -838,7 +844,63 @@ n8n_api_get_projects() {
 }
 
 n8n_api_get_folders() {
-    n8n_api_request "GET" "/folders?skip=0&take=1000"
+    local projects_json
+    if ! projects_json=$(n8n_api_get_projects); then
+        log ERROR "Unable to retrieve projects while enumerating folders"
+        return 1
+    fi
+
+    local folders_tmp
+    folders_tmp=$(mktemp -t n8n-folders-XXXXXXXX.json)
+    printf '[]' > "$folders_tmp"
+
+    local found_any="false"
+    local saw_not_found="false"
+
+    while IFS= read -r project_id; do
+        [[ -z "$project_id" ]] && continue
+
+        local folder_response
+        if ! folder_response=$(n8n_api_request "GET" "/projects/$project_id/folders?skip=0&take=1000"); then
+            if [[ "${N8N_API_LAST_STATUS:-}" == "404" ]]; then
+                saw_not_found="true"
+            else
+                log WARN "Failed to fetch folders for project $project_id (HTTP ${N8N_API_LAST_STATUS:-unknown})"
+            fi
+            continue
+        fi
+
+        found_any="true"
+
+        local normalized
+        if ! normalized=$(printf '%s' "$folder_response" | jq -c --arg pid "$project_id" '
+            (if type == "array" then . else (.data // []) end)
+            | map(.projectId = (.projectId // $pid))
+        ' 2>/dev/null); then
+            log WARN "Unable to parse folder list for project $project_id"
+            continue
+        fi
+
+        jq -s -c '.[0] + (.[1] // [])' "$folders_tmp" <(printf '%s' "$normalized") > "${folders_tmp}.tmp"
+        mv "${folders_tmp}.tmp" "$folders_tmp"
+    done < <(printf '%s' "$projects_json" | jq -r '
+        if type == "array" then .[] else (.data // [])[] end
+        | .id // empty
+    ')
+
+    if [[ "$found_any" != "true" && "$saw_not_found" == "true" ]]; then
+        rm -f "$folders_tmp"
+        if ! n8n_api_request "GET" "/folders?skip=0&take=1000"; then
+            return 1
+        fi
+        return 0
+    fi
+
+    local combined
+    combined=$(cat "$folders_tmp")
+    rm -f "$folders_tmp"
+    printf '%s' "$combined"
+    return 0
 }
 
 n8n_api_get_workflows() {
