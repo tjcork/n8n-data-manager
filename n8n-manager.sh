@@ -713,6 +713,24 @@ main() {
         # Get GitHub config only if needed
         if [[ $needs_github == true ]]; then
             get_github_config "$reconfigure_mode"
+            if [[ "$action" == "backup" ]]; then
+                local prompt_github_path=false
+                if [[ "$reconfigure_mode" == "true" ]]; then
+                    prompt_github_path=true
+                elif [[ "$github_path_source" == "default" ]]; then
+                    prompt_github_path=true
+                fi
+
+                if [[ "$prompt_github_path" == true ]]; then
+                    prompt_github_path_prefix
+                else
+                    if [[ -n "$github_path" ]]; then
+                        log INFO "GitHub backups will use existing path prefix: $github_path"
+                    else
+                        log INFO "GitHub backups will use the repository root."
+                    fi
+                fi
+            fi
         else
             log INFO "🏠 Local-only backup - no GitHub configuration needed"
             github_token=""

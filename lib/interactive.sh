@@ -595,3 +595,43 @@ select_environment_storage() {
         esac
     done
 }
+
+prompt_github_path_prefix() {
+    log HEADER "GitHub Storage Path"
+    local current_prefix="$github_path"
+    if [[ -n "$current_prefix" ]]; then
+        log INFO "Current GitHub path prefix: $current_prefix"
+    else
+        log INFO "Current GitHub path prefix: <repository root>"
+    fi
+
+    while true; do
+        if [[ -n "$current_prefix" ]]; then
+            printf "GitHub path prefix (leave blank for repository root): "
+        else
+            printf "GitHub path prefix (e.g., myvps/specific_category, leave blank for root): "
+        fi
+
+        local path_input
+        read -r path_input
+
+        if [[ -z "$path_input" ]]; then
+            github_path=""
+            github_path_source="interactive"
+            log INFO "GitHub backups will be stored at the repository root."
+            return
+        fi
+
+        local normalized
+        normalized="$(normalize_github_path_prefix "$path_input")"
+        if [[ -z "$normalized" ]]; then
+            log WARN "Path removed all characters after normalization. Please try again or leave blank for repository root."
+            continue
+        fi
+
+        github_path="$normalized"
+        github_path_source="interactive"
+        log INFO "GitHub backups will be stored under: $github_path"
+        return
+    done
+}
