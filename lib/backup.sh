@@ -581,8 +581,24 @@ organize_workflows_by_folders() {
         fi
     done < <(find "$source_dir" -type f -name "*.json" -not -path "*/.git/*" -print0)
 
-    while IFS= read -r -d '' existing_file; do
-    if [[ -z "${expected_files[$existing_file]+set}" ]]; then
+    local storage_base_prefix
+    storage_base_prefix="$(resolve_repo_base_prefix)"
+    storage_base_prefix="${storage_base_prefix#/}"
+    storage_base_prefix="${storage_base_prefix%/}"
+
+    local cleanup_root="$target_dir"
+    if [[ -n "$storage_base_prefix" ]]; then
+        cleanup_root="$target_dir/$storage_base_prefix"
+    fi
+
+    local cleanup_root_exists=true
+    if [[ ! -d "$cleanup_root" ]]; then
+        cleanup_root_exists=false
+    fi
+
+    if $cleanup_root_exists; then
+        while IFS= read -r -d '' existing_file; do
+        if [[ -z "${expected_files[$existing_file]+set}" ]]; then
             local workflow_name
             workflow_name=$(jq -r '.name // empty' "$existing_file" 2>/dev/null)
             if [[ -z "$workflow_name" || "$workflow_name" == "null" ]]; then
@@ -610,12 +626,13 @@ organize_workflows_by_folders() {
                 commit_fail=true
             fi
         fi
-    done < <(find "$target_dir" -type f -name "*.json" -not -path "*/.git/*" -print0)
+        done < <(find "$cleanup_root" -type f -name "*.json" -not -path "*/.git/*" -print0)
 
-    while IFS= read -r -d '' empty_dir; do
-        [[ "$empty_dir" == "$target_dir" ]] && continue
-        rmdir "$empty_dir" 2>/dev/null || true
-    done < <(find "$target_dir" -type d -empty -not -path "*/.git/*" -print0)
+        while IFS= read -r -d '' empty_dir; do
+            [[ "$empty_dir" == "$cleanup_root" ]] && continue
+            rmdir "$empty_dir" 2>/dev/null || true
+        done < <(find "$cleanup_root" -type d -empty -not -path "*/.git/*" -print0)
+    fi
 
     local manifest_json
     if ((${#manifest_entries[@]} > 0)); then
