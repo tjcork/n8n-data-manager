@@ -282,9 +282,29 @@ compose_repo_storage_path() {
 
     if [[ -z "$effective_relative" ]]; then
         printf '%s\n' "$base_prefix"
-    else
-        printf '%s/%s\n' "$base_prefix" "$effective_relative"
+        return
     fi
+
+    local normalized_base="$base_prefix"
+    normalized_base="${normalized_base#/}"
+    normalized_base="${normalized_base%/}"
+
+    if [[ -z "$normalized_base" ]]; then
+        printf '%s\n' "$effective_relative"
+        return
+    fi
+
+    if [[ "$effective_relative" == "$normalized_base" ]]; then
+        printf '%s\n' "$effective_relative"
+        return
+    fi
+
+    if [[ "$effective_relative" == "$normalized_base"/* ]]; then
+        printf '%s\n' "$effective_relative"
+        return
+    fi
+
+    printf '%s/%s\n' "$normalized_base" "$effective_relative"
 }
 
 update_project_slug
