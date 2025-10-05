@@ -51,6 +51,7 @@ show_config_summary() {
     log INFO "   📄 Workflows: $workflows_desc"
     log INFO "   🔒 Credentials: $credentials_desc"
     log INFO "   🌱 Environment: $environment_desc"
+    log INFO "   🏷️ Project: ${project_name:-Personal}"
     if [[ -n "$github_path" ]]; then
         log INFO "   🗂️ GitHub path prefix: $github_path"
     else

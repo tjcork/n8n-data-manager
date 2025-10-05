@@ -31,6 +31,10 @@ git_commit_email=""
 : "${assume_defaults_source:=unset}"
 : "${environment_source:=unset}"
 : "${github_path_source:=unset}"
+: "${project_name_source:=unset}"
+
+project_name="${project_name:-Personal}"
+project_slug=""
 
 github_path="${github_path:-}"
 
@@ -198,6 +202,92 @@ sanitize_workflow_filename_part() {
 
     printf '%s\n' "$sanitized"
 }
+
+update_project_slug() {
+    local raw_name="${project_name:-Personal}"
+    if [[ -z "$raw_name" ]]; then
+        raw_name="Personal"
+    fi
+    local sanitized
+    sanitized="$(sanitize_filename_component "$raw_name" 96)"
+    if [[ -z "$sanitized" ]]; then
+        sanitized="Personal"
+    fi
+    project_slug="$sanitized"
+}
+
+normalize_repo_subpath() {
+    local raw_input="$1"
+    if [[ -z "$raw_input" ]]; then
+        printf '%s\n' ""
+        return
+    fi
+    local normalized
+    normalized="$(normalize_github_path_prefix "$raw_input")"
+    printf '%s\n' "$normalized"
+}
+
+resolve_repo_base_prefix() {
+    if [[ -n "$github_path" ]]; then
+        printf '%s\n' "$github_path"
+    else
+        printf '%s\n' "$project_slug"
+    fi
+}
+
+strip_project_prefix_from_path() {
+    local path_value="$1"
+    local trimmed="${path_value#/}"
+    trimmed="${trimmed%/}"
+
+    if [[ -z "$trimmed" ]]; then
+        printf '%s\n' ""
+        return
+    fi
+
+    if [[ -n "$project_slug" ]]; then
+        if [[ "$trimmed" == "$project_slug" ]]; then
+            printf '%s\n' ""
+            return
+        fi
+        if [[ "$trimmed" == "$project_slug"/* ]]; then
+            printf '%s\n' "${trimmed#${project_slug}/}"
+            return
+        fi
+    fi
+
+    printf '%s\n' "$trimmed"
+}
+
+compose_repo_storage_path() {
+    local relative_path="$1"
+    local sanitized_relative
+    sanitized_relative="${relative_path#/}"
+    sanitized_relative="${sanitized_relative%/}"
+
+    local effective_relative
+    if [[ -n "$github_path" ]]; then
+        effective_relative="$(strip_project_prefix_from_path "$sanitized_relative")"
+    else
+        effective_relative="$sanitized_relative"
+    fi
+
+    local base_prefix
+    base_prefix="$(resolve_repo_base_prefix)"
+
+    if [[ -z "$base_prefix" ]]; then
+        printf '%s\n' "$effective_relative"
+        return
+    fi
+
+    if [[ -z "$effective_relative" ]]; then
+        printf '%s\n' "$base_prefix"
+    else
+        printf '%s/%s\n' "$base_prefix" "$effective_relative"
+    fi
+}
+
+update_project_slug
 
 normalize_github_path_prefix() {
     local raw_input="$1"
@@ -618,6 +708,18 @@ load_config() {
                 github_path_source="config"
             fi
         fi
+
+        if [[ -z "$project_name" && -n "${PROJECT:-}" ]]; then
+            local raw_project_name="$PROJECT"
+            raw_project_name="$(echo "$raw_project_name" | tr -d '\r' | xargs)"
+            if [[ -z "$raw_project_name" ]]; then
+                project_name="Personal"
+            else
+                project_name="$raw_project_name"
+            fi
+            project_name_source="config"
+            update_project_slug
+        fi
         
         # === N8N API SETTINGS ===
         if [[ -z "$n8n_base_url" && -n "${N8N_BASE_URL:-}" ]]; then
@@ -699,6 +801,14 @@ load_config() {
         if [[ "$local_rotation_limit_source" == "unset" ]]; then
             local_rotation_limit_source="default"
         fi
+    fi
+
+    if [[ -z "$project_name" ]]; then
+        project_name="Personal"
+        if [[ "$project_name_source" == "unset" ]]; then
+            project_name_source="default"
+        fi
+        update_project_slug
     fi
 
     if [[ "$github_path_source" == "unset" ]]; then

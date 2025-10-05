@@ -442,18 +442,37 @@ organize_workflows_by_folders() {
         display_path=$(jq -r --arg id "$workflow_id" '.workflowsById[$id].displayPath // empty' "$mapping_file" 2>/dev/null)
         local project_id
         project_id=$(jq -r --arg id "$workflow_id" '.workflowsById[$id].project.id // empty' "$mapping_file" 2>/dev/null)
-        local project_name
-        project_name=$(jq -r --arg id "$workflow_id" '.workflowsById[$id].project.name // empty' "$mapping_file" 2>/dev/null)
-        local project_slug
-        project_slug=$(jq -r --arg id "$workflow_id" '.workflowsById[$id].project.slug // empty' "$mapping_file" 2>/dev/null)
+    local workflow_project_name
+    workflow_project_name=$(jq -r --arg id "$workflow_id" '.workflowsById[$id].project.name // empty' "$mapping_file" 2>/dev/null)
+    local workflow_project_slug_from_source
+    workflow_project_slug_from_source=$(jq -r --arg id "$workflow_id" '.workflowsById[$id].project.slug // empty' "$mapping_file" 2>/dev/null)
         local folder_segments_json
         folder_segments_json=$(jq -c --arg id "$workflow_id" '.workflowsById[$id].folders // []' "$mapping_file" 2>/dev/null)
         if [[ -z "$folder_segments_json" || "$folder_segments_json" == "null" ]]; then
             folder_segments_json="[]"
         fi
 
+        local workflow_project_identifier="${workflow_project_name:-}"
+        if [[ -z "$workflow_project_identifier" || "$workflow_project_identifier" == "null" ]]; then
+            workflow_project_identifier="${project_name:-}"
+        fi
+        local workflow_project_slug
+        workflow_project_slug="$(sanitize_filename_component "${workflow_project_identifier:-}" 96)"
+        if [[ -z "$workflow_project_slug" ]]; then
+            workflow_project_slug="$project_slug"
+        fi
+
+        if [[ -z "$workflow_project_slug" && -n "$workflow_project_slug_from_source" && "$workflow_project_slug_from_source" != "null" ]]; then
+            workflow_project_slug="$workflow_project_slug_from_source"
+        fi
+
+        if [[ -n "$project_slug" && -n "$workflow_project_slug" && "$workflow_project_slug" != "$project_slug" ]]; then
+            log DEBUG "Skipping workflow $workflow_id (project '$workflow_project_identifier') due to project filter '${project_name:-Personal}'"
+            continue
+        fi
+
         if [[ -z "$relative_path" || "$relative_path" == "null" ]]; then
-            relative_path="Personal"
+            relative_path="$project_slug"
         fi
 
         if [[ -z "$display_path" || "$display_path" == "null" ]]; then
@@ -464,7 +483,7 @@ organize_workflows_by_folders() {
         relative_path="${relative_path%/}"
 
         local storage_relative_path
-        storage_relative_path="$(apply_github_path_prefix "$relative_path")"
+        storage_relative_path="$(compose_repo_storage_path "$relative_path")"
 
         local destination_dir="$target_dir"
         if [[ -n "$storage_relative_path" ]]; then
@@ -904,6 +923,12 @@ backup() {
     if [[ -z "$credentials_folder_name" ]]; then
         credentials_folder_name=".credentials"
     fi
+    local credentials_git_relative_dir
+    credentials_git_relative_dir="$(compose_repo_storage_path "$credentials_folder_name")"
+    if [[ -z "$credentials_git_relative_dir" ]]; then
+        credentials_git_relative_dir="$credentials_folder_name"
+    fi
+    local credentials_git_relative_path="$credentials_git_relative_dir/credentials.json"
     
     # Make container_id globally available for API functions
     export container_id="$container_id"
@@ -977,6 +1002,11 @@ backup() {
     local local_workflows_file="$local_backup_dir/workflows.json"
     local local_credentials_file="$local_backup_dir/credentials.json"
     local local_env_file="$local_backup_dir/.env"
+
+    local credentials_repo_relative_path="$credentials_git_relative_path"
+    if [[ $use_dated_backup == true && -n "$backup_timestamp" ]]; then
+        credentials_repo_relative_path="$backup_timestamp/$credentials_git_relative_path"
+    fi
     
     if [[ $needs_local_path == true ]]; then
         if ! $is_dry_run; then
@@ -1410,8 +1440,8 @@ backup() {
             else
                 log INFO "🔐 Storing encrypted credentials in Git repository."
             fi
-            local credentials_git_dir="$target_dir/$credentials_folder_name"
-            local credentials_git_path="$credentials_git_dir/credentials.json"
+            local credentials_git_dir="$target_dir/$credentials_git_relative_dir"
+            local credentials_git_path="$target_dir/$credentials_git_relative_path"
             if $is_dry_run; then
                 log DRYRUN "Would copy credentials to Git repository: $credentials_git_path"
             else
@@ -1587,7 +1617,7 @@ EOF
                     local files_added=0
                     # Find all workflow JSON files and add them
                     find . -name "*.json" -type f | while read -r json_file; do
-                        if [[ "$json_file" != "./$credentials_folder_name/credentials.json" ]]; then
+                        if [[ "$json_file" != "./$credentials_repo_relative_path" ]]; then
                             log DEBUG "Adding workflow file: $json_file"
                             git add "$json_file"
                             files_added=$((files_added + 1))
@@ -1605,9 +1635,9 @@ EOF
                 fi
                 
                 # Handle credentials separately if needed
-                if [[ $credentials == 2 ]] && [ -f "$credentials_folder_name/credentials.json" ]; then
+                if [[ $credentials == 2 ]] && [ -f "$credentials_repo_relative_path" ]; then
                     log DEBUG "Adding credentials file to Git"
-                    if ! git add "$credentials_folder_name/credentials.json"; then
+                    if ! git add "$credentials_repo_relative_path"; then
                         log ERROR "Git add failed for credentials file"
                         cd - > /dev/null || true
                         rm -rf "$tmp_dir"
@@ -1639,7 +1669,7 @@ EOF
         local credentials_commit_descriptor=""
         if $credentials_staged; then
             local credentials_status_line
-            credentials_status_line=$(git diff --cached --name-status -- "$credentials_folder_name/credentials.json" 2>/dev/null | head -n 1)
+            credentials_status_line=$(git diff --cached --name-status -- "$credentials_repo_relative_path" 2>/dev/null | head -n 1)
             local credentials_status_code=""
             if [[ -n "$credentials_status_line" ]]; then
                 credentials_status_code="${credentials_status_line%%$'\t'*}"

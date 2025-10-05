@@ -119,6 +119,15 @@ main() {
             --branch) github_branch="$2"; shift 2 ;; 
             --config) config_file="$2"; shift 2 ;; 
             --dated) dated_backups=true; dated_backups_source="cli"; shift 1 ;;
+            --project)
+                if [[ -z "$2" || "$2" == -* ]]; then
+                    log ERROR "Invalid value for --project. Provide a project name."
+                    exit 1
+                fi
+                project_name="$2"
+                project_name_source="cli"
+                update_project_slug
+                shift 2 ;;
                         --workflows)
                 case "${2,,}" in  # Convert to lowercase
                     0|disabled) workflows=0; workflows_source="cli"; shift 2 ;;
@@ -451,6 +460,18 @@ main() {
         fi
         log DEBUG "Container selected: $container"
         
+        if [[ "$project_name_source" == "default" || "$reconfigure_mode" == "true" ]]; then
+            printf "Project to manage [${project_name:-Personal}]: "
+            local project_input
+            read -r project_input
+            if [[ -n "$project_input" ]]; then
+                project_name="$project_input"
+                project_name_source="interactive"
+                update_project_slug
+            fi
+        fi
+        log INFO "Project scope: ${project_name:-Personal}"
+
         # Interactive dated backup prompt (only if value originated from defaults or reconfigure mode)
         if [[ "$action" == "backup" ]] && ([[ "$dated_backups_source" == "default" ]] || [[ "$reconfigure_mode" == "true" ]]); then
              printf "Create a dated backup (in a timestamped subdirectory)? (yes/no) [no]: "

@@ -1015,7 +1015,12 @@ restore() {
     if [[ -z "$credentials_folder_name" ]]; then
         credentials_folder_name=".credentials"
     fi
-    local credentials_subpath="$credentials_folder_name/credentials.json"
+    local credentials_git_relative_dir
+    credentials_git_relative_dir="$(apply_github_path_prefix "$credentials_folder_name")"
+    if [[ -z "$credentials_git_relative_dir" ]]; then
+        credentials_git_relative_dir="$credentials_folder_name"
+    fi
+    local credentials_subpath="$credentials_git_relative_dir/credentials.json"
 
     local restore_scope="none"
     if [[ "$workflows_mode" != "0" && "$credentials_mode" != "0" ]]; then
@@ -1285,7 +1290,7 @@ restore() {
         else
             local cred_source_desc="local secure storage"
             if [[ "$repo_credentials" != "$local_credentials_file" ]]; then
-                cred_source_desc="Git repository ($credentials_folder_name)"
+                cred_source_desc="Git repository ($credentials_git_relative_dir)"
                 if [[ "$repo_credentials" != *"/$credentials_subpath" ]]; then
                     cred_source_desc="Git repository (legacy layout)"
                 fi
