@@ -48,14 +48,12 @@ validate_credentials_payload() {
         return 1
     fi
 
-    local jq_error=""
     local jq_temp_err
     jq_temp_err=$(mktemp -t n8n-cred-validate-err-XXXXXXXX.log)
     if ! jq empty "$credentials_path" 2>"$jq_temp_err"; then
-        local relative_path
-        relative_path=$(printf '%s' "$entry" | jq -r '.relativePath // empty' 2>/dev/null)
-        local storage_path
-        storage_path=$(printf '%s' "$entry" | jq -r '.storagePath // empty' 2>/dev/null)
+        local jq_error
+        jq_error=$(cat "$jq_temp_err" 2>/dev/null)
+        rm -f "$jq_temp_err"
         log ERROR "Unable to parse credentials file for validation: $credentials_path"
         if [[ -n "$jq_error" ]]; then
             log DEBUG "jq parse error: $jq_error"
@@ -64,15 +62,17 @@ validate_credentials_payload() {
     fi
     rm -f "$jq_temp_err"
 
-    local normalized_json
-    normalized_json=$(mktemp -t n8n-cred-validate-normalized-XXXXXXXX.json)
-
     local invalid_entries
-    invalid_entries=$(jq -r -f "$invalid_filter_file" "$normalized_json") || invalid_entries=""
-    rm -f "$invalid_filter_file"
+    invalid_entries=$(jq -r '
+        [ .[]
+            | select((has("data") | not) or ((.data | type) != "object"))
+            | (.name // (if has("id") then ("ID:" + (.id|tostring)) else "unknown" end))
+        ]
+        | unique
+        | join(", ")
+    ' "$credentials_path") || invalid_entries=""
 
     if [[ -n "$invalid_entries" ]]; then
-        rm -f "$normalized_json"
         log ERROR "Credentials still contain encrypted or invalid data for: $invalid_entries"
         return 1
     fi
@@ -96,7 +96,7 @@ def safe_credential_value($credential; $field):
 JQ_FILTER
 
     local basic_missing
-    basic_missing=$(jq -r -f "$basic_filter_file" "$normalized_json") || basic_missing=""
+    basic_missing=$(jq -r -f "$basic_filter_file" "$credentials_path") || basic_missing=""
     rm -f "$basic_filter_file"
 
     if [[ -n "$basic_missing" ]]; then
@@ -105,7 +105,7 @@ JQ_FILTER
         return 1
     fi
 
-    rm -f "$normalized_json" "$jq_temp_err"
+    rm -f "$jq_temp_err"
     return 0
 }
 
@@ -147,9 +147,16 @@ apply_folder_structure_from_manifest() {
         return 1
     fi
 
+    if [[ "$verbose" == "true" ]]; then
+        local projects_debug_file
+        projects_debug_file=$(mktemp -t n8n-restore-projects-XXXXXXXX.json)
+        printf '%s' "$projects_json" > "$projects_debug_file"
+        log DEBUG "Saved projects API payload to $projects_debug_file"
+    fi
+
     local folders_json
-    if ! folders_json=$(n8n_api_get_folders 2>&1); then
-        if echo "$folders_json" | grep -q "404"; then
+    if ! folders_json=$(n8n_api_get_folders); then
+        if [[ "${N8N_API_LAST_STATUS:-}" == "404" ]]; then
             log WARN "Folder structure not supported by this n8n version (HTTP 404). Skipping folder restoration."
             finalize_n8n_api_auth
             return 0
@@ -159,6 +166,13 @@ apply_folder_structure_from_manifest() {
         return 1
     fi
 
+    if [[ "$verbose" == "true" ]]; then
+        local folders_debug_file
+        folders_debug_file=$(mktemp -t n8n-restore-folders-XXXXXXXX.json)
+        printf '%s' "$folders_json" > "$folders_debug_file"
+        log DEBUG "Saved folders API payload to $folders_debug_file"
+    fi
+
     local workflows_json
     if ! workflows_json=$(n8n_api_get_workflows); then
         finalize_n8n_api_auth
@@ -166,11 +180,44 @@ apply_folder_structure_from_manifest() {
         return 1
     fi
 
+    if [[ "$verbose" == "true" ]]; then
+        local workflows_debug_file
+        workflows_debug_file=$(mktemp -t n8n-restore-workflows-XXXXXXXX.json)
+        printf '%s' "$workflows_json" > "$workflows_debug_file"
+        log DEBUG "Saved workflows API payload to $workflows_debug_file"
+    fi
+
+    local project_entries_file
+    project_entries_file=$(mktemp -t n8n-project-entries-XXXXXXXX.json)
+    local project_entries_err
+    project_entries_err=$(mktemp -t n8n-project-entries-err-XXXXXXXX.log)
+    if ! printf '%s' "$projects_json" | jq -c 'if type == "array" then .[] else (.data // [])[] end' > "$project_entries_file" 2>"$project_entries_err"; then
+        local jq_error
+        jq_error=$(cat "$project_entries_err" 2>/dev/null)
+        log ERROR "Failed to parse projects payload while preparing lookup tables."
+        if [[ -n "$jq_error" ]]; then
+            log DEBUG "jq error (projects): $jq_error"
+        fi
+        if [[ "$verbose" == "true" ]]; then
+            local projects_preview
+            projects_preview=$(printf '%s' "$projects_json" | head -c 400 2>/dev/null)
+            log DEBUG "Projects payload preview: ${projects_preview:-<empty>}"
+        fi
+        rm -f "$project_entries_file" "$project_entries_err"
+        finalize_n8n_api_auth
+        return 1
+    fi
+    rm -f "$project_entries_err"
+
     declare -A project_name_map=()
     declare -A project_slug_map=()
     declare -A project_id_map=()
     local default_project_id=""
     local personal_project_id=""
+
+    local project_entry_count
+    project_entry_count=$(wc -l < "$project_entries_file" 2>/dev/null | tr -d '[:space:]')
+    log DEBUG "Prepared ${project_entry_count:-0} project entr(y/ies) from API payload."
 
     while IFS= read -r project_entry; do
         local pid
@@ -204,7 +251,8 @@ apply_folder_structure_from_manifest() {
         if [[ -z "$default_project_id" ]]; then
             default_project_id="$pid"
         fi
-    done < <(printf '%s' "$projects_json" | jq -c 'if type == "array" then .[] else (.data // [])[] end')
+    done < "$project_entries_file"
+    rm -f "$project_entries_file"
 
     if [[ -z "$default_project_id" ]]; then
         finalize_n8n_api_auth
@@ -216,6 +264,28 @@ apply_folder_structure_from_manifest() {
         default_project_id="$personal_project_id"
     fi
 
+    local folder_entries_file
+    folder_entries_file=$(mktemp -t n8n-folder-entries-XXXXXXXX.json)
+    local folder_entries_err
+    folder_entries_err=$(mktemp -t n8n-folder-entries-err-XXXXXXXX.log)
+    if ! printf '%s' "$folders_json" | jq -c 'if type == "array" then .[] else (.data // [])[] end' > "$folder_entries_file" 2>"$folder_entries_err"; then
+        local jq_error
+        jq_error=$(cat "$folder_entries_err" 2>/dev/null)
+        log ERROR "Failed to parse folders payload while preparing lookup tables."
+        if [[ -n "$jq_error" ]]; then
+            log DEBUG "jq error (folders): $jq_error"
+        fi
+        if [[ "$verbose" == "true" ]]; then
+            local folders_preview
+            folders_preview=$(printf '%s' "$folders_json" | head -c 400 2>/dev/null)
+            log DEBUG "Folders payload preview: ${folders_preview:-<empty>}"
+        fi
+        rm -f "$folder_entries_file" "$folder_entries_err"
+        finalize_n8n_api_auth
+        return 1
+    fi
+    rm -f "$folder_entries_err"
+
     declare -A folder_name_lookup=()
     declare -A folder_slug_lookup=()
     declare -A folder_global_name_lookup=()
@@ -224,6 +294,11 @@ apply_folder_structure_from_manifest() {
     declare -A folder_project_lookup=()
     declare -A folder_slug_by_id=()
     declare -A folder_name_by_id=()
+
+    local folder_entry_count
+    folder_entry_count=$(wc -l < "$folder_entries_file" 2>/dev/null | tr -d '[:space:]')
+    log DEBUG "Prepared ${folder_entry_count:-0} folder entr(y/ies) from API payload."
+
     while IFS= read -r folder_entry; do
         local fid
         fid=$(printf '%s' "$folder_entry" | jq -r '.id // empty' 2>/dev/null)
@@ -255,11 +330,39 @@ apply_folder_structure_from_manifest() {
         folder_project_lookup["$fid"]="$fproject"
         folder_slug_by_id["$fid"]="$folder_slug"
         folder_name_by_id["$fid"]="$fname"
-    done < <(printf '%s' "$folders_json" | jq -c 'if type == "array" then .[] else (.data // [])[] end')
+    done < "$folder_entries_file"
+    rm -f "$folder_entries_file"
+
+    local workflow_entries_file
+    workflow_entries_file=$(mktemp -t n8n-workflow-entries-XXXXXXXX.json)
+    local workflow_entries_err
+    workflow_entries_err=$(mktemp -t n8n-workflow-entries-err-XXXXXXXX.log)
+    if ! printf '%s' "$workflows_json" | jq -c 'if type == "array" then .[] else (.data // [])[] end' > "$workflow_entries_file" 2>"$workflow_entries_err"; then
+        local jq_error
+        jq_error=$(cat "$workflow_entries_err" 2>/dev/null)
+        log ERROR "Failed to parse workflows payload while preparing lookup tables."
+        if [[ -n "$jq_error" ]]; then
+            log DEBUG "jq error (workflows): $jq_error"
+        fi
+        if [[ "$verbose" == "true" ]]; then
+            local workflows_preview
+            workflows_preview=$(printf '%s' "$workflows_json" | head -c 400 2>/dev/null)
+            log DEBUG "Workflows payload preview: ${workflows_preview:-<empty>}"
+        fi
+        rm -f "$workflow_entries_file" "$workflow_entries_err"
+        finalize_n8n_api_auth
+        return 1
+    fi
+    rm -f "$workflow_entries_err"
 
     declare -A workflow_version_lookup=()
     declare -A workflow_parent_lookup=()
     declare -A workflow_project_lookup=()
+
+    local workflow_entry_count
+    workflow_entry_count=$(wc -l < "$workflow_entries_file" 2>/dev/null | tr -d '[:space:]')
+    log DEBUG "Prepared ${workflow_entry_count:-0} workflow entr(y/ies) from API payload."
+
     while IFS= read -r workflow_entry; do
         local wid
         wid=$(printf '%s' "$workflow_entry" | jq -r '.id // empty' 2>/dev/null)
@@ -281,7 +384,8 @@ apply_folder_structure_from_manifest() {
         workflow_version_lookup["$wid"]="$version_id"
         workflow_parent_lookup["$wid"]="$wparent"
         workflow_project_lookup["$wid"]="$wproject"
-    done < <(printf '%s' "$workflows_json" | jq -c 'if type == "array" then .[] else (.data // [])[] end')
+    done < "$workflow_entries_file"
+    rm -f "$workflow_entries_file"
 
     local total_count
     total_count=$(jq -r '.workflows | length' "$manifest_path" 2>/dev/null || echo 0)
@@ -297,6 +401,32 @@ apply_folder_structure_from_manifest() {
     local folder_created_count=0
     local folder_moved_count=0
     local workflow_assignment_count=0
+
+    local manifest_entries_file
+    manifest_entries_file=$(mktemp -t n8n-manifest-entries-XXXXXXXX.json)
+    local manifest_entries_err
+    manifest_entries_err=$(mktemp -t n8n-manifest-entries-err-XXXXXXXX.log)
+    if ! jq -c '.workflows[]' "$manifest_path" > "$manifest_entries_file" 2>"$manifest_entries_err"; then
+        local jq_error
+        jq_error=$(cat "$manifest_entries_err" 2>/dev/null)
+        log ERROR "Failed to parse folder structure manifest entries."
+        if [[ -n "$jq_error" ]]; then
+            log DEBUG "jq error (manifest): $jq_error"
+        fi
+        if [[ "$verbose" == "true" ]]; then
+            local manifest_preview
+            manifest_preview=$(head -c 400 "$manifest_path" 2>/dev/null)
+            log DEBUG "Manifest payload preview: ${manifest_preview:-<empty>}"
+        fi
+        rm -f "$manifest_entries_file" "$manifest_entries_err"
+        finalize_n8n_api_auth
+        return 1
+    fi
+    rm -f "$manifest_entries_err"
+
+    local manifest_entry_count
+    manifest_entry_count=$(wc -l < "$manifest_entries_file" 2>/dev/null | tr -d '[:space:]')
+    log DEBUG "Prepared ${manifest_entry_count:-0} manifest workflow entr(y/ies) for processing."
 
     while IFS= read -r entry; do
         local workflow_id
@@ -392,6 +522,10 @@ apply_folder_structure_from_manifest() {
             local folder_slug_lower=""
             [[ -n "$folder_slug" && "$folder_slug" != "null" ]] && folder_slug_lower=$(printf '%s' "$folder_slug" | tr '[:upper:]' '[:lower:]')
 
+            if [[ "$verbose" == "true" ]]; then
+                log DEBUG "Evaluating folder segment '${folder_name:-${folder_slug:-<unnamed>}}' (slug: ${folder_slug:-<none>}) targeting parent '${parent_key}' in project '${target_project_id}'"
+            fi
+
             local slug_key=""
             [[ -n "$folder_slug_lower" ]] && slug_key="$target_project_id|$parent_key|$folder_slug_lower"
             local lookup_key=""
@@ -458,6 +592,9 @@ apply_folder_structure_from_manifest() {
                 if [[ -z "$create_name" ]]; then
                     create_name=$(unslug_to_title "$folder_slug")
                 fi
+                if [[ "$verbose" == "true" ]]; then
+                    log DEBUG "Creating folder '$create_name' (slug: ${folder_slug:-<none>}) under project '${target_project_id}' parent '${parent_folder_id:-root}'"
+                fi
                 local create_response
                 if ! create_response=$(n8n_api_create_folder "$create_name" "$target_project_id" "$parent_folder_id"); then
                     log ERROR "Failed to create folder '$create_name' in project '${project_id_map[$target_project_id]:-Default}'"
@@ -466,6 +603,17 @@ apply_folder_structure_from_manifest() {
                 fi
                 local create_data
                 create_data=$(printf '%s' "$create_response" | jq '.data // .' 2>/dev/null)
+                if [[ "$verbose" == "true" ]]; then
+                    local create_preview
+                    create_preview=$(printf '%s' "$create_data" | tr '\n' ' ' | head -c 200)
+                    local create_len
+                    create_len=$(printf '%s' "$create_data" | wc -c | tr -d '[:space:]')
+                    local create_suffix=""
+                    if [[ ${create_len:-0} -gt 200 ]]; then
+                        create_suffix="…"
+                    fi
+                    log DEBUG "Create folder response: ${create_preview}${create_suffix}"
+                fi
                 existing_folder_id=$(printf '%s' "$create_data" | jq -r '.id // empty' 2>/dev/null)
                 if [[ -z "$existing_folder_id" ]]; then
                     log ERROR "n8n API did not return an ID when creating folder '$create_name'"
@@ -574,7 +722,8 @@ apply_folder_structure_from_manifest() {
         workflow_parent_lookup["$workflow_id"]="$assignment_folder_id"
         moved_count=$((moved_count + 1))
         workflow_assignment_count=$((workflow_assignment_count + 1))
-    done < <(jq -c '.workflows[]' "$manifest_path" 2>/dev/null)
+    done < "$manifest_entries_file"
+    rm -f "$manifest_entries_file"
 
     finalize_n8n_api_auth
 
@@ -607,6 +756,18 @@ copy_manifest_workflows_to_container() {
             return 1
         fi
     fi
+
+    local manifest_base_normalized
+    manifest_base_normalized="$(cd "$manifest_base" 2>/dev/null && pwd)"
+    if [[ -z "$manifest_base_normalized" ]]; then
+        manifest_base_normalized="${manifest_base%/}"
+    fi
+    if [[ -z "$manifest_base_normalized" ]]; then
+        manifest_base_normalized="$manifest_base"
+    fi
+
+    local repo_prefix
+    repo_prefix="$(effective_repo_prefix)"
 
     local staging_dir
     staging_dir=$(mktemp -d -t n8n-structured-import-XXXXXXXXXX)
@@ -641,13 +802,23 @@ copy_manifest_workflows_to_container() {
             effective_storage_path="$(apply_github_path_prefix "$relative_path")"
         fi
 
-        if ! path_matches_github_prefix "$effective_storage_path"; then
+        local canonical_storage_path="$effective_storage_path"
+        canonical_storage_path="${canonical_storage_path#/}"
+        canonical_storage_path="${canonical_storage_path%/}"
+        if [[ -n "$canonical_storage_path" ]]; then
+            local storage_without_prefix
+            storage_without_prefix="$(strip_github_path_prefix "$canonical_storage_path")"
+            canonical_storage_path="$(compose_repo_storage_path "$storage_without_prefix")"
+            canonical_storage_path="${canonical_storage_path#/}"
+            canonical_storage_path="${canonical_storage_path%/}"
+        fi
+
+        if [[ -n "$canonical_storage_path" ]] && ! path_matches_github_prefix "$canonical_storage_path"; then
             log DEBUG "Skipping manifest entry $entry_index outside configured GITHUB_PATH prefix"
             continue
         fi
 
-        local sanitized_storage="${effective_storage_path#/}"
-        sanitized_storage="${sanitized_storage%/}"
+        local sanitized_storage="$canonical_storage_path"
 
         if [[ "$sanitized_storage" == *".."* ]]; then
             log WARN "Skipping manifest entry $entry_index due to unsafe storage path: $sanitized_storage"
@@ -655,9 +826,22 @@ copy_manifest_workflows_to_container() {
             continue
         fi
 
-        local source_dir="$manifest_base"
-        if [[ -n "$sanitized_storage" ]]; then
-            source_dir="$source_dir/$sanitized_storage"
+        local relative_storage_for_base="$sanitized_storage"
+        if [[ -n "$repo_prefix" ]]; then
+            if [[ "$manifest_base_normalized" == */"$repo_prefix" ]] || [[ "$manifest_base_normalized" == "$repo_prefix" ]]; then
+                relative_storage_for_base="$(strip_github_path_prefix "$sanitized_storage")"
+            fi
+        fi
+
+        if [[ "$relative_storage_for_base" == *".."* ]]; then
+            log WARN "Skipping manifest entry $entry_index due to unsafe relative path: $relative_storage_for_base"
+            copy_success=false
+            continue
+        fi
+
+        local source_dir="$manifest_base_normalized"
+        if [[ -n "$relative_storage_for_base" ]]; then
+            source_dir="$source_dir/$relative_storage_for_base"
         fi
 
         local source_path="$source_dir/$filename"
@@ -756,14 +940,24 @@ generate_folder_manifest_from_directory() {
         fi
         relative_dir="${relative_dir%/}"
 
-        local storage_path="$relative_dir"
+        local raw_storage_path="$relative_dir"
+        raw_storage_path="${raw_storage_path#/}"
+        raw_storage_path="${raw_storage_path%/}"
+
+        local relative_dir_without_prefix
+        relative_dir_without_prefix="$(strip_github_path_prefix "$raw_storage_path")"
+        relative_dir_without_prefix="${relative_dir_without_prefix#/}"
+        relative_dir_without_prefix="${relative_dir_without_prefix%/}"
+
+        local storage_path
+        storage_path="$(compose_repo_storage_path "$relative_dir_without_prefix")"
         storage_path="${storage_path#/}"
         storage_path="${storage_path%/}"
 
-        local relative_dir_without_prefix
-        relative_dir_without_prefix="$(strip_github_path_prefix "$storage_path")"
-        relative_dir_without_prefix="${relative_dir_without_prefix#/}"
-        relative_dir_without_prefix="${relative_dir_without_prefix%/}"
+        if [[ -n "$storage_path" ]] && ! path_matches_github_prefix "$storage_path"; then
+            log DEBUG "Skipping workflow outside configured GITHUB_PATH: $workflow_file"
+            continue
+        fi
 
         local workflow_id
         workflow_id=$(jq -r '.id // empty' "$workflow_file" 2>/dev/null)
@@ -934,6 +1128,28 @@ stage_directory_workflows_to_container() {
             filename="workflow_${staged_count}.json"
         fi
 
+        local relative_path="${workflow_file#$source_dir/}"
+        if [[ "$relative_path" == "$workflow_file" ]]; then
+            relative_path="$filename"
+        fi
+
+        local relative_dir="${relative_path%/*}"
+        if [[ "$relative_dir" == "$relative_path" ]]; then
+            relative_dir=""
+        fi
+        relative_dir="${relative_dir#/}"
+        relative_dir="${relative_dir%/}"
+
+        local canonical_storage_path
+        canonical_storage_path="$(compose_repo_storage_path "$(strip_github_path_prefix "$relative_dir")")"
+        canonical_storage_path="${canonical_storage_path#/}"
+        canonical_storage_path="${canonical_storage_path%/}"
+
+        if [[ -n "$canonical_storage_path" ]] && ! path_matches_github_prefix "$canonical_storage_path"; then
+            log DEBUG "Skipping structured workflow outside configured GITHUB_PATH: $workflow_file"
+            continue
+        fi
+
         local dest_filename="$filename"
         local base_name="${filename%.json}"
         local suffix=1
@@ -990,9 +1206,10 @@ restore() {
     local branch="$4"
     local workflows_mode="${5:-2}"
     local credentials_mode="${6:-1}"
-    local apply_folder_structure="${7:-false}"
+    local apply_folder_structure="${7:-auto}"
     local is_dry_run=${8:-false}
     local credentials_folder_name="${9:-.credentials}"
+    local interactive_mode="${10:-false}"
     local folder_structure_backup=false
     local folder_manifest_path=""
     local folder_manifest_base=""
@@ -1016,11 +1233,18 @@ restore() {
         credentials_folder_name=".credentials"
     fi
     local credentials_git_relative_dir
-    credentials_git_relative_dir="$(apply_github_path_prefix "$credentials_folder_name")"
+    credentials_git_relative_dir="$(compose_repo_storage_path "$credentials_folder_name")"
+    credentials_git_relative_dir="${credentials_git_relative_dir#/}"
+    credentials_git_relative_dir="${credentials_git_relative_dir%/}"
     if [[ -z "$credentials_git_relative_dir" ]]; then
         credentials_git_relative_dir="$credentials_folder_name"
     fi
     local credentials_subpath="$credentials_git_relative_dir/credentials.json"
+
+    local project_storage_relative
+    project_storage_relative="$(compose_repo_storage_path "$project_slug")"
+    project_storage_relative="${project_storage_relative#/}"
+    project_storage_relative="${project_storage_relative%/}"
 
     local restore_scope="none"
     if [[ "$workflows_mode" != "0" && "$credentials_mode" != "0" ]]; then
@@ -1119,7 +1343,7 @@ restore() {
                 folder_manifest_base="$(dirname "$folder_manifest_path")"
                 folder_manifest_available=true
                 structured_workflows_dir="$folder_manifest_base"
-                log INFO "Detected folder structure manifest: $folder_manifest_path"
+                log INFO "Detected legacy folder structure manifest: $folder_manifest_path"
             else
                 local manifest_candidate
                 manifest_candidate=$(find "$selected_base_dir" -maxdepth 5 -type f -name ".n8n-folder-structure.json" | head -n 1)
@@ -1129,39 +1353,48 @@ restore() {
                     folder_manifest_base="$(dirname "$manifest_candidate")"
                     folder_manifest_available=true
                     structured_workflows_dir="$folder_manifest_base"
-                    log INFO "Detected folder structure manifest: $folder_manifest_path"
+                    log INFO "Detected legacy folder structure manifest: $folder_manifest_path"
                 fi
             fi
 
-            if ! $folder_structure_backup; then
-                if [ -f "$selected_base_dir/workflows.json" ]; then
-                    repo_workflows="$selected_base_dir/workflows.json"
-                    log SUCCESS "Found workflows.json in selected backup"
-                elif [ -f "$download_dir/workflows.json" ]; then
-                    repo_workflows="$download_dir/workflows.json"
-                    log SUCCESS "Found workflows.json in repository root"
-                else
-                    local separated_hint=""
-                    if [ -d "$selected_base_dir/workflows" ] && find "$selected_base_dir/workflows" -type f -name "*.json" -print -quit >/dev/null 2>&1; then
-                        separated_hint="$selected_base_dir/workflows"
-                    else
-                        local candidate_file
-                        candidate_file=$(find "$selected_base_dir" -mindepth 1 -maxdepth 4 -type f -name "*.json" \
-                            ! -path "*/.credentials/*" \
-                            ! -name "credentials.json" \
-                            ! -name "workflows.json" \
-                            -print -quit 2>/dev/null || true)
-                        if [[ -n "$candidate_file" ]]; then
-                            separated_hint="$(dirname "$candidate_file")"
-                        fi
-                    fi
+            if [ -f "$selected_base_dir/workflows.json" ]; then
+                repo_workflows="$selected_base_dir/workflows.json"
+                log SUCCESS "Found workflows.json in selected backup"
+            elif [ -f "$download_dir/workflows.json" ]; then
+                repo_workflows="$download_dir/workflows.json"
+                log SUCCESS "Found workflows.json in repository root"
+            fi
 
-                    if [[ -n "$separated_hint" ]]; then
-                        folder_structure_backup=true
-                        folder_manifest_available=false
-                        structured_workflows_dir="$selected_base_dir"
-                        log WARN "Folder structure manifest not found. Falling back to directory import using separated workflow files (example path: $separated_hint)"
+            if [[ -z "$repo_workflows" ]]; then
+                local candidate_struct_dir=""
+                local -a structure_candidates=()
+                if [[ -n "$project_storage_relative" ]]; then
+                    structure_candidates+=("$selected_base_dir/$project_storage_relative")
+                    structure_candidates+=("$download_dir/$project_storage_relative")
+                fi
+                structure_candidates+=("$selected_base_dir")
+                structure_candidates+=("$download_dir")
+
+                for candidate_dir in "${structure_candidates[@]}"; do
+                    if [[ -z "$candidate_dir" || ! -d "$candidate_dir" ]]; then
+                        continue
                     fi
+                    if find "$candidate_dir" -type f -name "*.json" \
+                        ! -path "*/.credentials/*" \
+                        ! -path "*/archive/*" \
+                        ! -name "credentials.json" \
+                        ! -name "workflows.json" \
+                        -print -quit >/dev/null 2>&1; then
+                        candidate_struct_dir="$candidate_dir"
+                        break
+                    fi
+                done
+
+                if [[ -n "$candidate_struct_dir" ]]; then
+                    folder_structure_backup=true
+                    folder_manifest_available=false
+                    structured_workflows_dir="$candidate_struct_dir"
+                    log INFO "Detected structured workflow directory: $candidate_struct_dir"
                 fi
             fi
         fi
@@ -1186,6 +1419,11 @@ restore() {
             done
         fi
 
+        if [[ "$credentials_mode" != "0" && ( -z "$repo_credentials" || ! -f "$repo_credentials" ) ]]; then
+            log WARN "Credentials file not found under '$credentials_git_relative_dir'. Skipping credential restore."
+            credentials_mode="0"
+        fi
+
         cd - >/dev/null 2>&1 || true
     else
         log INFO "Skipping Git fetch; relying on local backups only."
@@ -1198,18 +1436,37 @@ restore() {
             folder_manifest_base="$(dirname "$folder_manifest_path")"
             folder_manifest_available=true
             structured_workflows_dir="$folder_manifest_base"
-            log INFO "Detected local folder structure manifest: $folder_manifest_path"
-        else
-            if [ -f "$local_workflows_file" ]; then
-                repo_workflows="$local_workflows_file"
-                log INFO "Selected local workflows backup: $repo_workflows"
-            elif find "$local_backup_dir" -type f -name "*.json" ! -path "*/.credentials/*" ! -name "credentials.json" ! -name "workflows.json" -print -quit >/dev/null 2>&1; then
+            log INFO "Detected local legacy folder structure manifest: $folder_manifest_path"
+        fi
+
+        if [[ -z "$repo_workflows" && -f "$local_workflows_file" ]]; then
+            repo_workflows="$local_workflows_file"
+            log INFO "Selected local workflows backup: $repo_workflows"
+        fi
+
+        if [[ -z "$repo_workflows" ]]; then
+            local local_struct_dir=""
+            if [[ -n "$project_storage_relative" ]]; then
+                local candidate="$local_backup_dir/$project_storage_relative"
+                if [[ -d "$candidate" ]]; then
+                    local_struct_dir="$candidate"
+                fi
+            fi
+            if [[ -z "$local_struct_dir" && -d "$local_backup_dir" ]]; then
+                local_struct_dir="$local_backup_dir"
+            fi
+
+            if [[ -n "$local_struct_dir" ]] && find "$local_struct_dir" -type f -name "*.json" \
+                ! -path "*/.credentials/*" \
+                ! -path "*/archive/*" \
+                ! -name "credentials.json" \
+                ! -name "workflows.json" -print -quit >/dev/null 2>&1; then
                 folder_structure_backup=true
                 folder_manifest_available=false
-                structured_workflows_dir="$local_backup_dir"
-                log WARN "Local workflows.json not found. Falling back to directory import using separated workflow files in $local_backup_dir"
+                structured_workflows_dir="$local_struct_dir"
+                log INFO "Using structured workflow directory from local backup: $local_struct_dir"
             else
-                log WARN "Local workflows.json not found and no separated workflow files detected in $local_backup_dir"
+                log WARN "No workflows.json or structured workflow files detected in $local_backup_dir"
             fi
         fi
     fi
@@ -1299,6 +1556,20 @@ restore() {
         fi
     fi
 
+    if [[ "$apply_folder_structure" == "auto" ]]; then
+        if [[ "$workflows_mode" != "0" ]] && $folder_structure_backup && [ "$file_validation_passed" = "true" ]; then
+            if $folder_manifest_available || [[ -n "$structured_workflows_dir" && -d "$structured_workflows_dir" ]]; then
+                apply_folder_structure="true"
+                log INFO "Folder structure backup detected; enabling automatic layout restoration."
+            else
+                apply_folder_structure="skip"
+                log INFO "No folder structure manifest detected; skipping folder layout restoration."
+            fi
+        else
+            apply_folder_structure="skip"
+        fi
+    fi
+
     if [[ "$workflows_mode" != "0" ]] && $folder_structure_backup && ! $folder_manifest_available && [[ "$apply_folder_structure" == "true" ]] && [ "$file_validation_passed" = "true" ]; then
         if [[ -n "$structured_workflows_dir" && -d "$structured_workflows_dir" ]]; then
             generated_manifest_path=$(mktemp -t n8n-generated-manifest-XXXXXXXX.json)
@@ -1320,7 +1591,11 @@ restore() {
     if [ "$file_validation_passed" != "true" ]; then
         log ERROR "File validation failed. Cannot proceed with restore."
         if [[ -n "$download_dir" ]]; then
-            rm -rf "$download_dir"
+            if rm -rf "$download_dir"; then
+                log INFO "Cleaned up temporary download directory after validation failure: $download_dir"
+            else
+                log WARN "Unable to remove temporary download directory after validation failure: $download_dir"
+            fi
         fi
         return 1
     fi
@@ -1352,18 +1627,17 @@ restore() {
     # --- Credentials decryption integration ---
     local credentials_to_import="$repo_credentials"
     local decrypt_tmpfile=""
+    local skip_credentials_restore=false
+    local skip_credentials_reason=""
     if [[ "$credentials_mode" != "0" ]]; then
         # Only attempt decryption if not a dry run and file is not empty
         if [ "$is_dry_run" != "true" ] && [ -s "$repo_credentials" ]; then
             # Check if file appears to be encrypted (any credential with string data)
             if jq -e '[.[] | select(has("data") and (.data | type == "string"))] | length > 0' "$repo_credentials" >/dev/null 2>&1; then
-                log INFO "Encrypted credentials detected. Decrypting before import..."
-                decrypt_tmpfile="$(mktemp -t n8n-decrypted-XXXXXXXX.json)"
-                # Prompt for key and decrypt using lib/decrypt.sh
+                log INFO "Encrypted credentials detected. Preparing decryption flow..."
                 local decrypt_lib="$(dirname "${BASH_SOURCE[0]}")/decrypt.sh"
                 if [[ ! -f "$decrypt_lib" ]]; then
                     log ERROR "Decrypt helper not found at $decrypt_lib"
-                    rm -f "$decrypt_tmpfile"
                     if [[ -n "$download_dir" ]]; then
                         rm -rf "$download_dir"
                     fi
@@ -1372,41 +1646,75 @@ restore() {
                 # shellcheck source=lib/decrypt.sh
                 source "$decrypt_lib"
                 check_dependencies
-                local decryption_key
+
                 local prompt_device="/dev/tty"
                 if [[ ! -r "$prompt_device" ]]; then
                     prompt_device="/proc/self/fd/2"
                 fi
-                if ! read -r -s -p "Enter encryption key for credentials decryption: " decryption_key <"$prompt_device"; then
-                    printf '\n' >"$prompt_device" 2>/dev/null || true
-                    log ERROR "Unable to read encryption key from terminal."
-                    rm -f "$decrypt_tmpfile"
-                    if [[ -n "$download_dir" ]]; then
-                        rm -rf "$download_dir"
-                    fi
-                    return 1
-                fi
-                printf '\n' >"$prompt_device" 2>/dev/null || echo >&2
-                if decrypt_credentials_file "$decryption_key" "$repo_credentials" "$decrypt_tmpfile"; then
-                    if ! validate_credentials_payload "$decrypt_tmpfile"; then
-                        log ERROR "Decrypted credentials failed validation. Aborting restore."
-                        rm -f "$decrypt_tmpfile"
-                        if [[ -n "$download_dir" ]]; then
-                            rm -rf "$download_dir"
+
+                if [[ "$interactive_mode" == "true" ]]; then
+                    local decrypt_success=false
+                    while true; do
+                        local decryption_key=""
+                        printf "Enter encryption key for credentials decryption (leave blank to skip): " >"$prompt_device"
+                        if ! read -r -s decryption_key <"$prompt_device"; then
+                            printf '\n' >"$prompt_device" 2>/dev/null || true
+                            log ERROR "Unable to read encryption key from terminal."
+                            skip_credentials_restore=true
+                            skip_credentials_reason="Unable to read encryption key from terminal. Skipping credential restore."
+                            break
                         fi
-                        return 1
+
+                        printf '\n' >"$prompt_device" 2>/dev/null || echo >&2
+
+                        if [[ -z "$decryption_key" ]]; then
+                            skip_credentials_restore=true
+                            skip_credentials_reason="No encryption key provided. Skipping credential restore."
+                            break
+                        fi
+
+                        local attempt_tmpfile
+                        attempt_tmpfile="$(mktemp -t n8n-decrypted-XXXXXXXX.json)"
+                        if decrypt_credentials_file "$decryption_key" "$repo_credentials" "$attempt_tmpfile"; then
+                            if ! validate_credentials_payload "$attempt_tmpfile"; then
+                                log ERROR "Decrypted credentials failed validation."
+                                rm -f "$attempt_tmpfile"
+                            else
+                                log SUCCESS "Credentials decrypted successfully."
+                                decrypt_tmpfile="$attempt_tmpfile"
+                                credentials_to_import="$decrypt_tmpfile"
+                                decrypt_success=true
+                                break
+                            fi
+                        else
+                            log ERROR "Failed to decrypt credentials with provided key."
+                            rm -f "$attempt_tmpfile"
+                        fi
+                    done
+
+                    if [[ "$decrypt_success" != "true" && "$skip_credentials_restore" != "true" ]]; then
+                        skip_credentials_restore=true
+                        skip_credentials_reason="Decryption did not succeed. Skipping credential restore."
                     fi
-                    log SUCCESS "Credentials decrypted successfully."
-                    credentials_to_import="$decrypt_tmpfile"
                 else
-                    log ERROR "Failed to decrypt credentials. Aborting restore."
-                    rm -f "$decrypt_tmpfile"
-                    if [[ -n "$download_dir" ]]; then
-                        rm -rf "$download_dir"
-                    fi
-                    return 1
+                    skip_credentials_restore=true
+                    skip_credentials_reason="Encrypted credentials detected but running in non-interactive mode; skipping credential restore."
                 fi
             fi
+        fi
+    fi
+
+    if [[ "$skip_credentials_restore" == "true" ]]; then
+        credentials_mode="0"
+        credentials_to_import=""
+        if [[ -n "$decrypt_tmpfile" ]]; then
+            rm -f "$decrypt_tmpfile"
+            decrypt_tmpfile=""
+        fi
+        if [[ -n "$skip_credentials_reason" ]]; then
+            log WARN "$skip_credentials_reason"
+        else
+            log WARN "Credential restore will be skipped; continuing with remaining restore tasks."
         fi
     fi
 
@@ -1617,12 +1925,22 @@ restore() {
     # Clean up temporary files in container
     if [ "$is_dry_run" != "true" ]; then
         log INFO "Cleaning up temporary files in container..."
-    dockExecAsRoot "$container_id" "rm -rf $container_import_workflows $container_import_credentials 2>/dev/null || true" "$is_dry_run" || true
+        if dockExecAsRoot "$container_id" "rm -rf $container_import_workflows $container_import_credentials 2>/dev/null || true" false; then
+            log SUCCESS "Container cleanup complete."
+        else
+            log WARN "Unable to remove temporary workflow or credential files from container."
+        fi
+    else
+        log DRYRUN "Would remove temporary workflow and credential files from container."
     fi
     
     # Clean up downloaded repository
     if [[ -n "$download_dir" ]]; then
-        rm -rf "$download_dir"
+        if rm -rf "$download_dir"; then
+            log SUCCESS "Removed temporary download directory: $download_dir"
+        else
+            log WARN "Failed to remove temporary download directory: $download_dir"
+        fi
     fi
     
     # Handle restore result

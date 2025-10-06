@@ -227,12 +227,22 @@ normalize_repo_subpath() {
     printf '%s\n' "$normalized"
 }
 
-resolve_repo_base_prefix() {
+effective_repo_prefix() {
     if [[ -n "$github_path" ]]; then
         printf '%s\n' "$github_path"
-    else
-        printf '%s\n' "$project_slug"
+        return
     fi
+
+    local source_state="${github_path_source:-default}"
+    if [[ "$source_state" == "default" || "$source_state" == "unset" ]]; then
+        printf '%s\n' "$project_slug"
+    else
+        printf '%s\n' ""
+    fi
+}
+
+resolve_repo_base_prefix() {
+    effective_repo_prefix
 }
 
 strip_project_prefix_from_path() {
@@ -359,8 +369,10 @@ apply_github_path_prefix() {
     local trimmed="${relative#/}"
     trimmed="${trimmed%/}"
 
-    if [[ -n "$github_path" ]]; then
-        local prefix="$github_path"
+    local prefix
+    prefix="$(effective_repo_prefix)"
+
+    if [[ -n "$prefix" ]]; then
         if [[ "$trimmed" == "$prefix" || "$trimmed" == "$prefix"/* ]]; then
             printf '%s\n' "$trimmed"
             return
@@ -380,12 +392,14 @@ strip_github_path_prefix() {
     local normalized="${path_value#/}"
     normalized="${normalized%/}"
 
-    if [[ -z "$github_path" ]]; then
+    local prefix
+    prefix="$(effective_repo_prefix)"
+
+    if [[ -z "$prefix" ]]; then
         printf '%s\n' "$normalized"
         return
     fi
 
-    local prefix="$github_path"
     if [[ "$normalized" == "$prefix" ]]; then
         printf '%s\n' ""
         return
@@ -405,11 +419,13 @@ path_matches_github_prefix() {
     local normalized="${candidate#/}"
     normalized="${normalized%/}"
 
-    if [[ -z "$github_path" ]]; then
+    local prefix
+    prefix="$(effective_repo_prefix)"
+
+    if [[ -z "$prefix" ]]; then
         return 0
     fi
 
-    local prefix="$github_path"
     if [[ "$normalized" == "$prefix" ]] || [[ "$normalized" == "$prefix"/* ]]; then
         return 0
     fi
@@ -419,17 +435,25 @@ path_matches_github_prefix() {
 
 resolve_github_storage_root() {
     local base_dir="$1"
-    if [[ -z "$github_path" ]]; then
+    local prefix
+    prefix="$(effective_repo_prefix)"
+
+    if [[ -z "$prefix" ]]; then
         printf '%s\n' "${base_dir%/}"
         return
     fi
 
     if [[ -z "$base_dir" ]]; then
-        printf '%s\n' "$github_path"
+        printf '%s\n' "$prefix"
+        return
+    fi
+    local normalized_base="${base_dir%/}"
+    if [[ "$normalized_base" == "$prefix" || "$normalized_base" == */${prefix} ]]; then
+        printf '%s\n' "$normalized_base"
         return
     fi
 
-    printf '%s/%s\n' "${base_dir%/}" "$github_path"
+    printf '%s/%s\n' "$normalized_base" "$prefix"
 }
 
 # --- Helper Functions (using new log function) ---
@@ -920,15 +944,21 @@ load_config() {
     if [[ "$config_found" == "true" ]]; then
         log DEBUG "Configuration loaded successfully"
         log DEBUG "Storage: workflows=($workflows) $(format_storage_value $workflows), credentials=($credentials) $(format_storage_value $credentials)"
-        if [[ -n "$github_path" ]]; then
-            log DEBUG "GitHub path prefix: $github_path"
+        local effective_prefix
+        effective_prefix="$(effective_repo_prefix)"
+        if [[ -n "$effective_prefix" ]]; then
+            log DEBUG "GitHub path prefix: $effective_prefix"
         else
-            log DEBUG "GitHub path prefix: <none>"
+            log DEBUG "GitHub path prefix: <repository root>"
         fi
     else
         log DEBUG "No configuration file loaded, using defaults"
-        if [[ -n "$github_path" ]]; then
-            log DEBUG "GitHub path prefix: $github_path"
+        local effective_prefix
+        effective_prefix="$(effective_repo_prefix)"
+        if [[ -n "$effective_prefix" ]]; then
+            log DEBUG "GitHub path prefix: $effective_prefix"
+        else
+            log DEBUG "GitHub path prefix: <repository root>"
         fi
     fi
 }

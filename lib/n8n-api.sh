@@ -51,6 +51,124 @@ test_n8n_api_connection() {
 # Track whether we've already pulled session credentials from n8n
 _n8n_session_credentials_loaded=false
 
+# Remove common anti-XSSI prefixes and leading whitespace from n8n REST responses
+sanitize_n8n_json_response() {
+    local raw="$1"
+    local sanitized="$raw"
+
+    # Remove byte order mark if present
+    if [[ "$sanitized" == $'\ufeff'* ]]; then
+        sanitized="${sanitized:1}"
+    fi
+
+    # Normalize line endings
+    sanitized="${sanitized//$'\r'/}"
+
+    # Strip anti-XSSI prefix used by the n8n REST UI (e.g. ")]}'")
+    if [[ "$sanitized" == ")]}'"* ]]; then
+        sanitized="${sanitized:4}"
+    fi
+
+    # Remove optional comma immediately following the prefix
+    if [[ "$sanitized" == ,* ]]; then
+        sanitized="${sanitized:1}"
+    fi
+
+    # Trim leading whitespace/newlines
+    while [[ "$sanitized" == $'\n'* || "$sanitized" == $'\t'* || "$sanitized" == ' '* ]]; do
+        sanitized="${sanitized:1}"
+    done
+
+    printf '%s' "$sanitized"
+}
+
+sanitize_slug_value() {
+    local value="${1:-}"
+    value="${value//$'\r'/}"
+    value="${value//$'\n'/}"
+    value="${value//$'\t'/}"
+    value="${value// /_}"
+    value="${value//\//_}"
+    value="$(printf '%s' "$value" | sed 's/[^A-Za-z0-9._-]//g')"
+    printf '%s' "$value"
+}
+
+normalize_identifier() {
+    local value="${1:-}"
+    if [[ -z "$value" || "$value" == "null" ]]; then
+        printf ''
+        return
+    fi
+    printf '%s' "$value"
+}
+
+build_folder_chain_json() {
+    local starting_folder_id="${1:-}"
+    local -n _folder_name_map="$2"
+    local -n _folder_slug_map="$3"
+    local -n _folder_parent_map="$4"
+    local __chain_var="$5"
+    local __relative_var="$6"
+    local __display_var="$7"
+
+    local -a names=()
+    local -a slugs=()
+    declare -A visited=()
+    local current="$(normalize_identifier "$starting_folder_id")"
+
+    while [[ -n "$current" ]]; do
+        if [[ -n "${visited[$current]+set}" ]]; then
+            log WARN "Detected folder hierarchy loop involving folder ID $current"
+            break
+        fi
+        visited["$current"]=1
+
+        local name="${_folder_name_map[$current]:-Folder}"
+        local slug="${_folder_slug_map[$current]:-}"
+        if [[ -z "$slug" ]]; then
+            slug="$(sanitize_slug_value "$name")"
+            _folder_slug_map["$current"]="$slug"
+        fi
+
+        names+=("$name")
+        slugs+=("$slug")
+
+        local parent="${_folder_parent_map[$current]:-}"
+        current="$(normalize_identifier "$parent")"
+    done
+
+    local -a rev_names=()
+    local -a rev_slugs=()
+    for (( idx=${#names[@]}-1; idx>=0; idx-- )); do
+        rev_names+=("${names[$idx]}")
+        rev_slugs+=("${slugs[$idx]}")
+    done
+
+    local folder_chain_json='[]'
+    if ((${#rev_names[@]} > 0)); then
+        local -a folder_items=()
+        for idx in "${!rev_names[@]}"; do
+            local item
+            item=$(jq -n -c --arg name "${rev_names[$idx]}" --arg slug "${rev_slugs[$idx]}" '{name: $name, slug: $slug}')
+            folder_items+=("$item")
+        done
+        folder_chain_json=$(printf '%s\n' "${folder_items[@]}" | jq -s '.')
+    fi
+
+    local relative_join=""
+    local display_join=""
+    if ((${#rev_slugs[@]} > 0)); then
+        relative_join=$(IFS=/; printf '%s' "${rev_slugs[*]}")
+    fi
+    if ((${#rev_names[@]} > 0)); then
+        display_join=$(IFS=/; printf '%s' "${rev_names[*]}")
+    fi
+
+    printf -v "$__chain_var" '%s' "$folder_chain_json"
+    printf -v "$__relative_var" '%s' "$relative_join"
+    printf -v "$__display_var" '%s' "$display_join"
+}
+
 # Ensure session authentication credentials are available by loading them from
 # the configured n8n credential inside the Docker container when needed.
 #
@@ -255,6 +373,8 @@ get_workflow_folder_mapping() {
     projects_response="$(printf '%s' "$projects_response" | tr -d '\r')"
     workflows_response="$(printf '%s' "$workflows_response" | tr -d '\r')"
 
+    log DEBUG "get_workflow_folder_mapping verbose flag: ${verbose:-unset}"
+
     if [ "$verbose" = "true" ]; then
         local projects_preview
         local workflows_preview
@@ -262,6 +382,15 @@ get_workflow_folder_mapping() {
         workflows_preview="$(printf '%s' "$workflows_response" | tr '\n' ' ' | head -c 200)"
         log DEBUG "Projects response preview: ${projects_preview}$( [ $(printf '%s' "$projects_response" | wc -c) -gt 200 ] && echo '…')"
         log DEBUG "Workflows response preview: ${workflows_preview}$( [ $(printf '%s' "$workflows_response" | wc -c) -gt 200 ] && echo '…')"
+        local debug_dir
+        debug_dir=$(mktemp -d -t n8n-api-debug-XXXXXXXX)
+        printf '%s' "$projects_response" > "$debug_dir/projects.json"
+        printf '%s' "$workflows_response" > "$debug_dir/workflows.json"
+        log DEBUG "Saved API debug payloads to $debug_dir"
+    fi
+
+    if [[ "$verbose" == "true" ]]; then
+        log DEBUG "Validating projects response JSON"
     fi
 
     if ! printf '%s' "$projects_response" | jq empty >/dev/null 2>&1; then
@@ -274,6 +403,10 @@ get_workflow_folder_mapping() {
         return 1
     fi
 
+    if [[ "$verbose" == "true" ]]; then
+        log DEBUG "Validating workflows response JSON"
+    fi
+
     if ! printf '%s' "$workflows_response" | jq empty >/dev/null 2>&1; then
         local sample
         sample="$(printf '%s' "$workflows_response" | tr '\n' ' ' | head -c 200)"
@@ -284,109 +417,262 @@ get_workflow_folder_mapping() {
         return 1
     fi
 
-    local mapping_json
-    if ! mapping_json=$(jq -n \
-        --argjson projects "$projects_response" \
-        --argjson workflows "$workflows_response" '
-            def sanitize($value):
-                ($value // "")
-                | gsub("\\s+"; "_")
-                | gsub("/"; "_")
-                | gsub("[^A-Za-z0-9._-]"; "");
+    local projects_tmp workflows_tmp
+    projects_tmp=$(mktemp -t n8n-projects-XXXXXXXX.json)
+    workflows_tmp=$(mktemp -t n8n-workflows-XXXXXXXX.json)
+    printf '%s' "$projects_response" > "$projects_tmp"
+    printf '%s' "$workflows_response" > "$workflows_tmp"
 
-            def normalize_id($value):
-                if $value == null then null
-                else
-                    ($value | tostring) as $str |
-                    if ($str | gsub("\\s"; "")) == "" or $str == "null" then null else $str end
-                end;
+    trap 'rm -f "$projects_tmp" "$workflows_tmp"; trap - RETURN' RETURN
 
-            def folder_lookup:
-                ($workflows.data // [])
-                | map(select(.resource == "folder"))
-                | map(
-                    (normalize_id(.id)) as $fid |
-                    if $fid == null then empty else
-                        {
-                            key: $fid,
-                            value: {
-                                id: $fid,
-                                name: (.name // "Folder"),
-                                slug: sanitize(.name // "Folder"),
-                                parentId: normalize_id(.parentFolderId // (.parentFolder.id // null))
-                            }
-                        }
-                    end
-                )
-                | from_entries;
+    declare -A project_name_by_id=()
+    declare -A project_slug_by_id=()
+    local default_project_id=""
+    local personal_project_id=""
 
-            def folder_path($folderId; $folders):
-                (normalize_id($folderId)) as $fid |
-                if $fid == null then []
-                else
-                    ($folders[$fid] // null) as $folder |
-                    if $folder == null then []
-                    else
-                        (folder_path($folder.parentId; $folders) + [{name: $folder.name, slug: $folder.slug}])
-                    end
-                end;
-
-            folder_lookup as $folders_by_id |
-
-            (
-                ($projects.data // [])
-                | map({
-                    id: (.id // "default"),
-                    name: (if (.type // "") == "personal" then "Personal" else (.name // "Project") end),
-                    slug: sanitize(if (.type // "") == "personal" then "Personal" else (.name // "Project") end)
-                })
-            ) as $project_lookup |
-
-            (
-                ($project_lookup | map({ (.id): {name: .name, slug: .slug} }) | add) // {}
-            ) as $projects_by_id |
-
-            (
-                ($workflows.data // [])
-                | map(select(.resource != "folder"))
-                | map(
-                    (folder_path(.parentFolderId // (.parentFolder.id // null); $folders_by_id)) as $folder_chain |
-                    (.homeProject.id // "default") as $pid |
-                    ($projects_by_id[$pid] // {name: "Personal", slug: "Personal"}) as $project_info |
-                    {
-                        id: (.id | tostring),
-                        name: (.name // "Unnamed Workflow"),
-                        project: {
-                            id: $pid,
-                            name: $project_info.name,
-                            slug: $project_info.slug
-                        },
-                        folders: $folder_chain,
-                        relativePath: (
-                            [$project_info.slug]
-                            + ($folder_chain | map(.slug))
-                            | join("/")
-                        ),
-                        displayPath: (
-                            [$project_info.name]
-                            + ($folder_chain | map(.name))
-                            | join("/")
-                        )
-                    }
-                )
-            ) as $workflow_list |
-            {
-                fetchedAt: (now | todateiso8601),
-                workflows: $workflow_list,
-                workflowsById: ($workflow_list | map({key: .id, value: .}) | from_entries)
-            }
-        '); then
-        log ERROR "Failed to construct workflow mapping JSON"
+    local project_rows
+    if ! project_rows=$(jq -r '
+        (if type == "array" then . else (.data // []) end)
+        | map([
+            ((.id // "") | tostring),
+            (.name // ""),
+            (.type // "")
+          ] | @tsv)
+        | .[]
+    ' "$projects_tmp"); then
+        log ERROR "Unable to parse projects payload while building workflow mapping"
+        rm -f "$projects_tmp" "$workflows_tmp"
+        trap - RETURN
         if $using_session; then
             cleanup_n8n_session
         fi
         return 1
     fi
+
+    if [[ -n "$project_rows" ]]; then
+        while IFS=$'\t' read -r raw_id raw_name raw_type; do
+            local pid
+            pid="$(normalize_identifier "$raw_id")"
+            if [[ -z "$pid" ]]; then
+                pid="default"
+            fi
+
+            local ptype="${raw_type:-}"
+            local pname="${raw_name:-}"
+            if [[ "$ptype" == "personal" ]]; then
+                pname="Personal"
+            fi
+            if [[ -z "$pname" || "$pname" == "null" ]]; then
+                pname="Project"
+            fi
+
+            local slug
+            slug="$(sanitize_slug_value "$pname")"
+            project_name_by_id["$pid"]="$pname"
+            project_slug_by_id["$pid"]="$slug"
+
+            if [[ -z "$default_project_id" ]]; then
+                default_project_id="$pid"
+            fi
+
+            if [[ -z "$personal_project_id" ]]; then
+                local pname_lower
+                pname_lower="${pname,,}"
+                if [[ "$ptype" == "personal" || "$pname_lower" == "personal" ]]; then
+                    personal_project_id="$pid"
+                fi
+            fi
+        done <<<"$project_rows"
+    fi
+
+    if [[ -z "$default_project_id" ]]; then
+        default_project_id="default"
+    fi
+
+    if [[ -z "${project_name_by_id[$default_project_id]+set}" ]]; then
+        local default_name="Personal"
+        local default_slug
+        default_slug="$(sanitize_slug_value "$default_name")"
+        project_name_by_id["$default_project_id"]="$default_name"
+        project_slug_by_id["$default_project_id"]="$default_slug"
+    fi
+
+    if [[ -n "$personal_project_id" ]]; then
+        default_project_id="$personal_project_id"
+    fi
+
+    declare -A folder_name_by_id=()
+    declare -A folder_slug_by_id=()
+    declare -A folder_parent_by_id=()
+
+    local folder_rows
+    if ! folder_rows=$(jq -r '
+        (if type == "array" then . else (.data // []) end)
+        | map(select(.resource == "folder"))
+        | map([
+            ((.id // "") | tostring),
+            (.name // "Folder"),
+            ((.parentFolderId // (.parentFolder.id // "")) | tostring)
+          ] | @tsv)
+        | .[]
+    ' "$workflows_tmp"); then
+        log ERROR "Unable to parse folder entries while building workflow mapping"
+        rm -f "$projects_tmp" "$workflows_tmp"
+        trap - RETURN
+        if $using_session; then
+            cleanup_n8n_session
+        fi
+        return 1
+    fi
+
+    if [[ -n "$folder_rows" ]]; then
+        while IFS=$'\t' read -r raw_id raw_name raw_parent; do
+            local fid
+            fid="$(normalize_identifier "$raw_id")"
+            if [[ -z "$fid" ]]; then
+                continue
+            fi
+
+            local fname="${raw_name:-Folder}"
+            if [[ -z "$fname" || "$fname" == "null" ]]; then
+                fname="Folder"
+            fi
+            local fslug
+            fslug="$(sanitize_slug_value "$fname")"
+            local parent_id
+            parent_id="$(normalize_identifier "$raw_parent")"
+
+            folder_name_by_id["$fid"]="$fname"
+            folder_slug_by_id["$fid"]="$fslug"
+            folder_parent_by_id["$fid"]="$parent_id"
+        done <<<"$folder_rows"
+    fi
+
+    local workflow_rows
+    if ! workflow_rows=$(jq -r '
+        (if type == "array" then . else (.data // []) end)
+        | map(select(.resource != "folder"))
+        | map([
+            ((.id // "") | tostring),
+            (.name // "Unnamed Workflow"),
+            ((.homeProject.id // .homeProjectId // "") | tostring),
+            ((.parentFolderId // (.parentFolder.id // "")) | tostring)
+          ] | @tsv)
+        | .[]
+    ' "$workflows_tmp"); then
+        log ERROR "Unable to parse workflows while building workflow mapping"
+        rm -f "$projects_tmp" "$workflows_tmp"
+        trap - RETURN
+        if $using_session; then
+            cleanup_n8n_session
+        fi
+        return 1
+    fi
+
+    local -a workflow_entries=()
+    if [[ -n "$workflow_rows" ]]; then
+        while IFS=$'\t' read -r raw_id raw_name raw_project raw_parent; do
+            local wid
+            wid="$(normalize_identifier "$raw_id")"
+            if [[ -z "$wid" ]]; then
+                continue
+            fi
+
+            local wname="${raw_name:-Unnamed Workflow}"
+            if [[ -z "$wname" || "$wname" == "null" ]]; then
+                wname="Unnamed Workflow"
+            fi
+
+            local project_id
+            project_id="$(normalize_identifier "$raw_project")"
+            if [[ -z "$project_id" ]]; then
+                project_id="$default_project_id"
+            fi
+            local project_name="${project_name_by_id[$project_id]:-${project_name_by_id[$default_project_id]}}"
+            local project_slug="${project_slug_by_id[$project_id]:-${project_slug_by_id[$default_project_id]}}"
+            if [[ -z "$project_name" ]]; then
+                project_name="${project_name_by_id[$default_project_id]}"
+            fi
+            if [[ -z "$project_slug" ]]; then
+                project_slug="${project_slug_by_id[$default_project_id]}"
+            fi
+
+            if [[ -z "$project_name" || -z "$project_slug" ]]; then
+                project_name="Personal"
+                project_slug="$(sanitize_slug_value "$project_name")"
+            fi
+
+            local parent_id
+            parent_id="$(normalize_identifier "$raw_parent")"
+            local folder_chain_json="[]"
+            local folder_relative=""
+            local folder_display=""
+            build_folder_chain_json "$parent_id" folder_name_by_id folder_slug_by_id folder_parent_by_id folder_chain_json folder_relative folder_display
+
+            local relative_path="$project_slug"
+            if [[ -n "$folder_relative" ]]; then
+                relative_path+="/$folder_relative"
+            fi
+
+            local display_path="$project_name"
+            if [[ -n "$folder_display" ]]; then
+                display_path+="/$folder_display"
+            fi
+
+            local workflow_json
+            if ! workflow_json=$(jq -n -c \
+                --arg id "$wid" \
+                --arg name "$wname" \
+                --arg projectId "$project_id" \
+                --arg projectName "$project_name" \
+                --arg projectSlug "$project_slug" \
+                --arg relative "$relative_path" \
+                --arg display "$display_path" \
+                --argjson folders "$folder_chain_json" '{
+                    id: $id,
+                    name: $name,
+                    project: {
+                        id: $projectId,
+                        name: $projectName,
+                        slug: $projectSlug
+                    },
+                    folders: $folders,
+                    relativePath: $relative,
+                    displayPath: $display
+                }'); then
+                log WARN "Failed to assemble workflow entry for ID $wid"
+                continue
+            fi
+
+            workflow_entries+=("$workflow_json")
+        done <<<"$workflow_rows"
+    fi
+
+    local mapping_json=""
+    if ((${#workflow_entries[@]} > 0)); then
+        if ! mapping_json=$(printf '%s\n' "${workflow_entries[@]}" | jq -s '{
+            fetchedAt: (now | todateiso8601),
+            workflows: .,
+            workflowsById: (map({key: .id, value: .}) | from_entries)
+        }'); then
+            log ERROR "Failed to construct workflow mapping JSON"
+            rm -f "$projects_tmp" "$workflows_tmp"
+            trap - RETURN
+            if $using_session; then
+                cleanup_n8n_session
+            fi
+            return 1
+        fi
+    else
+        mapping_json=$(jq -n '{
+            fetchedAt: (now | todateiso8601),
+            workflows: [],
+            workflowsById: {}
+        }')
+    fi
+
+    rm -f "$projects_tmp" "$workflows_tmp"
+    trap - RETURN
 
     if $using_session; then
         cleanup_n8n_session
@@ -476,6 +762,8 @@ fetch_n8n_projects() {
         return 1
     fi
 
+    response_body="$(sanitize_n8n_json_response "$response_body")"
+
     log DEBUG "Projects API (API key) success - received $(echo "$response_body" | wc -c) bytes"
     echo "$response_body"
     return 0
@@ -508,6 +796,8 @@ fetch_workflows_with_folders() {
         log DEBUG "Workflows API Response Body: $response_body"
         return 1
     fi
+
+    response_body="$(sanitize_n8n_json_response "$response_body")"
 
     log DEBUG "Workflows API (API key) success - received $(echo "$response_body" | wc -c) bytes"
     echo "$response_body"
@@ -636,6 +926,8 @@ fetch_n8n_projects_session() {
         return 1
     fi
     
+    response_body="$(sanitize_n8n_json_response "$response_body")"
+
     log DEBUG "Projects API Success - received $(echo "$response_body" | wc -c) bytes"
     echo "$response_body"
     return 0
@@ -687,6 +979,8 @@ fetch_workflows_with_folders_session() {
         return 1
     fi
     
+    response_body="$(sanitize_n8n_json_response "$response_body")"
+
     log DEBUG "Workflows API Success - received $(echo "$response_body" | wc -c) bytes"
     echo "$response_body"
     return 0
@@ -824,15 +1118,33 @@ n8n_api_request() {
     local http_status
     http_status=$(echo "$response" | tail -n1)
     N8N_API_LAST_STATUS="$http_status"
-    local body
-    body=$(echo "$response" | head -n -1)
+    local body_raw
+    body_raw=$(echo "$response" | head -n -1)
 
     if [[ "$http_status" != 2* && "$http_status" != 3* ]]; then
         log ERROR "n8n API request failed (HTTP $http_status) for $endpoint"
-        if [[ -n "$body" ]]; then
-            log DEBUG "n8n API response: $body"
+        if [[ -n "$body_raw" ]]; then
+            log DEBUG "n8n API response: $body_raw"
         fi
         return 1
+    fi
+
+    local body
+    body="$(sanitize_n8n_json_response "$body_raw")"
+
+    if [[ "$verbose" == "true" ]]; then
+        local body_len preview truncated
+        body_len="$(printf '%s' "$body" | wc -c | tr -d ' \n')"
+        preview="$(printf '%s' "$body" | tr '\n' ' ' | head -c 200)"
+        truncated=""
+        if [[ "${body_len:-0}" -gt 200 ]]; then
+            truncated="…"
+        fi
+        if [[ -n "$preview" ]]; then
+            log DEBUG "n8n API request $endpoint returned ${body_len:-0} bytes (preview: ${preview}${truncated})"
+        else
+            log DEBUG "n8n API request $endpoint returned ${body_len:-0} bytes"
+        fi
     fi
 
     printf '%s' "$body"
@@ -881,8 +1193,16 @@ n8n_api_get_folders() {
             continue
         fi
 
-        jq -s -c '.[0] + (.[1] // [])' "$folders_tmp" <(printf '%s' "$normalized") > "${folders_tmp}.tmp"
+        local normalized_tmp
+        normalized_tmp=$(mktemp -t n8n-folder-normalized-XXXXXXXX.json)
+        printf '%s' "$normalized" > "$normalized_tmp"
+        if ! jq -s -c '.[0] + (.[1] // [])' "$folders_tmp" "$normalized_tmp" > "${folders_tmp}.tmp"; then
+            log WARN "Failed to merge folder list for project $project_id"
+            rm -f "$normalized_tmp" "${folders_tmp}.tmp"
+            continue
+        fi
         mv "${folders_tmp}.tmp" "$folders_tmp"
+        rm -f "$normalized_tmp"
     done < <(printf '%s' "$projects_json" | jq -r '
         if type == "array" then .[] else (.data // [])[] end
         | .id // empty

@@ -324,8 +324,10 @@ copy_workflows_flat_with_names() {
     fi
 
     local root_dir="$target_dir"
-    if [[ -n "$github_path" ]]; then
-        root_dir="$target_dir/$github_path"
+    local repo_prefix
+    repo_prefix="$(resolve_repo_base_prefix)"
+    if [[ -n "$repo_prefix" ]]; then
+        root_dir="$target_dir/$repo_prefix"
     fi
 
     if ! mkdir -p "$root_dir"; then
@@ -418,7 +420,6 @@ organize_workflows_by_folders() {
     local unchanged_count=0
     local deleted_count=0
     local commit_fail=false
-    local -a manifest_entries=()
 
     local git_prefix="${git_dir%/}/"
     local -A expected_files=()
@@ -497,34 +498,6 @@ organize_workflows_by_folders() {
 
         local generated_filename
         generated_filename=$(generate_unique_workflow_filename "$destination_dir" "$workflow_id" "$workflow_name" filename_registry)
-
-        local manifest_entry
-        manifest_entry=$(jq -n \
-            --arg id "$workflow_id" \
-            --arg name "$workflow_name" \
-            --arg filename "$generated_filename" \
-            --arg relative "$relative_path" \
-            --arg storage "$storage_relative_path" \
-            --arg display "$display_path" \
-            --arg projectId "$project_id" \
-            --arg projectName "$project_name" \
-            --arg projectSlug "$project_slug" \
-            --argjson folders "$folder_segments_json" \
-            '{
-                id: $id,
-                name: $name,
-                filename: $filename,
-                relativePath: $relative,
-                storagePath: $storage,
-                displayPath: $display,
-                project: {
-                    id: $projectId,
-                    name: $projectName,
-                    slug: $projectSlug
-                },
-                folders: $folders
-            }')
-        manifest_entries+=("$manifest_entry")
 
         if [[ -z "$generated_filename" ]]; then
             log WARN "Skipping workflow ${workflow_id:-unknown} - unable to determine filename"
@@ -633,29 +606,6 @@ organize_workflows_by_folders() {
             rmdir "$empty_dir" 2>/dev/null || true
         done < <(find "$cleanup_root" -type d -empty -not -path "*/.git/*" -print0)
     fi
-
-    local manifest_json
-    if ((${#manifest_entries[@]} > 0)); then
-        manifest_json=$(printf '%s\n' "${manifest_entries[@]}" | jq -s '.')
-    else
-        manifest_json='[]'
-    fi
-
-    local manifest_payload
-    manifest_payload=$(jq -n \
-        --arg exportedAt "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-        --arg source "n8n-data-manager" \
-        --argjson workflows "$manifest_json" \
-        '{
-            version: 1,
-            exportedAt: $exportedAt,
-            source: $source,
-            workflows: $workflows
-        }')
-
-    local manifest_path="$target_dir/.n8n-folder-structure.json"
-    printf '%s\n' "$manifest_payload" > "$manifest_path"
-    log DEBUG "Written folder structure manifest: $manifest_path"
 
     log INFO "Workflow organization summary:"
     log INFO "  • New workflows: $new_count"

@@ -94,7 +94,9 @@ log_file=""                # Custom log file path
 restore_type="all"            # all|workflows|credentials
 restore_workflows_mode=""     # 0=skip, 1=local, 2=remote Git
 restore_credentials_mode=""   # 0=skip, 1=local, 2=remote Git
-restore_folder_structure_preference="" # true/false preference for applying folder manifest
+restore_folder_structure_preference="" # auto/skip/true/false preference for applying folder layout
+restore_workflows_mode_source="unset"
+restore_credentials_mode_source="unset"
 restore_folder_structure_preference_source="unset"
 credentials_folder_name="${credentials_folder_name:-.credentials}" # default credentials folder for remote storage
 config_file=""                # Custom config file path
@@ -242,40 +244,68 @@ main() {
     log DEBUG "Branch: $github_branch, Workflows: ($workflows) $(format_storage_value $workflows), Credentials: ($credentials) $(format_storage_value $credentials)"
     log DEBUG "Local Path: $local_backup_path, Rotation: $local_rotation_limit"
     if [[ -n "$github_path" ]]; then
-        log DEBUG "GitHub path prefix: $github_path (source: $github_path_source)"
+        local effective_prefix
+        effective_prefix="$(resolve_repo_base_prefix)"
+        if [[ -n "$effective_prefix" ]]; then
+            log DEBUG "GitHub path prefix: $effective_prefix (source: $github_path_source)"
+        else
+            log DEBUG "GitHub path prefix: <repository root> (source: $github_path_source)"
+        fi
     else
-        log DEBUG "GitHub path prefix: <none> (source: $github_path_source)"
+        local effective_prefix
+        effective_prefix="$(resolve_repo_base_prefix)"
+        if [[ -n "$effective_prefix" ]]; then
+            log DEBUG "GitHub path prefix: $effective_prefix (source: $github_path_source)"
+        else
+            log DEBUG "GitHub path prefix: <repository root> (source: $github_path_source)"
+        fi
     fi
     
     if [[ "$action" == "restore" ]]; then
         if [[ -z "$restore_workflows_mode" && -n "$workflows" ]]; then
             restore_workflows_mode="$workflows"
+            restore_workflows_mode_source="$workflows_source"
         fi
         if [[ -z "$restore_credentials_mode" && -n "$credentials" ]]; then
             restore_credentials_mode="$credentials"
+            restore_credentials_mode_source="$credentials_source"
         fi
         case "$restore_type" in
             workflows)
-                restore_workflows_mode=${restore_workflows_mode:-2}
-                restore_credentials_mode=${restore_credentials_mode:-0}
+                if [[ -z "$restore_workflows_mode" ]]; then
+                    restore_workflows_mode=2
+                    restore_workflows_mode_source="default"
+                fi
+                restore_credentials_mode=0
+                restore_credentials_mode_source="derived"
                 ;;
             credentials)
-                restore_workflows_mode=${restore_workflows_mode:-0}
-                restore_credentials_mode=${restore_credentials_mode:-1}
+                restore_workflows_mode=0
+                restore_workflows_mode_source="derived"
+                if [[ -z "$restore_credentials_mode" ]]; then
+                    restore_credentials_mode=1
+                    restore_credentials_mode_source="default"
+                fi
                 ;;
             all|*)
-                restore_workflows_mode=${restore_workflows_mode:-2}
-                restore_credentials_mode=${restore_credentials_mode:-1}
+                if [[ -z "$restore_workflows_mode" ]]; then
+                    restore_workflows_mode=2
+                    restore_workflows_mode_source="default"
+                fi
+                if [[ -z "$restore_credentials_mode" ]]; then
+                    restore_credentials_mode=1
+                    restore_credentials_mode_source="default"
+                fi
                 ;;
         esac
 
         if [[ -z "$restore_folder_structure_preference" ]]; then
             if [[ "$folder_structure" == "true" ]]; then
                 restore_folder_structure_preference="true"
-                restore_folder_structure_preference_source="${folder_structure_source:-config}"
+                restore_folder_structure_preference_source="config"
             else
-                restore_folder_structure_preference="false"
-                restore_folder_structure_preference_source="${folder_structure_source:-default}"
+                restore_folder_structure_preference="auto"
+                restore_folder_structure_preference_source="default"
             fi
         fi
     fi
@@ -745,8 +775,10 @@ main() {
                 if [[ "$prompt_github_path" == true ]]; then
                     prompt_github_path_prefix
                 else
-                    if [[ -n "$github_path" ]]; then
-                        log INFO "GitHub backups will use existing path prefix: $github_path"
+                    local effective_prefix
+                    effective_prefix="$(resolve_repo_base_prefix)"
+                    if [[ -n "$effective_prefix" ]]; then
+                        log INFO "GitHub backups will use existing path prefix: $effective_prefix"
                     else
                         log INFO "GitHub backups will use the repository root."
                     fi
@@ -760,19 +792,87 @@ main() {
         fi
         
         if [[ "$action" == "restore" ]]; then
-            RESTORE_APPLY_FOLDER_STRUCTURE="${restore_folder_structure_preference:-false}"
-            RESTORE_APPLY_FOLDER_STRUCTURE_SOURCE="${restore_folder_structure_preference_source:-default}"
-            select_restore_type
-            restore_type="$SELECTED_RESTORE_TYPE"
-            restore_workflows_mode="$RESTORE_WORKFLOWS_MODE"
-            restore_credentials_mode="$RESTORE_CREDENTIALS_MODE"
-            restore_folder_structure_preference="$RESTORE_APPLY_FOLDER_STRUCTURE"
-            restore_folder_structure_preference_source="$RESTORE_APPLY_FOLDER_STRUCTURE_SOURCE"
+            if [[ -z "$restore_workflows_mode" && -n "$workflows" ]]; then
+                restore_workflows_mode="$workflows"
+                restore_workflows_mode_source="$workflows_source"
+            fi
+            if [[ -z "$restore_credentials_mode" && -n "$credentials" ]]; then
+                restore_credentials_mode="$credentials"
+                restore_credentials_mode_source="$credentials_source"
+            fi
+            if [[ -z "$restore_folder_structure_preference" ]]; then
+                if [[ "$folder_structure" == "true" ]]; then
+                    restore_folder_structure_preference="true"
+                    restore_folder_structure_preference_source="config"
+                else
+                    restore_folder_structure_preference="auto"
+                    restore_folder_structure_preference_source="default"
+                fi
+            fi
+
+            local prompt_restore=false
+            if [[ "$reconfigure_mode" == "true" ]]; then
+                prompt_restore=true
+            elif [[ -z "$restore_workflows_mode" || -z "$restore_credentials_mode" ]]; then
+                prompt_restore=true
+            elif [[ "$restore_workflows_mode_source" == "unset" || "$restore_workflows_mode_source" == "default" ]]; then
+                prompt_restore=true
+            elif [[ "$restore_credentials_mode_source" == "unset" || "$restore_credentials_mode_source" == "default" ]]; then
+                prompt_restore=true
+            fi
+
+            log DEBUG "Restore prompt check - reconfigure: $reconfigure_mode, workflows_mode: ${restore_workflows_mode:-<unset>} (source: ${restore_workflows_mode_source:-unset}), credentials_mode: ${restore_credentials_mode:-<unset>} (source: ${restore_credentials_mode_source:-unset})"
+
+            if [[ "$prompt_restore" == true ]]; then
+                select_restore_type
+                restore_type="$SELECTED_RESTORE_TYPE"
+                restore_workflows_mode="$RESTORE_WORKFLOWS_MODE"
+                restore_credentials_mode="$RESTORE_CREDENTIALS_MODE"
+                restore_folder_structure_preference="$RESTORE_APPLY_FOLDER_STRUCTURE"
+                restore_workflows_mode_source="interactive"
+                restore_credentials_mode_source="interactive"
+                restore_folder_structure_preference_source="interactive"
+            else
+                RESTORE_WORKFLOWS_MODE="$restore_workflows_mode"
+                RESTORE_CREDENTIALS_MODE="$restore_credentials_mode"
+                RESTORE_APPLY_FOLDER_STRUCTURE="${restore_folder_structure_preference:-auto}"
+
+                if [[ "$restore_workflows_mode" != "0" && "$restore_credentials_mode" != "0" ]]; then
+                    restore_type="all"
+                elif [[ "$restore_workflows_mode" != "0" ]]; then
+                    restore_type="workflows"
+                else
+                    restore_type="credentials"
+                fi
+
+                log INFO "Using restore configuration from existing settings: Workflows=($restore_workflows_mode) $(format_storage_value $restore_workflows_mode), Credentials=($restore_credentials_mode) $(format_storage_value $restore_credentials_mode)"
+            fi
 
             if [[ "$restore_workflows_mode" == "2" || "$restore_credentials_mode" == "2" ]]; then
                 needs_github=true
             else
                 needs_github=false
+            fi
+
+            if [[ "$needs_github" == true ]]; then
+                local should_prompt_prefix=false
+                if [[ "$github_path_source" == "default" ]]; then
+                    should_prompt_prefix=true
+                elif [[ "$reconfigure_mode" == "true" ]]; then
+                    should_prompt_prefix=true
+                fi
+
+                if [[ "$should_prompt_prefix" == true ]]; then
+                    prompt_github_path_prefix
+                else
+                    local effective_prefix
+                    effective_prefix="$(resolve_repo_base_prefix)"
+                    if [[ -n "$effective_prefix" ]]; then
+                        log INFO "GitHub restore will use path prefix: $effective_prefix"
+                    else
+                        log INFO "GitHub restore will use the repository root."
+                    fi
+                fi
             fi
         fi
         
@@ -892,7 +992,7 @@ main() {
             fi
             ;;
         restore)
-          if restore "$container" "$github_token" "$github_repo" "$github_branch" "${restore_workflows_mode:-2}" "${restore_credentials_mode:-1}" "${restore_folder_structure_preference:-false}" "$dry_run_flag" "$credentials_folder_name"; then
+          if restore "$container" "$github_token" "$github_repo" "$github_branch" "${restore_workflows_mode:-2}" "${restore_credentials_mode:-1}" "${restore_folder_structure_preference:-auto}" "$dry_run_flag" "$credentials_folder_name" "$interactive_mode"; then
                  log SUCCESS "Restore operation completed successfully."
             else
                  log ERROR "Restore operation failed."

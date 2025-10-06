@@ -319,6 +319,7 @@ select_restore_type() {
 
     local workflows_default="${RESTORE_WORKFLOWS_MODE:-${restore_workflows_mode:-2}}"
     local credentials_default="${RESTORE_CREDENTIALS_MODE:-${restore_credentials_mode:-1}}"
+    local folder_structure_default="${RESTORE_APPLY_FOLDER_STRUCTURE:-${restore_folder_structure_preference:-auto}}"
     local workflows_choice=""
     local credentials_choice=""
 
@@ -369,30 +370,14 @@ select_restore_type() {
     fi
 
     if [[ "$RESTORE_WORKFLOWS_MODE" == "2" ]]; then
-        local folder_default_label="no"
-        if [[ "${RESTORE_APPLY_FOLDER_STRUCTURE:-false}" == "true" ]]; then
-            folder_default_label="yes"
-        fi
-
-        local folder_pref_source="${RESTORE_APPLY_FOLDER_STRUCTURE_SOURCE:-default}"
-        if [[ "$folder_pref_source" == "config" || "$folder_pref_source" == "cli" ]]; then
-            log INFO "Folder structure preference inherited (${RESTORE_APPLY_FOLDER_STRUCTURE})"
-        else
-            printf "\nApply n8n folder structure manifest if available? (yes/no) [%s]: " "$folder_default_label"
-            local folder_choice
-            read -r folder_choice
-            folder_choice=${folder_choice:-$folder_default_label}
-            if [[ "$folder_choice" == "yes" || "$folder_choice" == "y" ]]; then
-                RESTORE_APPLY_FOLDER_STRUCTURE="true"
-                RESTORE_APPLY_FOLDER_STRUCTURE_SOURCE="interactive"
-            else
-                RESTORE_APPLY_FOLDER_STRUCTURE="false"
-                RESTORE_APPLY_FOLDER_STRUCTURE_SOURCE="interactive"
-            fi
-        fi
+        case "$folder_structure_default" in
+            true) RESTORE_APPLY_FOLDER_STRUCTURE="true" ;;
+            skip) RESTORE_APPLY_FOLDER_STRUCTURE="skip" ;;
+            auto) RESTORE_APPLY_FOLDER_STRUCTURE="auto" ;;
+            *) RESTORE_APPLY_FOLDER_STRUCTURE="auto" ;;
+        esac
     else
-        RESTORE_APPLY_FOLDER_STRUCTURE="false"
-        RESTORE_APPLY_FOLDER_STRUCTURE_SOURCE="default"
+        RESTORE_APPLY_FOLDER_STRUCTURE="skip"
     fi
 
     log INFO "Selected restore configuration: Workflows=($RESTORE_WORKFLOWS_MODE) $(format_storage_value $RESTORE_WORKFLOWS_MODE), Credentials=($RESTORE_CREDENTIALS_MODE) $(format_storage_value $RESTORE_CREDENTIALS_MODE)"
@@ -599,40 +584,85 @@ select_environment_storage() {
 
 prompt_github_path_prefix() {
     log HEADER "GitHub Storage Path"
-    local current_prefix="$github_path"
-    if [[ -n "$current_prefix" ]]; then
-        log INFO "Current GitHub path prefix: $current_prefix"
+    local action_context="${action:-backup}"
+    local context_label="GitHub backup"
+    if [[ "$action_context" == "restore" ]]; then
+        context_label="GitHub restore"
+    fi
+
+    local effective_prefix
+    effective_prefix="$(effective_repo_prefix)"
+
+    if [[ -n "$effective_prefix" ]]; then
+        log INFO "Current $context_label path: $effective_prefix"
     else
-        log INFO "Current GitHub path prefix: <repository root>"
+        log INFO "Current $context_label path: <repository root>"
     fi
 
     while true; do
-        if [[ -n "$current_prefix" ]]; then
-            printf "GitHub path prefix (leave blank for repository root): "
+        local enter_hint
+        if [[ "$github_path_source" == "default" ]]; then
+            enter_hint="$project_slug"
         else
-            printf "GitHub path prefix (e.g., myvps/specific_category, leave blank for root): "
+            enter_hint="$effective_prefix"
+        fi
+
+        if [[ -n "$enter_hint" ]]; then
+            printf "GitHub path prefix (press Enter for %s, '/' for repository root): " "$enter_hint"
+        else
+            printf "GitHub path prefix (press Enter to keep repository root, '/' for repository root): "
         fi
 
         local path_input
         read -r path_input
 
         if [[ -z "$path_input" ]]; then
+            if [[ "$github_path_source" == "unset" ]]; then
+                github_path_source="default"
+            fi
+            local final_prefix
+            final_prefix="$(effective_repo_prefix)"
+            if [[ -n "$final_prefix" ]]; then
+                if [[ "$action_context" == "restore" ]]; then
+                    log INFO "GitHub restore will read from: $final_prefix"
+                else
+                    log INFO "GitHub backups will be stored under: $final_prefix"
+                fi
+            else
+                if [[ "$action_context" == "restore" ]]; then
+                    log INFO "GitHub restore will use the repository root."
+                else
+                    log INFO "GitHub backups will be stored at the repository root."
+                fi
+            fi
+            return
+        fi
+
+        if [[ "$path_input" == "/" ]]; then
             github_path=""
             github_path_source="interactive"
-            log INFO "GitHub backups will be stored at the repository root."
+            if [[ "$action_context" == "restore" ]]; then
+                log INFO "GitHub restore will use the repository root."
+            else
+                log INFO "GitHub backups will be stored at the repository root."
+            fi
             return
         fi
 
         local normalized
         normalized="$(normalize_github_path_prefix "$path_input")"
         if [[ -z "$normalized" ]]; then
-            log WARN "Path removed all characters after normalization. Please try again or leave blank for repository root."
+            log WARN "Path removed all characters after normalization. Enter '/' for repository root or press Enter for the default project path."
             continue
         fi
 
         github_path="$normalized"
         github_path_source="interactive"
-        log INFO "GitHub backups will be stored under: $github_path"
+        if [[ "$action_context" == "restore" ]]; then
+            log INFO "GitHub restore will read from: $github_path"
+        else
+            log INFO "GitHub backups will be stored under: $github_path"
+        fi
         return
     done
 }
