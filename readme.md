@@ -22,6 +22,7 @@ This script provides both interactive and non-interactive modes, making it suita
     *   **Dated Backups (`--dated`):** Creates timestamped subdirectories (e.g., `backup_YYYY-MM-DD_HH-MM-SS/`) for each backup, preserving history.
 *   **Restore Options:**
     *   **Selective Restore:** Use `--credentials` to restore only credentials, or `--workflow` to restore only workflows. You can specify either or both flags to control exactly what gets restored.
+    *   **Project-Aware Restore:** Directory hints for projects are honored, and workflows without hints fall back to the configured default project (`--project` flag or `PROJECT` config entry).
 *   **Container Compatibility:**
     *   **Alpine Support:** Fully compatible with n8n containers based on Alpine Linux.
     *   **Ubuntu Support:** Works seamlessly with containers based on Ubuntu/Debian.
@@ -102,6 +103,9 @@ GITHUB_BRANCH="main"
 # Default n8n Container Name or ID (Optional)
 DEFAULT_CONTAINER="my-n8n-container"
 
+# Default project to target on restore when directories don't include an explicit hint (Optional)
+PROJECT="Team Automation"
+
 # Use Dated Backups by default (Optional, true/false, defaults to false)
 DATED_BACKUPS=true
 
@@ -118,6 +122,8 @@ LOG_FILE="/var/log/n8n-manager.log"
 **Security Note:** Ensure the configuration file has appropriate permissions (e.g., `chmod 600 ~/.config/n8n-manager/config`) as it contains your GitHub PAT.
 
 Command-line arguments always override settings from the configuration file.
+
+When restoring workflows, `n8n-manager` first honors any explicit project hints in the backup directory structure (such as `projects/<slug>/`). If no hint is present, it falls back to the project specified by `--project` or the `PROJECT` value in your config file. If neither is provided, the Personal project is used.
 
 ## 💡 Usage
 
@@ -153,6 +159,7 @@ n8n-manager.sh --action <action> --container <id|name> --token <pat> --repo <use
 **Optional Arguments:**
 
 *   `--branch <branch>`: GitHub branch to use (defaults to `main`).
+*   `--project <name>`: Project to target when restoring workflows unless a directory explicitly overrides it.
 *   `--dated`: (Backup only) Create a timestamped subdirectory for the backup.
 *   `--environment <mode>`: Control environment backups (`0` disabled, `1` local, `2` remote Git).
 *   `--dry-run`: Simulate the action without making changes.

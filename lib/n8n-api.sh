@@ -11,6 +11,13 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 # Track last HTTP status from n8n API request helper
 N8N_API_LAST_STATUS=""
 
+# Sentinel value the n8n REST API expects when reassigning an entity to the
+# project root folder. Subsequent responses normalize this to a null/empty
+# parent, but the string literal is required for PATCH requests.
+if [[ -z "${N8N_PROJECT_ROOT_ID+x}" ]]; then
+    readonly N8N_PROJECT_ROOT_ID="0"
+fi
+
 # Test n8n API connection using appropriate authentication method
 test_n8n_api_connection() {
     local base_url="$1"
@@ -99,6 +106,20 @@ normalize_identifier() {
         printf ''
         return
     fi
+    case "$value" in
+        0)
+            printf ''
+            return
+            ;;
+    esac
+
+    local lowered
+    lowered=$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')
+    if [[ "$lowered" == "root" || "$lowered" == "undefined" ]]; then
+        printf ''
+        return
+    fi
+
     printf '%s' "$value"
 }
 
@@ -1232,6 +1253,15 @@ n8n_api_create_folder() {
     local project_id="$2"
     local parent_id="${3:-}"
 
+    if [[ "$parent_id" == "null" ]]; then
+        parent_id=""
+    fi
+
+    if [[ -z "$project_id" ]]; then
+        log ERROR "Project ID required when creating n8n folder '$name'"
+        return 1
+    fi
+
     local payload
     payload=$(jq -n \
         --arg name "$name" \
@@ -1239,14 +1269,8 @@ n8n_api_create_folder() {
         --arg parentId "${parent_id:-}" \
         '{
             name: $name,
-            projectId: $projectId,
-            parentFolderId: (if $parentId == "" then null else $parentId end)
-        }')
-
-    if [[ -z "$project_id" ]]; then
-        log ERROR "Project ID required when creating n8n folder '$name'"
-        return 1
-    fi
+            projectId: $projectId
+        } + (if ($parentId // "") == "" then {} else {parentFolderId: $parentId} end)')
 
     n8n_api_request "POST" "/projects/$project_id/folders" "$payload"
 }
@@ -1255,6 +1279,10 @@ n8n_api_update_folder_parent() {
     local project_id="$1"
     local folder_id="$2"
     local parent_id="${3:-}"
+
+    if [[ "$parent_id" == "null" ]]; then
+        parent_id=""
+    fi
 
     if [[ -z "$project_id" ]]; then
         log ERROR "Project ID required when updating folder $folder_id"
@@ -1269,9 +1297,7 @@ n8n_api_update_folder_parent() {
     local payload
     payload=$(jq -n \
         --arg parentId "${parent_id:-}" \
-        '{
-            parentFolderId: (if $parentId == "" then null else $parentId end)
-        }')
+        '(if ($parentId // "") == "" then {} else {parentFolderId: $parentId} end)')
 
     n8n_api_request "PATCH" "/projects/$project_id/folders/$folder_id" "$payload"
 }
@@ -1282,23 +1308,46 @@ n8n_api_update_workflow_assignment() {
     local folder_id="${3:-}"
     local version_id="${4:-}"
 
+    if [[ -z "$workflow_id" ]]; then
+        log WARN "Skipping workflow reassignment - missing workflow id"
+        return 1
+    fi
+
+    if [[ -z "$project_id" ]]; then
+        log WARN "Skipping workflow $workflow_id assignment update - missing project id"
+        return 1
+    fi
+
     if [[ -z "$version_id" ]]; then
         log WARN "Skipping workflow $workflow_id assignment update - missing version id"
         return 1
     fi
 
+    local normalized_folder_id="${folder_id:-}"
+    if [[ "$normalized_folder_id" == "null" ]]; then
+        normalized_folder_id=""
+    fi
+
+    local include_folder="false"
+    if [[ -n "$normalized_folder_id" ]]; then
+        include_folder="true"
+    else
+        normalized_folder_id="$N8N_PROJECT_ROOT_ID"
+        include_folder="true"
+    fi
+
     local payload
     payload=$(jq -n \
         --arg projectId "$project_id" \
-        --arg folderId "${folder_id:-}" \
+        --arg folderId "$normalized_folder_id" \
+        --arg includeFolder "$include_folder" \
         --arg versionId "$version_id" \
         '{
             homeProject: {
                 id: $projectId
             },
-            parentFolderId: (if $folderId == "" then null else $folderId end),
             versionId: $versionId
-        }')
+        } + (if $includeFolder == "true" then { parentFolderId: $folderId } else {} end)')
 
     n8n_api_request "PATCH" "/workflows/$workflow_id" "$payload"
 }
