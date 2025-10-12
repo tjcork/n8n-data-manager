@@ -118,12 +118,28 @@ reconcile_imported_workflow_ids() {
     local post_import_snapshot="$2"
     local manifest_path="$3"
     local output_path="$4"
-    
-    if [[ ! -f "$pre_import_snapshot" || ! -f "$post_import_snapshot" || ! -f "$manifest_path" ]]; then
-        log ERROR "Missing required files for workflow ID reconciliation"
+
+    if [[ -z "$post_import_snapshot" || ! -f "$post_import_snapshot" ]]; then
+        log ERROR "Post-import workflow snapshot not available; cannot reconcile IDs"
         return 1
     fi
-    
+
+    if [[ -z "$manifest_path" || ! -f "$manifest_path" ]]; then
+        log ERROR "Workflow staging manifest missing; cannot reconcile IDs"
+        return 1
+    fi
+
+    local pre_snapshot_in_use="$pre_import_snapshot"
+    local needs_pre_cleanup="false"
+    if [[ -z "$pre_snapshot_in_use" || ! -f "$pre_snapshot_in_use" ]]; then
+        pre_snapshot_in_use=$(mktemp -t n8n-empty-pre-snapshot-XXXXXXXX.json)
+        printf '[]' > "$pre_snapshot_in_use"
+        needs_pre_cleanup="true"
+        if [[ "$verbose" == "true" ]]; then
+            log DEBUG "No pre-import snapshot available; assuming empty workflow set for reconciliation."
+        fi
+    fi
+
     local reconciliation_tmp
     reconciliation_tmp=$(mktemp -t n8n-reconciled-manifest-XXXXXXXX.json)
 
@@ -131,7 +147,7 @@ reconcile_imported_workflow_ids() {
     jq_error_log=$(mktemp -t n8n-reconcile-jq-XXXXXXXX.log)
 
     if ! jq -n \
-        --slurpfile pre "$pre_import_snapshot" \
+        --slurpfile pre "$pre_snapshot_in_use" \
         --slurpfile post "$post_import_snapshot" \
         --slurpfile manifest "$manifest_path" '
             def arr(x): if (x | type) == "array" then x else [] end;
@@ -180,6 +196,14 @@ reconcile_imported_workflow_ids() {
                             $warning
                         end)
                 end;
+            def apply_note($note):
+                if ($note | length) == 0 then
+                    .
+                elif ((.idResolutionNote // "") | length) > 0 then
+                    .idResolutionNote = (.idResolutionNote + "; " + $note)
+                else
+                    .idResolutionNote = $note
+                end;
             def mark_unresolved:
                 .idReconciled = false
                 | .idResolutionStrategy = "unresolved"
@@ -207,6 +231,7 @@ reconcile_imported_workflow_ids() {
                 norm($entry.name // "") as $nameLower |
                 ($entry.duplicateAction // "") as $duplicateAction |
                 ($entry.storagePath // "") as $storagePath |
+                ($entry.sanitizedIdNote // "") as $sanitizeNote |
 
                 ($entry
                  | mark_unresolved
@@ -217,32 +242,41 @@ reconcile_imported_workflow_ids() {
                 (if has_post_id($postById; $manifestId) then
                     $base
                     | set_resolution($manifestId; "manifest-id"; "")
+                    | apply_note($sanitizeNote)
                 elif has_post_id($postById; $existingId) then
                     $base
                     | set_resolution($existingId; "existing-workflow-id"; "")
+                    | apply_note($sanitizeNote)
                 elif has_post_id($postById; $originalId) then
                     $base
                     | set_resolution($originalId; "original-workflow-id"; "")
+                    | apply_note($sanitizeNote)
                 elif ($metaIdNorm | length) > 0 and ($postByMeta[$metaIdNorm] // []) | length == 1 then
                     ($postByMeta[$metaIdNorm][0].id // "" | tostring) as $resolvedId |
                     $base
                     | set_resolution($resolvedId; "meta-instance"; "")
+                    | apply_note($sanitizeNote)
                 elif ($metaIdNorm | length) > 0 and ($postByMeta[$metaIdNorm] // []) | length > 1 then
                     $base
                     | add_warning("Multiple workflows share instanceId \($entry.metaInstanceId // "")")
+                    | apply_note($sanitizeNote)
                 elif ($duplicateAction | ascii_downcase) == "skip" then
                     $base
                     | add_warning("Workflow import skipped per duplicate strategy; ID remains unchanged")
+                    | apply_note($sanitizeNote)
                 elif ($nameLower | length) > 0 and ($newByName[$nameLower] // []) | length == 1 then
                     ($newByName[$nameLower][0].id // "" | tostring) as $resolvedId |
                     $base
                     | set_resolution($resolvedId; "new-workflow-name"; "")
+                    | apply_note($sanitizeNote)
                 elif ($nameLower | length) > 0 and ($newByName[$nameLower] // []) | length > 1 then
                     $base
                     | add_warning("Multiple newly imported workflows share the name \($entry.name // "")")
+                    | apply_note($sanitizeNote)
                 else
                     $base
                     | add_warning("Unable to locate imported workflow in post-import snapshot")
+                    | apply_note($sanitizeNote)
                 end)
             )
         ' > "$reconciliation_tmp" 2>"$jq_error_log"; then
@@ -254,6 +288,9 @@ reconcile_imported_workflow_ids() {
         fi
         rm -f "$reconciliation_tmp"
         rm -f "$jq_error_log"
+        if [[ "$needs_pre_cleanup" == "true" && -f "$pre_snapshot_in_use" ]]; then
+            rm -f "$pre_snapshot_in_use"
+        fi
         return 1
     fi
 
@@ -283,6 +320,10 @@ reconcile_imported_workflow_ids() {
                 fi
             done < <(jq -c '.[] | select(.idReconciled != true)' "$output_path")
         fi
+    fi
+
+    if [[ "$needs_pre_cleanup" == "true" && -f "$pre_snapshot_in_use" ]]; then
+        rm -f "$pre_snapshot_in_use"
     fi
 
     return 0
@@ -1469,6 +1510,347 @@ normalize_entry_identifier() {
     printf '%s' "$value"
 }
 
+build_project_lookup_tables() {
+    local projects_json="$1"
+    local verbose_flag="$2"
+    local -n out_project_name_map="$3"
+    local -n out_project_slug_map="$4"
+    local -n out_project_id_map="$5"
+    local -n out_default_project_id="$6"
+    local -n out_personal_project_id="$7"
+
+    out_project_name_map=()
+    out_project_slug_map=()
+    out_project_id_map=()
+    out_default_project_id=""
+    out_personal_project_id=""
+
+    local project_entries_file
+    project_entries_file=$(mktemp -t n8n-project-entries-XXXXXXXX.json)
+    local project_entries_err
+    project_entries_err=$(mktemp -t n8n-project-entries-err-XXXXXXXX.log)
+
+    if ! printf '%s' "$projects_json" | jq -c 'if type == "array" then .[] else (.data // [])[] end' > "$project_entries_file" 2>"$project_entries_err"; then
+        local jq_error
+        jq_error=$(cat "$project_entries_err" 2>/dev/null)
+        log ERROR "Failed to parse projects payload while preparing lookup tables."
+        if [[ -n "$jq_error" ]]; then
+            log DEBUG "jq error (projects): $jq_error"
+        fi
+        if [[ "$verbose_flag" == "true" ]]; then
+            local projects_preview
+            projects_preview=$(printf '%s' "$projects_json" | head -c 400 2>/dev/null)
+            log DEBUG "Projects payload preview: ${projects_preview:-<empty>}"
+        fi
+        rm -f "$project_entries_file" "$project_entries_err"
+        return 1
+    fi
+    rm -f "$project_entries_err"
+
+    local project_entry_count
+    project_entry_count=$(wc -l < "$project_entries_file" 2>/dev/null | tr -d '[:space:]')
+    log DEBUG "Prepared ${project_entry_count:-0} project entr(y/ies) from API payload."
+
+    while IFS= read -r project_entry; do
+        local pid
+        pid=$(printf '%s' "$project_entry" | jq -r '.id // empty' 2>/dev/null)
+        local pname
+        pname=$(printf '%s' "$project_entry" | jq -r '.name // empty' 2>/dev/null)
+        if [[ -z "$pid" ]]; then
+            continue
+        fi
+
+        local key
+        key=$(printf '%s' "$pname" | tr '[:upper:]' '[:lower:]')
+        if [[ -n "$key" ]]; then
+            out_project_name_map["$key"]="$pid"
+        fi
+
+        local pslug
+        pslug=$(printf '%s' "$project_entry" | jq -r '.slug // empty' 2>/dev/null)
+        if [[ -z "$pslug" || "$pslug" == "null" ]]; then
+            pslug=$(sanitize_slug "$pname")
+        fi
+        if [[ -n "$pslug" ]]; then
+            local pslug_lower
+            pslug_lower=$(printf '%s' "$pslug" | tr '[:upper:]' '[:lower:]')
+            if [[ -n "$pslug_lower" ]]; then
+                out_project_slug_map["$pslug_lower"]="$pid"
+            fi
+        fi
+
+        local ptype
+        ptype=$(printf '%s' "$project_entry" | jq -r '.type // empty' 2>/dev/null)
+        if [[ -z "$out_personal_project_id" ]]; then
+            if [[ "$ptype" == "personal" ]]; then
+                out_personal_project_id="$pid"
+            elif [[ "$key" == "personal" ]]; then
+                out_personal_project_id="$pid"
+            fi
+        fi
+
+        out_project_id_map["$pid"]="$pname"
+        if [[ -z "$out_default_project_id" ]]; then
+            out_default_project_id="$pid"
+        fi
+    done < "$project_entries_file"
+    rm -f "$project_entries_file"
+
+    if [[ -n "$out_personal_project_id" ]]; then
+        out_default_project_id="$out_personal_project_id"
+        out_project_name_map["personal"]="$out_personal_project_id"
+        out_project_slug_map["personal"]="$out_personal_project_id"
+    fi
+
+    if [[ -z "$out_default_project_id" ]]; then
+        log ERROR "No projects available in n8n instance; cannot restore folder structure."
+        return 1
+    fi
+
+    return 0
+}
+
+build_folder_lookup_tables() {
+    local folders_json="$1"
+    local verbose_flag="$2"
+    local -n out_folder_parent_lookup="$3"
+    local -n out_folder_project_lookup="$4"
+    local -n out_folder_slug_by_id="$5"
+    local -n out_folder_name_by_id="$6"
+    local -n out_folder_slug_lookup="$7"
+    local -n out_folder_name_lookup="$8"
+    local -n out_folder_path_lookup="$9"
+
+    out_folder_parent_lookup=()
+    out_folder_project_lookup=()
+    out_folder_slug_by_id=()
+    out_folder_name_by_id=()
+    out_folder_slug_lookup=()
+    out_folder_name_lookup=()
+    out_folder_path_lookup=()
+
+    local folder_entries_file
+    folder_entries_file=$(mktemp -t n8n-folder-entries-XXXXXXXX.json)
+    local folder_entries_err
+    folder_entries_err=$(mktemp -t n8n-folder-entries-err-XXXXXXXX.log)
+
+    if ! printf '%s' "$folders_json" | jq -c 'if type == "array" then .[] else (.data // [])[] end' > "$folder_entries_file" 2>"$folder_entries_err"; then
+        local jq_error
+        jq_error=$(cat "$folder_entries_err" 2>/dev/null)
+        log ERROR "Failed to parse folders payload while preparing lookup tables."
+        if [[ -n "$jq_error" ]]; then
+            log DEBUG "jq error (folders): $jq_error"
+        fi
+        if [[ "$verbose_flag" == "true" ]]; then
+            local folders_preview
+            folders_preview=$(printf '%s' "$folders_json" | head -c 400 2>/dev/null)
+            log DEBUG "Folders payload preview: ${folders_preview:-<empty>}"
+        fi
+        rm -f "$folder_entries_file" "$folder_entries_err"
+        return 1
+    fi
+    rm -f "$folder_entries_err"
+
+    local folder_entry_count
+    folder_entry_count=$(wc -l < "$folder_entries_file" 2>/dev/null | tr -d '[:space:]')
+    log DEBUG "Prepared ${folder_entry_count:-0} folder entr(y/ies) from API payload."
+
+    declare -A folder_duplicate_warned=()
+
+    while IFS= read -r folder_entry; do
+        local fid
+        fid=$(printf '%s' "$folder_entry" | jq -r '.id // empty' 2>/dev/null)
+        local fname
+        fname=$(printf '%s' "$folder_entry" | jq -r '.name // empty' 2>/dev/null)
+        local fproject
+        fproject=$(printf '%s' "$folder_entry" | jq -r '.projectId // (.homeProject.id // .homeProjectId // empty)' 2>/dev/null)
+        fproject=$(normalize_entry_identifier "$fproject")
+        if [[ -z "$fid" || -z "$fproject" ]]; then
+            if [[ -n "$fid" && "$verbose_flag" == "true" ]]; then
+                log DEBUG "Skipping folder '$fid' due to missing project reference in API payload."
+            fi
+            continue
+        fi
+
+        local parent
+        parent=$(normalize_entry_identifier "$(printf '%s' "$folder_entry" | jq -r '.parentFolderId // (.parentFolder.id // .parentFolderId // empty)' 2>/dev/null)")
+        local parent_key="${parent:-root}"
+        local folder_slug
+        folder_slug=$(sanitize_slug "$fname")
+
+        out_folder_parent_lookup["$fid"]="$parent_key"
+        out_folder_project_lookup["$fid"]="$fproject"
+        out_folder_slug_by_id["$fid"]="$folder_slug"
+        out_folder_name_by_id["$fid"]="$fname"
+
+        local folder_slug_lower
+        folder_slug_lower=$(printf '%s' "$folder_slug" | tr '[:upper:]' '[:lower:]')
+        local folder_name_lower
+        folder_name_lower=$(printf '%s' "$fname" | tr '[:upper:]' '[:lower:]')
+
+        if [[ -n "$folder_slug_lower" ]]; then
+            local slug_key="$fproject|${parent_key}|$folder_slug_lower"
+            local existing_slug_id="${out_folder_slug_lookup[$slug_key]:-}"
+            if [[ -n "$existing_slug_id" && "$existing_slug_id" != "$fid" ]]; then
+                local warn_key="slug|$slug_key|$existing_slug_id"
+                if [[ -z "${folder_duplicate_warned[$warn_key]+set}" ]]; then
+                    log WARN "Multiple folders share slug '${folder_slug_lower:-<empty>}' under parent '${parent_key:-root}' in project '$fproject' (IDs: $existing_slug_id, $fid)."
+                    folder_duplicate_warned[$warn_key]=1
+                fi
+            else
+                out_folder_slug_lookup[$slug_key]="$fid"
+            fi
+        fi
+
+        if [[ -n "$folder_name_lower" ]]; then
+            local name_key="$fproject|${parent_key}|$folder_name_lower"
+            local existing_name_id="${out_folder_name_lookup[$name_key]:-}"
+            if [[ -n "$existing_name_id" && "$existing_name_id" != "$fid" ]]; then
+                local warn_key="name|$name_key|$existing_name_id"
+                if [[ -z "${folder_duplicate_warned[$warn_key]+set}" ]]; then
+                    log WARN "Multiple folders share name '${folder_name_lower:-<empty>}' under parent '${parent_key:-root}' in project '$fproject' (IDs: $existing_name_id, $fid)."
+                    folder_duplicate_warned[$warn_key]=1
+                fi
+            else
+                out_folder_name_lookup[$name_key]="$fid"
+            fi
+        fi
+    done < "$folder_entries_file"
+    rm -f "$folder_entries_file"
+
+    for fid in "${!out_folder_project_lookup[@]}"; do
+        local project_ref="${out_folder_project_lookup[$fid]:-}"
+        [[ -z "$project_ref" ]] && continue
+
+        local current="$fid"
+        local guard=0
+        local -a path_segments=()
+        while [[ -n "$current" && "$current" != "root" && $guard -lt 200 ]]; do
+            local segment_slug="${out_folder_slug_by_id[$current]:-}"
+            if [[ -z "$segment_slug" ]]; then
+                segment_slug=$(sanitize_slug "${out_folder_name_by_id[$current]:-folder}")
+            fi
+            if [[ -z "$segment_slug" ]]; then
+                segment_slug="folder"
+            fi
+            local segment_slug_lower
+            segment_slug_lower=$(printf '%s' "$segment_slug" | tr '[:upper:]' '[:lower:]')
+            path_segments=("$segment_slug_lower" "${path_segments[@]}")
+
+            local parent_ref="${out_folder_parent_lookup[$current]:-root}"
+            if [[ -z "$parent_ref" || "$parent_ref" == "root" ]]; then
+                current=""
+            else
+                current="$parent_ref"
+            fi
+            guard=$((guard + 1))
+        done
+
+        if ((${#path_segments[@]} == 0)); then
+            continue
+        fi
+
+        local slug_path
+        slug_path=$(IFS=/; printf '%s' "${path_segments[*]}")
+        local path_key="$project_ref|$slug_path"
+        local existing_path_id="${out_folder_path_lookup[$path_key]:-}"
+        if [[ -n "$existing_path_id" && "$existing_path_id" != "$fid" ]]; then
+            local warn_key="path|$path_key|$existing_path_id"
+            if [[ -z "${folder_duplicate_warned[$warn_key]+set}" ]]; then
+                log WARN "Multiple folders resolve to slug path '$slug_path' in project '$project_ref' (IDs: $existing_path_id, $fid)."
+                folder_duplicate_warned[$warn_key]=1
+            fi
+            continue
+        fi
+
+        out_folder_path_lookup[$path_key]="$fid"
+    done
+
+    return 0
+}
+
+build_workflow_lookup_tables() {
+    local workflows_json="$1"
+    local verbose_flag="$2"
+    local -n out_workflow_version_lookup="$3"
+    local -n out_workflow_parent_lookup="$4"
+    local -n out_workflow_project_lookup="$5"
+    local -n out_workflow_name_lookup="$6"
+    local -n out_workflow_name_conflicts="$7"
+
+    out_workflow_version_lookup=()
+    out_workflow_parent_lookup=()
+    out_workflow_project_lookup=()
+    out_workflow_name_lookup=()
+    out_workflow_name_conflicts=()
+
+    local workflow_entries_file
+    workflow_entries_file=$(mktemp -t n8n-workflow-entries-XXXXXXXX.json)
+    local workflow_entries_err
+    workflow_entries_err=$(mktemp -t n8n-workflow-entries-err-XXXXXXXX.log)
+
+    if ! printf '%s' "$workflows_json" | jq -c 'if type == "array" then .[] else (.data // [])[] end' > "$workflow_entries_file" 2>"$workflow_entries_err"; then
+        local jq_error
+        jq_error=$(cat "$workflow_entries_err" 2>/dev/null)
+        log ERROR "Failed to parse workflows payload while preparing lookup tables."
+        if [[ -n "$jq_error" ]]; then
+            log DEBUG "jq error (workflows): $jq_error"
+        fi
+        if [[ "$verbose_flag" == "true" ]]; then
+            local workflows_preview
+            workflows_preview=$(printf '%s' "$workflows_json" | head -c 400 2>/dev/null)
+            log DEBUG "Workflows payload preview: ${workflows_preview:-<empty>}"
+        fi
+        rm -f "$workflow_entries_file" "$workflow_entries_err"
+        return 1
+    fi
+    rm -f "$workflow_entries_err"
+
+    local workflow_entry_count
+    workflow_entry_count=$(wc -l < "$workflow_entries_file" 2>/dev/null | tr -d '[:space:]')
+    log DEBUG "Prepared ${workflow_entry_count:-0} workflow entr(y/ies) from API payload."
+
+    while IFS= read -r workflow_entry; do
+        local wid
+        wid=$(printf '%s' "$workflow_entry" | jq -r '.id // empty' 2>/dev/null)
+        if [[ -z "$wid" ]]; then
+            continue
+        fi
+
+        local version_id
+        version_id=$(printf '%s' "$workflow_entry" | jq -r '.versionId // (.version.id // empty)' 2>/dev/null)
+        if [[ "$version_id" == "null" ]]; then
+            version_id=""
+        fi
+
+        local wproject
+        wproject=$(normalize_entry_identifier "$(printf '%s' "$workflow_entry" | jq -r '.homeProject.id // .homeProjectId // empty' 2>/dev/null)")
+        local wparent
+        wparent=$(normalize_entry_identifier "$(printf '%s' "$workflow_entry" | jq -r '.parentFolderId // (.parentFolder.id // empty)' 2>/dev/null)")
+
+        out_workflow_version_lookup["$wid"]="$version_id"
+        out_workflow_parent_lookup["$wid"]="$wparent"
+        out_workflow_project_lookup["$wid"]="$wproject"
+
+        local wname_lower
+        wname_lower=$(printf '%s' "$workflow_entry" | jq -r '.name // empty' 2>/dev/null | tr '[:upper:]' '[:lower:]')
+        if [[ -n "$wname_lower" && "$wname_lower" != "null" && -n "$wproject" ]]; then
+            wname_lower=$(printf '%s' "$wname_lower" | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')
+            if [[ -n "$wname_lower" ]]; then
+                local name_key="$wproject|$wname_lower"
+                if [[ -n "${out_workflow_name_lookup[$name_key]+set}" && "${out_workflow_name_lookup[$name_key]}" != "$wid" ]]; then
+                    out_workflow_name_conflicts["$name_key"]=1
+                else
+                    out_workflow_name_lookup["$name_key"]="$wid"
+                fi
+            fi
+        fi
+    done < "$workflow_entries_file"
+    rm -f "$workflow_entries_file"
+
+    return 0
+}
+
 append_assignment_audit_record() {
     local output_path="$1"
     local workflow_id="$2"
@@ -1614,83 +1996,19 @@ apply_directory_structure_entries() {
         log DEBUG "Saved workflows API payload to $workflows_debug_file"
     fi
 
-    local project_entries_file
-    project_entries_file=$(mktemp -t n8n-project-entries-XXXXXXXX.json)
-    local project_entries_err
-    project_entries_err=$(mktemp -t n8n-project-entries-err-XXXXXXXX.log)
-    if ! printf '%s' "$projects_json" | jq -c 'if type == "array" then .[] else (.data // [])[] end' > "$project_entries_file" 2>"$project_entries_err"; then
-        local jq_error
-        jq_error=$(cat "$project_entries_err" 2>/dev/null)
-        log ERROR "Failed to parse projects payload while preparing lookup tables."
-        if [[ -n "$jq_error" ]]; then
-            log DEBUG "jq error (projects): $jq_error"
-        fi
-        if [[ "$verbose" == "true" ]]; then
-            local projects_preview
-            projects_preview=$(printf '%s' "$projects_json" | head -c 400 2>/dev/null)
-            log DEBUG "Projects payload preview: ${projects_preview:-<empty>}"
-        fi
-        rm -f "$project_entries_file" "$project_entries_err"
-        finalize_n8n_api_auth
-        return 1
-    fi
-    rm -f "$project_entries_err"
-
     declare -A project_name_map=()
     declare -A project_slug_map=()
     declare -A project_id_map=()
     local default_project_id=""
     local personal_project_id=""
 
-    local project_entry_count
-    project_entry_count=$(wc -l < "$project_entries_file" 2>/dev/null | tr -d '[:space:]')
-    log DEBUG "Prepared ${project_entry_count:-0} project entr(y/ies) from API payload."
-
-    while IFS= read -r project_entry; do
-        local pid
-        pid=$(printf '%s' "$project_entry" | jq -r '.id // empty' 2>/dev/null)
-        local pname
-        pname=$(printf '%s' "$project_entry" | jq -r '.name // empty' 2>/dev/null)
-        if [[ -z "$pid" ]]; then
-            continue
-        fi
-        local key
-        key=$(printf '%s' "$pname" | tr '[:upper:]' '[:lower:]')
-        project_name_map["$key"]="$pid"
-        local pslug
-        pslug=$(printf '%s' "$project_entry" | jq -r '.slug // empty' 2>/dev/null)
-        if [[ -z "$pslug" || "$pslug" == "null" ]]; then
-            pslug=$(sanitize_slug "$pname")
-        fi
-        if [[ -n "$pslug" ]]; then
-            project_slug_map["$(printf '%s' "$pslug" | tr '[:upper:]' '[:lower:]')"]="$pid"
-        fi
-        local ptype
-        ptype=$(printf '%s' "$project_entry" | jq -r '.type // empty' 2>/dev/null)
-        if [[ -z "$personal_project_id" ]]; then
-            if [[ "$ptype" == "personal" ]]; then
-                personal_project_id="$pid"
-            elif [[ "$key" == "personal" ]]; then
-                personal_project_id="$pid"
-            fi
-        fi
-        project_id_map["$pid"]="$pname"
-        if [[ -z "$default_project_id" ]]; then
-            default_project_id="$pid"
-        fi
-    done < "$project_entries_file"
-    rm -f "$project_entries_file"
-
-    if [[ -z "$default_project_id" ]]; then
+    if ! build_project_lookup_tables "$projects_json" "$verbose" project_name_map project_slug_map project_id_map default_project_id personal_project_id; then
         finalize_n8n_api_auth
-        log ERROR "No projects available in n8n instance; cannot restore folder structure."
         return 1
     fi
 
-    if [[ -n "$personal_project_id" ]]; then
-        default_project_id="$personal_project_id"
-        project_name_map["personal"]="$personal_project_id"
-        project_slug_map["personal"]="$personal_project_id"
+    if [[ "$verbose" == "true" && -n "$personal_project_id" ]]; then
+        log DEBUG "Detected personal project ID '$personal_project_id' while preparing restoral lookups."
     fi
 
     local configured_project_id=""
@@ -1726,164 +2044,18 @@ apply_directory_structure_entries() {
 
     local fallback_project_id="$default_project_id"
 
-    local folder_entries_file
-    folder_entries_file=$(mktemp -t n8n-folder-entries-XXXXXXXX.json)
-    local folder_entries_err
-    folder_entries_err=$(mktemp -t n8n-folder-entries-err-XXXXXXXX.log)
-    if ! printf '%s' "$folders_json" | jq -c 'if type == "array" then .[] else (.data // [])[] end' > "$folder_entries_file" 2>"$folder_entries_err"; then
-        local jq_error
-        jq_error=$(cat "$folder_entries_err" 2>/dev/null)
-        log ERROR "Failed to parse folders payload while preparing lookup tables."
-        if [[ -n "$jq_error" ]]; then
-            log DEBUG "jq error (folders): $jq_error"
-        fi
-        if [[ "$verbose" == "true" ]]; then
-            local folders_preview
-            folders_preview=$(printf '%s' "$folders_json" | head -c 400 2>/dev/null)
-            log DEBUG "Folders payload preview: ${folders_preview:-<empty>}"
-        fi
-        rm -f "$folder_entries_file" "$folder_entries_err"
-        finalize_n8n_api_auth
-        return 1
-    fi
-    rm -f "$folder_entries_err"
-
     declare -A folder_parent_lookup=()
     declare -A folder_project_lookup=()
     declare -A folder_slug_by_id=()
     declare -A folder_name_by_id=()
     declare -A folder_slug_lookup=()
     declare -A folder_name_lookup=()
-    declare -A folder_duplicate_warned=()
-
-    local folder_entry_count
-    folder_entry_count=$(wc -l < "$folder_entries_file" 2>/dev/null | tr -d '[:space:]')
-    log DEBUG "Prepared ${folder_entry_count:-0} folder entr(y/ies) from API payload."
-
-    while IFS= read -r folder_entry; do
-        local fid
-        fid=$(printf '%s' "$folder_entry" | jq -r '.id // empty' 2>/dev/null)
-        local fname
-        fname=$(printf '%s' "$folder_entry" | jq -r '.name // empty' 2>/dev/null)
-        local fproject
-        fproject=$(printf '%s' "$folder_entry" | jq -r '.projectId // (.homeProject.id // .homeProjectId // empty)' 2>/dev/null)
-        fproject=$(normalize_entry_identifier "$fproject")
-        if [[ -z "$fid" || -z "$fproject" ]]; then
-            if [[ -n "$fid" && "$verbose" == "true" ]]; then
-                log DEBUG "Skipping folder '$fid' due to missing project reference in API payload."
-            fi
-            continue
-        fi
-        local parent
-        parent=$(normalize_entry_identifier "$(printf '%s' "$folder_entry" | jq -r '.parentFolderId // (.parentFolder.id // .parentFolderId // empty)' 2>/dev/null)")
-        local parent_key="${parent:-root}"
-        local folder_slug
-        folder_slug=$(sanitize_slug "$fname")
-        folder_parent_lookup["$fid"]="$parent_key"
-        folder_project_lookup["$fid"]="$fproject"
-        folder_slug_by_id["$fid"]="$folder_slug"
-        folder_name_by_id["$fid"]="$fname"
-
-        local folder_slug_lower
-        folder_slug_lower=$(printf '%s' "$folder_slug" | tr '[:upper:]' '[:lower:]')
-        local folder_name_lower
-        folder_name_lower=$(printf '%s' "$fname" | tr '[:upper:]' '[:lower:]')
-
-        if [[ -n "$folder_slug_lower" ]]; then
-            local slug_key="$fproject|${parent_key}|$folder_slug_lower"
-            local existing_slug_id="${folder_slug_lookup[$slug_key]:-}"
-            if [[ -n "$existing_slug_id" && "$existing_slug_id" != "$fid" ]]; then
-                local warn_key="slug|$slug_key|$existing_slug_id"
-                if [[ -z "${folder_duplicate_warned[$warn_key]+set}" ]]; then
-                    log WARN "Multiple folders share slug '${folder_slug_lower:-<empty>}' under parent '${parent_key:-root}' in project '$fproject' (IDs: $existing_slug_id, $fid)."
-                    folder_duplicate_warned[$warn_key]=1
-                fi
-            else
-                folder_slug_lookup[$slug_key]="$fid"
-            fi
-        fi
-
-        if [[ -n "$folder_name_lower" ]]; then
-            local name_key="$fproject|${parent_key}|$folder_name_lower"
-            local existing_name_id="${folder_name_lookup[$name_key]:-}"
-            if [[ -n "$existing_name_id" && "$existing_name_id" != "$fid" ]]; then
-                local warn_key="name|$name_key|$existing_name_id"
-                if [[ -z "${folder_duplicate_warned[$warn_key]+set}" ]]; then
-                    log WARN "Multiple folders share name '${folder_name_lower:-<empty>}' under parent '${parent_key:-root}' in project '$fproject' (IDs: $existing_name_id, $fid)."
-                    folder_duplicate_warned[$warn_key]=1
-                fi
-            else
-                folder_name_lookup[$name_key]="$fid"
-            fi
-        fi
-    done < "$folder_entries_file"
-    rm -f "$folder_entries_file"
-
     declare -A folder_path_lookup=()
-    for fid in "${!folder_project_lookup[@]}"; do
-        local project_ref="${folder_project_lookup[$fid]:-}"
-        [[ -z "$project_ref" ]] && continue
-        local current="$fid"
-        local guard=0
-        local -a path_segments=()
-        while [[ -n "$current" && "$current" != "root" && $guard -lt 200 ]]; do
-            local segment_slug="${folder_slug_by_id[$current]:-}"
-            if [[ -z "$segment_slug" ]]; then
-                segment_slug=$(sanitize_slug "${folder_name_by_id[$current]:-folder}")
-            fi
-            if [[ -z "$segment_slug" ]]; then
-                segment_slug="folder"
-            fi
-            local segment_slug_lower
-            segment_slug_lower=$(printf '%s' "$segment_slug" | tr '[:upper:]' '[:lower:]')
-            path_segments=("$segment_slug_lower" "${path_segments[@]}")
-            local parent_ref="${folder_parent_lookup[$current]:-root}"
-            if [[ -z "$parent_ref" || "$parent_ref" == "root" ]]; then
-                current=""
-            else
-                current="$parent_ref"
-            fi
-            guard=$((guard + 1))
-        done
-        if ((${#path_segments[@]} == 0)); then
-            continue
-        fi
-        local slug_path
-        slug_path=$(IFS=/; printf '%s' "${path_segments[*]}")
-        local path_key="$project_ref|$slug_path"
-        local existing_path_id="${folder_path_lookup[$path_key]:-}"
-        if [[ -n "$existing_path_id" && "$existing_path_id" != "$fid" ]]; then
-            local warn_key="path|$path_key|$existing_path_id"
-            if [[ -z "${folder_duplicate_warned[$warn_key]+set}" ]]; then
-                log WARN "Multiple folders resolve to slug path '$slug_path' in project '$project_ref' (IDs: $existing_path_id, $fid)."
-                folder_duplicate_warned[$warn_key]=1
-            fi
-            continue
-        fi
-        folder_path_lookup[$path_key]="$fid"
-    done
 
-    local workflow_entries_file
-    workflow_entries_file=$(mktemp -t n8n-workflow-entries-XXXXXXXX.json)
-    local workflow_entries_err
-    workflow_entries_err=$(mktemp -t n8n-workflow-entries-err-XXXXXXXX.log)
-    if ! printf '%s' "$workflows_json" | jq -c 'if type == "array" then .[] else (.data // [])[] end' > "$workflow_entries_file" 2>"$workflow_entries_err"; then
-        local jq_error
-        jq_error=$(cat "$workflow_entries_err" 2>/dev/null)
-        log ERROR "Failed to parse workflows payload while preparing lookup tables."
-        if [[ -n "$jq_error" ]]; then
-            log DEBUG "jq error (workflows): $jq_error"
-        fi
-        if [[ "$verbose" == "true" ]]; then
-            local workflows_preview
-            workflows_preview=$(printf '%s' "$workflows_json" | head -c 400 2>/dev/null)
-            log DEBUG "Workflows payload preview: ${workflows_preview:-<empty>}"
-        fi
-        rm -f "$workflow_entries_file" "$workflow_entries_err"
+    if ! build_folder_lookup_tables "$folders_json" "$verbose" folder_parent_lookup folder_project_lookup folder_slug_by_id folder_name_by_id folder_slug_lookup folder_name_lookup folder_path_lookup; then
         finalize_n8n_api_auth
         return 1
     fi
-    rm -f "$workflow_entries_err"
 
     declare -A workflow_version_lookup=()
     declare -A workflow_parent_lookup=()
@@ -1891,44 +2063,10 @@ apply_directory_structure_entries() {
     declare -A workflow_name_lookup=()
     declare -A workflow_name_conflicts=()
 
-    local workflow_entry_count
-    workflow_entry_count=$(wc -l < "$workflow_entries_file" 2>/dev/null | tr -d '[:space:]')
-    log DEBUG "Prepared ${workflow_entry_count:-0} workflow entr(y/ies) from API payload."
-
-    while IFS= read -r workflow_entry; do
-        local wid
-        wid=$(printf '%s' "$workflow_entry" | jq -r '.id // empty' 2>/dev/null)
-        if [[ -z "$wid" ]]; then
-            continue
-        fi
-        local version_id
-        version_id=$(printf '%s' "$workflow_entry" | jq -r '.versionId // (.version.id // empty)' 2>/dev/null)
-        if [[ "$version_id" == "null" ]]; then
-            version_id=""
-        fi
-        local wproject
-        wproject=$(normalize_entry_identifier "$(printf '%s' "$workflow_entry" | jq -r '.homeProject.id // .homeProjectId // empty' 2>/dev/null)")
-        local wparent
-        wparent=$(normalize_entry_identifier "$(printf '%s' "$workflow_entry" | jq -r '.parentFolderId // (.parentFolder.id // empty)' 2>/dev/null)")
-        workflow_version_lookup["$wid"]="$version_id"
-        workflow_parent_lookup["$wid"]="$wparent"
-        workflow_project_lookup["$wid"]="$wproject"
-
-        local wname_lower
-        wname_lower=$(printf '%s' "$workflow_entry" | jq -r '.name // empty' 2>/dev/null | tr '[:upper:]' '[:lower:]')
-        if [[ -n "$wname_lower" && "$wname_lower" != "null" && -n "$wproject" ]]; then
-            wname_lower=$(printf '%s' "$wname_lower" | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')
-            if [[ -n "$wname_lower" ]]; then
-                local name_key="$wproject|$wname_lower"
-                if [[ -n "${workflow_name_lookup[$name_key]+set}" && "${workflow_name_lookup[$name_key]}" != "$wid" ]]; then
-                    workflow_name_conflicts["$name_key"]=1
-                else
-                    workflow_name_lookup["$name_key"]="$wid"
-                fi
-            fi
-        fi
-    done < "$workflow_entries_file"
-    rm -f "$workflow_entries_file"
+    if ! build_workflow_lookup_tables "$workflows_json" "$verbose" workflow_version_lookup workflow_parent_lookup workflow_project_lookup workflow_name_lookup workflow_name_conflicts; then
+        finalize_n8n_api_auth
+        return 1
+    fi
 
     local total_count
     total_count=$(jq -r '.workflows | length' "$entries_path" 2>/dev/null || echo 0)
@@ -2610,14 +2748,32 @@ JQ
         fi
 
         # Extract workflow metadata BEFORE modifying the file
-        local staged_id staged_name staged_instance staged_description
-        staged_id=$(jq -r '.id // empty' "$staged_path" 2>/dev/null || printf '')
+    local staged_id staged_name staged_instance staged_description staged_id_valid="false" id_sanitized_note=""
+    staged_id=$(jq -r '.id // empty' "$staged_path" 2>/dev/null || printf '')
         staged_name=$(jq -r '.name // empty' "$staged_path" 2>/dev/null || printf '')
         staged_instance=$(jq -r '.meta.instanceId // empty' "$staged_path" 2>/dev/null || printf '')
         staged_description=$(jq -r '.description // empty' "$staged_path" 2>/dev/null || printf '')
         local original_staged_id="$staged_id"
         local resolved_id_source=""
         local mapping_match_json=""
+
+        if [[ -n "$staged_id" ]]; then
+            if [[ "$staged_id" =~ ^[A-Za-z0-9]{16}$ ]]; then
+                staged_id_valid="true"
+            else
+                if jq 'del(.id)' "$staged_path" > "${staged_path}.tmp" 2>/dev/null; then
+                    mv "${staged_path}.tmp" "$staged_path"
+                    staged_id=""
+                    id_sanitized_note="sanitized-invalid-format"
+                    if [[ "$verbose" == "true" ]]; then
+                        log DEBUG "Removed invalid workflow ID '$original_staged_id' (expected 16-char alphanumeric)."
+                    fi
+                else
+                    rm -f "${staged_path}.tmp"
+                    log WARN "Unable to sanitize invalid workflow ID '$staged_id' for '${staged_name:-$dest_filename}'."
+                fi
+            fi
+        fi
 
         if [[ -n "$existing_mapping" && -f "$existing_mapping" && -n "$staged_name" ]]; then
             mapping_match_json=$(lookup_workflow_in_mapping "$existing_mapping" "$canonical_storage_path" "$staged_name") || mapping_match_json=""
@@ -2673,7 +2829,20 @@ JQ
                 if jq --arg id "$existing_workflow_id" '.id = $id' "$staged_path" > "${staged_path}.tmp"; then
                     mv "${staged_path}.tmp" "$staged_path"
                     staged_id="$existing_workflow_id"
-                    if [[ "$verbose" == "true" ]]; then
+                    staged_id_valid=$([[ "$staged_id" =~ ^[A-Za-z0-9]{16}$ ]] && printf 'true' || printf 'false')
+                    if [[ "$staged_id_valid" != "true" ]]; then
+                        if jq 'del(.id)' "$staged_path" > "${staged_path}.tmp" 2>/dev/null; then
+                            mv "${staged_path}.tmp" "$staged_path"
+                            id_sanitized_note="sanitized-existing-invalid"
+                            staged_id=""
+                            if [[ "$verbose" == "true" ]]; then
+                                log DEBUG "Existing workflow ID '$existing_workflow_id' failed validation and was removed prior to import."
+                            fi
+                        else
+                            rm -f "${staged_path}.tmp"
+                            log WARN "Unable to sanitize invalid existing workflow ID '$existing_workflow_id' for '${staged_name:-$dest_filename}'."
+                        fi
+                    elif [[ "$verbose" == "true" ]]; then
                         log DEBUG "Aligned workflow ID for '${staged_name:-$dest_filename}' to existing ID '$existing_workflow_id' (source: ${resolved_id_source:-resolved})."
                     fi
                 else
@@ -2711,6 +2880,19 @@ JQ
                     rm -f "${staged_path}.tmp"
                     log WARN "Unable to clear orphan workflow ID '${staged_id}' for '${staged_name:-$dest_filename}'."
                 fi
+            elif [[ "$staged_id_valid" != "true" ]]; then
+                # ID was invalid but matched a known workflow; ensure file does not contain bad ID
+                if jq 'del(.id)' "$staged_path" > "${staged_path}.tmp" 2>/dev/null; then
+                    mv "${staged_path}.tmp" "$staged_path"
+                    id_sanitized_note="sanitized-orphan-invalid"
+                    staged_id=""
+                    if [[ "$verbose" == "true" ]]; then
+                        log DEBUG "Removed invalid workflow ID '${original_staged_id}' lacking known matches for '${staged_name:-$dest_filename}'."
+                    fi
+                else
+                    rm -f "${staged_path}.tmp"
+                    log WARN "Unable to remove invalid workflow ID '${original_staged_id}' for '${staged_name:-$dest_filename}'."
+                fi
             fi
         fi
 
@@ -2736,35 +2918,40 @@ JQ
             # - name: Backup identifier for name-based lookup if ID lookup fails
             # - storagePath: Determines folder structure
             # - existingWorkflowId: The ID that existed before (for tracking replacements)
-            manifest_entry=$(jq -n \
-                --arg filename "$dest_filename" \
-                --arg id "$staged_id" \
-                --arg name "$staged_name" \
-                --arg description "$staged_description" \
-                --arg instanceId "$staged_instance" \
-                --arg matchType "$match_type_field" \
-                --arg existingId "$existing_workflow_id" \
-                --arg originalId "$original_staged_id" \
-                --arg action "$duplicate_action" \
-                --arg relative "$relative_path" \
-                --arg storage "$canonical_storage_path" \
+                        manifest_entry=$(jq -n \
+                                --arg filename "$dest_filename" \
+                                --arg id "$staged_id" \
+                                --arg name "$staged_name" \
+                                --arg description "$staged_description" \
+                                --arg instanceId "$staged_instance" \
+                                --arg matchType "$match_type_field" \
+                                --arg existingId "$existing_workflow_id" \
+                                --arg originalId "$original_staged_id" \
+                                --arg action "$duplicate_action" \
+                                --arg relative "$relative_path" \
+                                --arg storage "$canonical_storage_path" \
                                 --arg existingStorage "$existing_storage_path" \
                                 --arg idSource "$resolved_id_source" \
-                '{
-                  filename: $filename,
-                  id: ($id | select(. != "")),
-                  name: $name,
-                  description: ($description | select(. != "")),
-                  metaInstanceId: ($instanceId | select(. != "")),
-                  duplicateMatchType: ($matchType | select(. != "")),
-                  existingWorkflowId: ($existingId | select(. != "")),
-                  originalWorkflowId: ($originalId | select(. != "")),
-                  duplicateAction: $action,
-                  relativePath: $relative,
-                  storagePath: $storage,
-                                    existingStoragePath: ($existingStorage | select(. != "")),
-                                    idResolutionSource: ($idSource | select(. != ""))
-                }')
+                                --arg sanitizeNote "$id_sanitized_note" \
+                                '{
+                                    filename: $filename,
+                                    id: $id,
+                                    name: $name,
+                                    description: $description,
+                                    metaInstanceId: $instanceId,
+                                    duplicateMatchType: $matchType,
+                                    existingWorkflowId: $existingId,
+                                    originalWorkflowId: $originalId,
+                                    duplicateAction: $action,
+                                    relativePath: $relative,
+                                    storagePath: $storage,
+                                    existingStoragePath: $existingStorage,
+                                    idResolutionSource: $idSource,
+                                    sanitizedIdNote: $sanitizeNote
+                                }
+                                | with_entries(
+                                        if (.value == null or (.value | tostring) == "") then empty else . end
+                                    )')
             printf '%s\n' "$manifest_entry" >> "$manifest_entries_file"
         fi
 
@@ -2823,6 +3010,13 @@ JQ
 
     rm -rf "$staging_dir"
     if [[ -n "$manifest_entries_file" ]]; then
+        if [[ -n "${RESTORE_MANIFEST_RAW_DEBUG_PATH:-}" && -f "$manifest_entries_file" ]]; then
+            if ! cp "$manifest_entries_file" "${RESTORE_MANIFEST_RAW_DEBUG_PATH}" 2>/dev/null; then
+                log DEBUG "Unable to persist raw staging manifest to ${RESTORE_MANIFEST_RAW_DEBUG_PATH}"
+            else
+                log DEBUG "Persisted raw staging manifest to ${RESTORE_MANIFEST_RAW_DEBUG_PATH}"
+            fi
+        fi
         if [[ -s "$manifest_entries_file" ]]; then
             if ! jq -s -c '.' "$manifest_entries_file" > "$manifest_output" 2>/dev/null; then
                 log WARN "Unable to generate staging manifest for workflows; duplicate detection may be limited."
@@ -3493,6 +3687,13 @@ restore() {
                     rm -f "$staged_manifest_copy"
                     staged_manifest_copy=""
                 fi
+                        if [[ -n "${RESTORE_MANIFEST_STAGE_DEBUG_PATH:-}" ]]; then
+                            if ! cp "$staged_manifest_file" "${RESTORE_MANIFEST_STAGE_DEBUG_PATH}" 2>/dev/null; then
+                                log DEBUG "Unable to persist staged manifest to ${RESTORE_MANIFEST_STAGE_DEBUG_PATH}"
+                            else
+                                log DEBUG "Persisted staged manifest to ${RESTORE_MANIFEST_STAGE_DEBUG_PATH}"
+                            fi
+                        fi
                 rm -f "$staged_manifest_file"
                 staged_manifest_file=""
             fi
@@ -3679,6 +3880,13 @@ restore() {
     fi
 
     if [[ -n "$staged_manifest_copy" && -f "$staged_manifest_copy" ]]; then
+        if [[ -n "${RESTORE_MANIFEST_DEBUG_PATH:-}" ]]; then
+            if ! cp "$staged_manifest_copy" "${RESTORE_MANIFEST_DEBUG_PATH}" 2>/dev/null; then
+                log DEBUG "Unable to persist restore manifest to ${RESTORE_MANIFEST_DEBUG_PATH}"
+            else
+                log DEBUG "Persisted restore manifest to ${RESTORE_MANIFEST_DEBUG_PATH}"
+            fi
+        fi
         rm -f "$staged_manifest_copy"
     fi
     if [[ -n "$existing_workflow_snapshot" && -f "$existing_workflow_snapshot" ]]; then

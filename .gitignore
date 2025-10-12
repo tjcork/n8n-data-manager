@@ -10,3 +10,6 @@ test.logs
 
 # Local configuration file (project-specific)
 .config
+
+!readme.md
+*.md
