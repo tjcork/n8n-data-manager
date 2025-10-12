@@ -122,7 +122,10 @@ Options:
   --folder-structure    Enable n8n folder structure mirroring in Git (requires API access).
   --n8n-url <url>       n8n instance URL (e.g., 'http://localhost:5678').
   --n8n-api-key <key>   n8n API key for folder structure access.
-  --n8n-cred <name>     n8n credential name providing Basic Auth for session login when API key is absent.
+    --n8n-cred <name>     n8n credential name providing Basic Auth for session login when API key is absent.
+    --overwrite           Shortcut for --duplicate-strategy overwrite.
+        --duplicate-strategy <skip|replace|overwrite>
+                                                                                                Duplicate workflow behavior during restore. Defaults to 'replace'.
   --dry-run             Simulate the action without making any changes.
     --defaults            Assume defaults for any missing inputs (non-interactive automation).
   --verbose             Enable detailed debug logging.
@@ -177,6 +180,11 @@ Configuration Files (checked in order):
     
     # Local backup rotation: 0 (overwrite), number (keep N), "unlimited" (keep all)
     LOCAL_ROTATION_LIMIT="10"
+
+    # Duplicate workflow handling during restore: skip, replace (default), or overwrite (sync entire folder)
+    RESTORE_DUPLICATE_STRATEGY="replace"
+    # Or use a simple toggle for full folder sync:
+    # RESTORE_OVERWRITE=true
     
     # === n8n FOLDER STRUCTURE SETTINGS ===
     # Enable n8n folder structure mirroring in Git (requires n8n API access)

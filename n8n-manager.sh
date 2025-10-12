@@ -98,6 +98,8 @@ restore_folder_structure_preference="" # auto/skip/true/false preference for app
 restore_workflows_mode_source="unset"
 restore_credentials_mode_source="unset"
 restore_folder_structure_preference_source="unset"
+restore_duplicate_strategy=""
+restore_duplicate_strategy_source="unset"
 credentials_folder_name="${credentials_folder_name:-.credentials}" # default credentials folder for remote storage
 config_file=""                # Custom config file path
 
@@ -194,6 +196,22 @@ main() {
             --n8n-url) n8n_base_url="$2"; shift 2 ;;
             --n8n-api-key) n8n_api_key="$2"; shift 2 ;;
             --n8n-cred) n8n_session_credential="$2"; shift 2 ;;
+            --overwrite)
+                restore_duplicate_strategy="overwrite"
+                restore_duplicate_strategy_source="cli"
+                shift 1 ;;
+            --duplicate-strategy)
+                local strategy_input="${2,,}"
+                case "$strategy_input" in
+                    skip|overwrite|replace)
+                        restore_duplicate_strategy="$strategy_input"
+                        restore_duplicate_strategy_source="cli"
+                        shift 2 ;;
+                    *)
+                        log ERROR "Invalid duplicate strategy: $2. Use skip or overwrite."
+                        exit 1 ;;
+                esac
+                ;;
             -h|--help) show_help; exit 0 ;;
             *) echo "[ERROR] Invalid option: $1"; show_help; exit 1 ;;
         esac
@@ -212,6 +230,11 @@ main() {
     fi
     if [[ "$github_path_source" == "unset" ]]; then
         github_path_source="default"
+    fi
+
+    if [[ -z "$restore_duplicate_strategy" ]]; then
+        restore_duplicate_strategy="replace"
+        restore_duplicate_strategy_source="${restore_duplicate_strategy_source:-default}"
     fi
 
     log HEADER "n8n Backup/Restore Manager v$VERSION"
@@ -243,6 +266,7 @@ main() {
     log DEBUG "Action: $action, Container: $container, Repo: $github_repo"
     log DEBUG "Branch: $github_branch, Workflows: ($workflows) $(format_storage_value $workflows), Credentials: ($credentials) $(format_storage_value $credentials)"
     log DEBUG "Local Path: $local_backup_path, Rotation: $local_rotation_limit"
+    log DEBUG "Duplicate workflow strategy: ${restore_duplicate_strategy:-replace} (source: ${restore_duplicate_strategy_source:-default})"
     if [[ -n "$github_path" ]]; then
         local effective_prefix
         effective_prefix="$(resolve_repo_base_prefix)"
@@ -992,7 +1016,7 @@ main() {
             fi
             ;;
         restore)
-          if restore "$container" "$github_token" "$github_repo" "$github_branch" "${restore_workflows_mode:-2}" "${restore_credentials_mode:-1}" "${restore_folder_structure_preference:-auto}" "$dry_run_flag" "$credentials_folder_name" "$interactive_mode"; then
+        if restore "$container" "$github_token" "$github_repo" "$github_branch" "${restore_workflows_mode:-2}" "${restore_credentials_mode:-1}" "${restore_folder_structure_preference:-auto}" "$dry_run_flag" "$credentials_folder_name" "$interactive_mode" "$restore_duplicate_strategy"; then
                  log SUCCESS "Restore operation completed successfully."
             else
                  log ERROR "Restore operation failed."

@@ -644,6 +644,19 @@ load_config() {
             fi
         fi
         
+        # Handle restore overwrite alias
+        if [[ -z "$restore_duplicate_strategy" && -n "${RESTORE_OVERWRITE:-}" ]]; then
+            local overwrite_cfg="$RESTORE_OVERWRITE"
+            overwrite_cfg=$(echo "$overwrite_cfg" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
+            if [[ "$overwrite_cfg" == "true" || "$overwrite_cfg" == "1" || "$overwrite_cfg" == "yes" || "$overwrite_cfg" == "on" ]]; then
+                restore_duplicate_strategy="overwrite"
+                restore_duplicate_strategy_source="config"
+            elif [[ "$overwrite_cfg" == "false" || "$overwrite_cfg" == "0" || "$overwrite_cfg" == "no" || "$overwrite_cfg" == "off" ]]; then
+                restore_duplicate_strategy="replace"
+                restore_duplicate_strategy_source="config"
+            fi
+        fi
+
         # Handle verbose boolean config
         if [[ -z "$verbose" && -n "${VERBOSE:-}" ]]; then
             local verbose_config="$VERBOSE"
@@ -657,6 +670,26 @@ load_config() {
                 log WARN "Invalid VERBOSE value in config: '$verbose_config'. Must be true/false. Using default: false"
                 verbose=false
             fi
+        fi
+
+        if [[ -z "$restore_duplicate_strategy" && -n "${RESTORE_DUPLICATE_STRATEGY:-}" ]]; then
+            local duplicate_strategy_config="${RESTORE_DUPLICATE_STRATEGY,,}"
+            duplicate_strategy_config=$(echo "$duplicate_strategy_config" | tr -d '"\047' | xargs)
+            case "$duplicate_strategy_config" in
+                skip|overwrite|replace)
+                    restore_duplicate_strategy="$duplicate_strategy_config"
+                    restore_duplicate_strategy_source="config"
+                    ;;
+                ""|none)
+                    restore_duplicate_strategy="replace"
+                    restore_duplicate_strategy_source="config"
+                    ;;
+                *)
+                    log WARN "Invalid RESTORE_DUPLICATE_STRATEGY value '$RESTORE_DUPLICATE_STRATEGY'. Using default: replace"
+                    restore_duplicate_strategy="replace"
+                    restore_duplicate_strategy_source="default"
+                    ;;
+            esac
         fi
         
         # Handle dry_run boolean config

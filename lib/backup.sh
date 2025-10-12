@@ -1321,8 +1321,60 @@ backup() {
             log DRYRUN "Would clone repository: $github_repo (branch: $branch)"
         else
             local clone_url="https://${github_token}@github.com/${github_repo}.git"
-            if git clone --depth 1 -b "$branch" "$clone_url" . 2>/dev/null; then
+            local sparse_target=""
+            if [[ -n "$github_path" ]]; then
+                sparse_target="${github_path#/}"
+                sparse_target="${sparse_target%/}"
+            fi
+
+            local -a git_clone_args=("--depth" "1" "-b" "$branch")
+            if [[ -n "$sparse_target" ]]; then
+                git_clone_args+=("--filter=blob:none" "--no-checkout")
+                if git clone -h 2>&1 | grep -q -- '--sparse'; then
+                    git_clone_args+=("--sparse")
+                fi
+            fi
+            git_clone_args+=("$clone_url" ".")
+            local clone_args_display
+            clone_args_display=$(printf '%s ' "${git_clone_args[@]}")
+            clone_args_display="${clone_args_display% }"
+            log DEBUG "Running: git clone ${clone_args_display}"
+            if git clone "${git_clone_args[@]}" 2>/dev/null; then
                 log SUCCESS "Repository cloned successfully"
+                if [[ -n "$sparse_target" ]]; then
+                    log INFO "Restricting checkout to configured GitHub path: $sparse_target"
+                    local sparse_setup_failed=false
+                    if ! git sparse-checkout init --cone >/dev/null 2>&1; then
+                        log DEBUG "Sparse checkout init unavailable or already configured; attempting manual enablement."
+                        if ! git config core.sparseCheckout true >/dev/null 2>&1; then
+                            sparse_setup_failed=true
+                        fi
+                    fi
+
+                    if ! $sparse_setup_failed; then
+                        if git sparse-checkout set "$sparse_target" >/dev/null 2>&1; then
+                            if git checkout "$branch" >/dev/null 2>&1; then
+                                log SUCCESS "Sparse checkout active for $sparse_target"
+                            else
+                                log WARN "Unable to finalize sparse checkout; using full repository contents."
+                                sparse_setup_failed=true
+                            fi
+                        else
+                            log WARN "Sparse checkout configuration failed; using full repository contents."
+                            sparse_setup_failed=true
+                        fi
+                    fi
+
+                    if $sparse_setup_failed; then
+                        git sparse-checkout disable >/dev/null 2>&1 || true
+                        if ! git checkout "$branch" >/dev/null 2>&1; then
+                            log WARN "Fallback checkout failed; repository may remain partially configured."
+                        fi
+                    fi
+                fi
+                if [[ -z "$sparse_target" ]]; then
+                    git checkout "$branch" >/dev/null 2>&1 || true
+                fi
             else
                 log WARN "Branch '$branch' not found, creating new repository"
                 git init .

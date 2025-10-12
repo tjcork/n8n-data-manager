@@ -23,6 +23,10 @@ DEFAULT_CONTAINER="n8n-container-name"
 # GitHub branch to use (defaults to 'main')
 GITHUB_BRANCH="main"
 
+# Optional: prefix within the repository where workflows are stored, or retrieved from (e.g., "myvps" or "prod/env")
+# Leave unset to organize by project name at the repository root
+GITHUB_PATH="Personal/"
+
 # Git commit identity used for automated backups (optional)
 # Defaults to "N8N Backup Manager" and backup@<base domain of N8N_BASE_URL>
 # GIT_COMMIT_NAME="N8N Backup Manager"

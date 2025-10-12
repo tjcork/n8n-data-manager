@@ -570,17 +570,18 @@ get_workflow_folder_mapping() {
     fi
 
     local workflow_rows
-    if ! workflow_rows=$(jq -r '
-        (if type == "array" then . else (.data // []) end)
-        | map(select(.resource != "folder"))
-        | map([
-            ((.id // "") | tostring),
-            (.name // "Unnamed Workflow"),
-            ((.homeProject.id // .homeProjectId // "") | tostring),
-            ((.parentFolderId // (.parentFolder.id // "")) | tostring)
-          ] | @tsv)
-        | .[]
-    ' "$workflows_tmp"); then
+        if ! workflow_rows=$(jq -r '
+                (if type == "array" then . else (.data // []) end)
+                | map(select(.resource != "folder"))
+                | map([
+                        ((.id // "") | tostring),
+                        (.name // "Unnamed Workflow"),
+                        ((.homeProject.id // .homeProjectId // "") | tostring),
+                        ((.parentFolderId // (.parentFolder.id // "")) | tostring),
+                        (.updatedAt // "")
+                    ] | @tsv)
+                | .[]
+        ' "$workflows_tmp"); then
         log ERROR "Unable to parse workflows while building workflow mapping"
         rm -f "$projects_tmp" "$workflows_tmp"
         trap - RETURN
@@ -592,7 +593,7 @@ get_workflow_folder_mapping() {
 
     local -a workflow_entries=()
     if [[ -n "$workflow_rows" ]]; then
-        while IFS=$'\t' read -r raw_id raw_name raw_project raw_parent; do
+    while IFS=$'\t' read -r raw_id raw_name raw_project raw_parent raw_updated_at; do
             local wid
             wid="$(normalize_identifier "$raw_id")"
             if [[ -z "$wid" ]]; then
@@ -640,6 +641,8 @@ get_workflow_folder_mapping() {
                 display_path+="/$folder_display"
             fi
 
+            local updated_at="${raw_updated_at:-}"
+
             local workflow_json
             if ! workflow_json=$(jq -n -c \
                 --arg id "$wid" \
@@ -649,6 +652,7 @@ get_workflow_folder_mapping() {
                 --arg projectSlug "$project_slug" \
                 --arg relative "$relative_path" \
                 --arg display "$display_path" \
+                --arg updatedAt "$updated_at" \
                 --argjson folders "$folder_chain_json" '{
                     id: $id,
                     name: $name,
@@ -659,7 +663,8 @@ get_workflow_folder_mapping() {
                     },
                     folders: $folders,
                     relativePath: $relative,
-                    displayPath: $display
+                    displayPath: $display,
+                    updatedAt: (if ($updatedAt // "") == "" then null else $updatedAt end)
                 }'); then
                 log WARN "Failed to assemble workflow entry for ID $wid"
                 continue
@@ -1062,6 +1067,20 @@ prepare_n8n_api_auth() {
     local container_id="$1"
     local container_credentials_path="${2:-}"
 
+    if [[ "$N8N_API_AUTH_MODE" == "api_key" ]]; then
+        return 0
+    fi
+
+    if [[ "$N8N_API_AUTH_MODE" == "session" ]]; then
+        if [[ -f "$N8N_SESSION_COOKIE_FILE" ]]; then
+            if [[ "$verbose" == "true" ]]; then
+                log DEBUG "Reusing existing n8n session credentials."
+            fi
+            return 0
+        fi
+        N8N_API_AUTH_MODE=""
+    fi
+
     if [[ -z "$n8n_base_url" ]]; then
         log ERROR "n8n base URL is required to interact with the API."
         return 1
@@ -1248,6 +1267,76 @@ n8n_api_get_workflows() {
     n8n_api_request "GET" "/workflows?includeScopes=true&includeFolders=true&filter=%7B%22isArchived%22%3Afalse%7D&skip=0&take=2000&sortBy=updatedAt%3Adesc"
 }
 
+n8n_api_get_workflow() {
+    local workflow_id="$1"
+
+    if [[ -z "$workflow_id" ]]; then
+        log WARN "Workflow id is required when requesting workflow details."
+        return 1
+    fi
+
+    if ! n8n_api_request "GET" "/workflows/${workflow_id}"; then
+        return 1
+    fi
+
+    return 0
+}
+
+n8n_api_archive_workflow() {
+    local workflow_id="$1"
+
+    if [[ -z "$workflow_id" ]]; then
+        log WARN "Skipping archive request - workflow id not provided."
+        return 1
+    fi
+
+    local archive_response=""
+    if archive_response=$(n8n_api_request "POST" "/workflows/${workflow_id}/archive"); then
+        if [[ "$verbose" == "true" && -n "$archive_response" ]]; then
+            local preview suffix response_len
+            preview=$(printf '%s' "$archive_response" | tr '\n' ' ' | head -c 200)
+            response_len=$(printf '%s' "$archive_response" | wc -c | tr -d ' \n')
+            suffix=""
+            if [[ ${response_len:-0} -gt 200 ]]; then
+                suffix="…"
+            fi
+            log DEBUG "Archive response for workflow $workflow_id: ${preview}${suffix}"
+        fi
+        return 0
+    fi
+
+    local last_status="${N8N_API_LAST_STATUS:-}"
+    if [[ "$last_status" == "409" ]]; then
+        log DEBUG "Workflow $workflow_id already archived (HTTP 409); continuing."
+        return 0
+    fi
+
+    if [[ "$last_status" == "404" ]]; then
+        log DEBUG "Workflow $workflow_id not found when archiving; assuming it was already removed."
+        return 0
+    fi
+
+    local payload
+    payload=$(jq -n '{isArchived: true}')
+    if n8n_api_request "PATCH" "/workflows/${workflow_id}" "$payload"; then
+        return 0
+    fi
+
+    last_status="${N8N_API_LAST_STATUS:-}"
+    if [[ "$last_status" == "409" ]]; then
+        log DEBUG "Workflow $workflow_id already archived when patching (HTTP 409); continuing."
+        return 0
+    fi
+
+    if [[ "$last_status" == "404" ]]; then
+        log DEBUG "Workflow $workflow_id missing when patching archive; treating as already removed."
+        return 0
+    fi
+
+    log WARN "Failed to archive workflow $workflow_id via n8n API (HTTP ${last_status:-unknown})."
+    return 1
+}
+
 n8n_api_create_folder() {
     local name="$1"
     local project_id="$2"
@@ -1307,6 +1396,7 @@ n8n_api_update_workflow_assignment() {
     local project_id="$2"
     local folder_id="${3:-}"
     local version_id="${4:-}"
+    local version_mode="${5:-auto}"
 
     if [[ -z "$workflow_id" ]]; then
         log WARN "Skipping workflow reassignment - missing workflow id"
@@ -1315,11 +1405,6 @@ n8n_api_update_workflow_assignment() {
 
     if [[ -z "$project_id" ]]; then
         log WARN "Skipping workflow $workflow_id assignment update - missing project id"
-        return 1
-    fi
-
-    if [[ -z "$version_id" ]]; then
-        log WARN "Skipping workflow $workflow_id assignment update - missing version id"
         return 1
     fi
 
@@ -1336,18 +1421,53 @@ n8n_api_update_workflow_assignment() {
         include_folder="true"
     fi
 
+    local resolved_version_mode="$version_mode"
+    if [[ "$resolved_version_mode" != "string" && "$resolved_version_mode" != "null" ]]; then
+        if [[ -z "$version_id" || "$version_id" == "null" ]]; then
+            resolved_version_mode="null"
+        else
+            resolved_version_mode="string"
+        fi
+    elif [[ "$resolved_version_mode" == "string" && ( -z "$version_id" || "$version_id" == "null" ) ]]; then
+        resolved_version_mode="null"
+    fi
+
+    local jq_args=(-n --arg projectId "$project_id" --arg includeFolder "$include_folder" --arg folderId "$normalized_folder_id" --arg versionMode "$resolved_version_mode" --arg versionId "${version_id:-}")
+
     local payload
-    payload=$(jq -n \
-        --arg projectId "$project_id" \
-        --arg folderId "$normalized_folder_id" \
-        --arg includeFolder "$include_folder" \
-        --arg versionId "$version_id" \
-        '{
+    payload=$(jq "${jq_args[@]}" '
+        {
             homeProject: {
                 id: $projectId
-            },
-            versionId: $versionId
-        } + (if $includeFolder == "true" then { parentFolderId: $folderId } else {} end)')
+            }
+        }
+        + (if $includeFolder == "true" then { parentFolderId: (if ($folderId // "") == "" then null else $folderId end) } else {} end)
+        + (if $versionMode == "string" then { versionId: $versionId }
+           elif $versionMode == "null" then { versionId: null }
+           else {} end)
+    ')
 
-    n8n_api_request "PATCH" "/workflows/$workflow_id" "$payload"
+    if [[ "$resolved_version_mode" == "null" && "$verbose" == "true" ]]; then
+        log DEBUG "Updating workflow $workflow_id with null versionId payload."
+    fi
+
+    local update_response
+    if ! update_response=$(n8n_api_request "PATCH" "/workflows/$workflow_id" "$payload"); then
+        return 1
+    fi
+
+    if [[ "$verbose" == "true" ]]; then
+        local preview response_len suffix
+        preview=$(printf '%s' "$update_response" | tr '\n' ' ' | head -c 200)
+        response_len=$(printf '%s' "$update_response" | wc -c | tr -d ' \n')
+        suffix=""
+        if [[ ${response_len:-0} -gt 200 ]]; then
+            suffix="…"
+        fi
+        if [[ -n "$preview" ]]; then
+            log DEBUG "Workflow $workflow_id assignment update response preview: ${preview}${suffix}"
+        fi
+    fi
+
+    return 0
 }
