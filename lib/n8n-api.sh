@@ -8,8 +8,10 @@
 # Source common utilities
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
-# Track last HTTP status from n8n API request helper
+# Track last HTTP status and response details from n8n API request helper
 N8N_API_LAST_STATUS=""
+N8N_API_LAST_BODY=""
+N8N_API_LAST_ERROR_CATEGORY=""
 
 # Sentinel value the n8n REST API expects when reassigning an entity to the
 # project root folder. Subsequent responses normalize this to a null/empty
@@ -1149,6 +1151,8 @@ n8n_api_request() {
 
     local response
     N8N_API_LAST_STATUS=""
+    N8N_API_LAST_BODY=""
+    N8N_API_LAST_ERROR_CATEGORY=""
 
     if ! response=$(curl "${curl_args[@]}" 2>/dev/null); then
         log ERROR "Failed to contact n8n API endpoint $endpoint"
@@ -1160,17 +1164,35 @@ n8n_api_request() {
     N8N_API_LAST_STATUS="$http_status"
     local body_raw
     body_raw=$(echo "$response" | head -n -1)
+    N8N_API_LAST_BODY="$body_raw"
 
     if [[ "$http_status" != 2* && "$http_status" != 3* ]]; then
-        log ERROR "n8n API request failed (HTTP $http_status) for $endpoint"
-        if [[ -n "$body_raw" ]]; then
-            log DEBUG "n8n API response: $body_raw"
+        local license_block="false"
+        if [[ "$http_status" == "403" ]]; then
+            if printf '%s' "$body_raw" | grep -qi 'plan lacks license'; then
+                license_block="true"
+            fi
+        fi
+
+        if [[ "$license_block" == "true" ]]; then
+            N8N_API_LAST_ERROR_CATEGORY="license"
+            if [[ "$verbose" == "true" && -n "$body_raw" ]]; then
+                log DEBUG "n8n API response: $body_raw"
+            fi
+        else
+            if [[ -n "$body_raw" ]]; then
+                log ERROR "n8n API request failed (HTTP $http_status) for $endpoint"
+                log DEBUG "n8n API response: $body_raw"
+            else
+                log ERROR "n8n API request failed (HTTP $http_status) for $endpoint"
+            fi
         fi
         return 1
     fi
 
     local body
     body="$(sanitize_n8n_json_response "$body_raw")"
+    N8N_API_LAST_BODY="$body"
 
     if [[ "$verbose" == "true" ]]; then
         local body_len preview truncated
@@ -1217,7 +1239,21 @@ n8n_api_get_folders() {
             if [[ "${N8N_API_LAST_STATUS:-}" == "404" ]]; then
                 saw_not_found="true"
             else
-                log WARN "Failed to fetch folders for project $project_id (HTTP ${N8N_API_LAST_STATUS:-unknown})"
+                local status="${N8N_API_LAST_STATUS:-unknown}"
+                local category="${N8N_API_LAST_ERROR_CATEGORY:-}"
+                if [[ "$category" == "license" ]]; then
+                    local message=""
+                    if [[ -n "${N8N_API_LAST_BODY:-}" ]]; then
+                        message=$(printf '%s' "${N8N_API_LAST_BODY}" | jq -r '.message // empty' 2>/dev/null || printf '')
+                    fi
+                    if [[ -n "$message" ]]; then
+                        log INFO "Skipping folder discovery for project $project_id due to license restriction (HTTP $status, message: $message)"
+                    else
+                        log INFO "Skipping folder discovery for project $project_id due to license restriction (HTTP $status)"
+                    fi
+                else
+                    log WARN "Failed to fetch folders for project $project_id (HTTP $status)"
+                fi
             fi
             continue
         fi

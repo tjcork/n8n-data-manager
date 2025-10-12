@@ -1040,7 +1040,11 @@ dockExec() {
         return 0
     else
         log DEBUG "Executing in container $container_id: $cmd"
-        output=$(docker exec "$container_id" sh -c "$cmd" 2>&1) || exit_code=$?
+        local -a exec_args=()
+        if [[ -n "${DOCKER_EXEC_USER:-}" ]]; then
+            exec_args+=(--user "$DOCKER_EXEC_USER")
+        fi
+        output=$(docker exec "${exec_args[@]}" "$container_id" sh -c "$cmd" 2>&1) || exit_code=$?
 
         local filtered_output=""
         if [ -n "$output" ]; then

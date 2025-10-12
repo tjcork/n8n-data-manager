@@ -151,7 +151,12 @@ reconcile_imported_workflow_ids() {
         --slurpfile post "$post_import_snapshot" \
         --slurpfile manifest "$manifest_path" '
             def arr(x): if (x | type) == "array" then x else [] end;
-            def norm(v): (v // "" | ascii_downcase);
+            def ensure_string(v):
+                if (v | type) == "string" then v
+                elif (v | type) == "number" then (v | tostring)
+                else ""
+                end;
+            def norm(v): (ensure_string(v) | ascii_downcase);
             def idx_by_id(arr):
                 arr
                 | reduce .[] as $item ({};
@@ -187,22 +192,29 @@ reconcile_imported_workflow_ids() {
                     .
                 end;
             def add_warning($warning):
-                if ($warning | length) == 0 then .
+                ensure_string($warning) as $warn |
+                if ($warn | length) == 0 then .
                 else
+                    ensure_string(.idReconciliationWarning) as $existingWarn |
                     .idReconciliationWarning = (
-                        if has("idReconciliationWarning") then
-                            .idReconciliationWarning + "; " + $warning
+                        if ($existingWarn | length) > 0 then
+                            $existingWarn + "; " + $warn
                         else
-                            $warning
+                            $warn
                         end)
                 end;
             def apply_note($note):
-                if ($note | length) == 0 then
+                ensure_string($note) as $noteStr |
+                if ($noteStr | length) == 0 then
                     .
-                elif ((.idResolutionNote // "") | length) > 0 then
-                    .idResolutionNote = (.idResolutionNote + "; " + $note)
                 else
-                    .idResolutionNote = $note
+                    ensure_string(.idResolutionNote) as $existingNote |
+                    .idResolutionNote = (
+                        if ($existingNote | length) > 0 then
+                            $existingNote + "; " + $noteStr
+                        else
+                            $noteStr
+                        end)
                 end;
             def mark_unresolved:
                 .idReconciled = false
@@ -224,14 +236,23 @@ reconcile_imported_workflow_ids() {
             $manifestEntries
             | map(
                 . as $entry |
-                ($entry.id // "" | tostring) as $manifestId |
-                ($entry.existingWorkflowId // "" | tostring) as $existingId |
-                ($entry.originalWorkflowId // "" | tostring) as $originalId |
-                norm($entry.metaInstanceId // "") as $metaIdNorm |
-                norm($entry.name // "") as $nameLower |
-                ($entry.duplicateAction // "") as $duplicateAction |
-                ($entry.storagePath // "") as $storagePath |
-                ($entry.sanitizedIdNote // "") as $sanitizeNote |
+                ensure_string($entry.id) as $manifestId |
+                ensure_string($entry.existingWorkflowId) as $existingId |
+                ensure_string($entry.originalWorkflowId) as $originalId |
+                ensure_string($entry.metaInstanceId) as $metaIdRaw |
+                norm($metaIdRaw) as $metaIdNorm |
+                ensure_string($entry.name) as $entryName |
+                norm($entryName) as $nameLower |
+                ensure_string($entry.duplicateAction) as $duplicateActionRaw |
+                ($duplicateActionRaw | ascii_downcase) as $duplicateActionLower |
+                ensure_string($entry.storagePath) as $storagePath |
+                ensure_string($entry.sanitizedIdNote) as $sanitizeNote |
+                (if ($metaIdNorm | length) > 0 then ($postByMeta[$metaIdNorm] // []) else [] end) as $metaMatchesMaybe |
+                (if ($metaMatchesMaybe | type) == "array" then $metaMatchesMaybe else [] end) as $metaMatches |
+                ($metaMatches | length) as $metaMatchCount |
+                (if ($nameLower | length) > 0 then ($newByName[$nameLower] // []) else [] end) as $nameMatchesMaybe |
+                (if ($nameMatchesMaybe | type) == "array" then $nameMatchesMaybe else [] end) as $nameMatches |
+                ($nameMatches | length) as $nameMatchCount |
 
                 ($entry
                  | mark_unresolved
@@ -251,27 +272,27 @@ reconcile_imported_workflow_ids() {
                     $base
                     | set_resolution($originalId; "original-workflow-id"; "")
                     | apply_note($sanitizeNote)
-                elif ($metaIdNorm | length) > 0 and ($postByMeta[$metaIdNorm] // []) | length == 1 then
-                    ($postByMeta[$metaIdNorm][0].id // "" | tostring) as $resolvedId |
+                elif $metaMatchCount == 1 then
+                    ($metaMatches[0].id // "" | tostring) as $resolvedId |
                     $base
                     | set_resolution($resolvedId; "meta-instance"; "")
                     | apply_note($sanitizeNote)
-                elif ($metaIdNorm | length) > 0 and ($postByMeta[$metaIdNorm] // []) | length > 1 then
+                elif $metaMatchCount > 1 then
                     $base
-                    | add_warning("Multiple workflows share instanceId \($entry.metaInstanceId // "")")
+                    | add_warning("Multiple workflows share instanceId \($metaIdRaw)")
                     | apply_note($sanitizeNote)
-                elif ($duplicateAction | ascii_downcase) == "skip" then
+                elif $duplicateActionLower == "skip" then
                     $base
                     | add_warning("Workflow import skipped per duplicate strategy; ID remains unchanged")
                     | apply_note($sanitizeNote)
-                elif ($nameLower | length) > 0 and ($newByName[$nameLower] // []) | length == 1 then
-                    ($newByName[$nameLower][0].id // "" | tostring) as $resolvedId |
+                elif $nameMatchCount == 1 then
+                    ($nameMatches[0].id // "" | tostring) as $resolvedId |
                     $base
                     | set_resolution($resolvedId; "new-workflow-name"; "")
                     | apply_note($sanitizeNote)
-                elif ($nameLower | length) > 0 and ($newByName[$nameLower] // []) | length > 1 then
+                elif $nameMatchCount > 1 then
                     $base
-                    | add_warning("Multiple newly imported workflows share the name \($entry.name // "")")
+                    | add_warning("Multiple newly imported workflows share the name \($entryName)")
                     | apply_note($sanitizeNote)
                 else
                     $base
@@ -575,6 +596,10 @@ collect_directory_structure_entries() {
         local manifest_index_err
         manifest_index_err=$(mktemp -t n8n-manifest-index-err-XXXXXXXX.log)
 
+        if [[ "$verbose" == "true" ]]; then
+            log DEBUG "Indexing staged manifest from $manifest_path"
+        fi
+
         local manifest_index_jq
         manifest_index_jq=$(cat <<'JQ'
             def norm(v):
@@ -632,7 +657,7 @@ collect_directory_structure_entries() {
 JQ
         )
 
-        if jq -n --slurpfile manifest "$manifest_path" "$manifest_index_jq" > "$manifest_index_file" 2>"$manifest_index_err"; then
+    if jq -n -c --slurpfile manifest "$manifest_path" "$manifest_index_jq" > "$manifest_index_file" 2>"$manifest_index_err"; then
             while IFS= read -r manifest_line; do
                 [[ -z "$manifest_line" ]] && continue
 
@@ -665,6 +690,10 @@ JQ
 
                 manifest_indexed=true
             done < "$manifest_index_file"
+
+            if [[ "$verbose" == "true" ]]; then
+                log DEBUG "Indexed staged manifest entries for folder lookup (storage=${#manifest_storage_entries[@]}, rel=${#manifest_relpath_entries[@]}, canonical=${#manifest_canonical_entries[@]})"
+            fi
         else
             log WARN "Unable to index staged workflow manifest for folder mapping."
             if [[ -s "$manifest_index_err" && "$verbose" == "true" ]]; then
@@ -741,6 +770,32 @@ JQ
             local canonical_norm
             canonical_norm=$(normalize_manifest_lookup_key "${storage_path}/${filename}")
 
+            if [[ "$verbose" == "true" ]]; then
+                local storage_hit="no"
+                local rel_file_hit="no"
+                local canon_hit="no"
+                local rel_dir_hit="no"
+                local filename_hit="no"
+
+                if [[ -n "$storage_norm" && -n "${manifest_storage_entries[$storage_norm]+set}" ]]; then
+                    storage_hit="yes"
+                fi
+                if [[ -n "$rel_file_norm" && -n "${manifest_relpath_entries[$rel_file_norm]+set}" ]]; then
+                    rel_file_hit="yes"
+                fi
+                if [[ -n "$canonical_norm" && -n "${manifest_canonical_entries[$canonical_norm]+set}" ]]; then
+                    canon_hit="yes"
+                fi
+                if [[ -n "$rel_dir_norm" && -n "${manifest_reldir_entries[$rel_dir_norm]+set}" ]]; then
+                    rel_dir_hit="yes"
+                fi
+                if [[ -n "$filename_norm" && -n "${manifest_filename_entries[$filename_norm]+set}" ]]; then
+                    filename_hit="yes"
+                fi
+
+                log DEBUG "Manifest lookup keys for '$workflow_file': storage='${storage_norm:-<empty>}' (hit=$storage_hit), relative='${rel_file_norm:-<empty>}' (hit=$rel_file_hit), canonical='${canonical_norm:-<empty>}' (hit=$canon_hit), relDir='${rel_dir_norm:-<empty>}' (hit=$rel_dir_hit), filename='${filename_norm:-<empty>}' (hit=$filename_hit)"
+            fi
+
             if [[ -n "$storage_norm" && -n "${manifest_storage_entries[$storage_norm]+set}" ]]; then
                 manifest_entry="${manifest_storage_entries[$storage_norm]}"
                 manifest_entry_source="storagePath"
@@ -770,6 +825,8 @@ JQ
             manifest_strategy=$(printf '%s' "$manifest_entry" | jq -r '.idResolutionStrategy // empty' 2>/dev/null)
             manifest_warning=$(printf '%s' "$manifest_entry" | jq -r '.idReconciliationWarning // empty' 2>/dev/null)
             manifest_note=$(printf '%s' "$manifest_entry" | jq -r '.idResolutionNote // empty' 2>/dev/null)
+        elif $manifest_indexed && [[ "$verbose" == "true" ]]; then
+            log DEBUG "No manifest entry found for '$workflow_file' (storage='$storage_path', relative='$canonical_relative_path', relDir='$relative_dir_without_prefix', filename='$filename')"
         fi
 
         # PRIORITY ORDER for workflow ID resolution:
@@ -859,8 +916,8 @@ JQ
             configured_project_slug="personal"
         fi
 
-        local project_slug="$configured_project_slug"
-        local project_display_name="$(unslug_to_title "$project_slug")"
+    local entry_project_slug="$configured_project_slug"
+    local project_display_name="$(unslug_to_title "$entry_project_slug")"
         local folder_start_index=0
 
         if ((${#raw_segments[@]} > 0)); then
@@ -870,40 +927,16 @@ JQ
             local first_lower
             first_lower=$(printf '%s' "$first_trimmed" | tr '[:upper:]' '[:lower:]')
 
-            if [[ "$first_lower" == "projects" && ${#raw_segments[@]} -ge 2 ]]; then
-                local project_raw="${raw_segments[1]}"
-                local derived_slug
-                derived_slug=$(sanitize_slug "$project_raw")
-                if [[ -z "$derived_slug" ]]; then
-                    derived_slug=$(sanitize_slug "$(unslug_to_title "$project_raw")")
-                fi
-                if [[ -n "$derived_slug" ]]; then
-                    project_slug="$derived_slug"
-                    project_display_name=$(unslug_to_title "$project_slug")
-                    folder_start_index=2
-                fi
-            elif [[ "$first_lower" == "project" && ${#raw_segments[@]} -ge 2 ]]; then
-                local project_raw="${raw_segments[1]}"
-                local derived_slug
-                derived_slug=$(sanitize_slug "$project_raw")
-                if [[ -z "$derived_slug" ]]; then
-                    derived_slug=$(sanitize_slug "$(unslug_to_title "$project_raw")")
-                fi
-                if [[ -n "$derived_slug" ]]; then
-                    project_slug="$derived_slug"
-                    project_display_name=$(unslug_to_title "$project_slug")
-                    folder_start_index=2
-                fi
-            elif [[ "$first_lower" == "personal" ]]; then
+            if [[ "$first_lower" == "personal" ]]; then
                 folder_start_index=1
-                project_slug="personal"
+                entry_project_slug="personal"
                 project_display_name="Personal"
             elif [[ "$first_trimmed" =~ ^@?[Pp]roject[:=_-](.+)$ ]]; then
                 local directive="${BASH_REMATCH[1]}"
                 local directive_slug
                 directive_slug=$(sanitize_slug "$directive")
                 if [[ -n "$directive_slug" ]]; then
-                    project_slug="$directive_slug"
+                    entry_project_slug="$directive_slug"
                     project_display_name=$(unslug_to_title "$directive_slug")
                     folder_start_index=1
                 fi
@@ -943,7 +976,7 @@ JQ
                     needs_prefix="false"
                 fi
             fi
-            if [[ "$needs_prefix" == "true" ]]; then
+            if [[ "$needs_prefix" == "true" && "$entry_project_slug" != "$repo_prefix_root_slug" ]]; then
                 folder_slugs=("$repo_prefix_root_slug" "${folder_slugs[@]}")
                 folder_displays=("${repo_prefix_root_display:-$(unslug_to_title "$repo_prefix_root_slug")}" "${folder_displays[@]}")
             fi
@@ -996,7 +1029,7 @@ JQ
             --arg relative "$relative_path" \
             --arg storage "$storage_path" \
             --arg display "$display_path" \
-            --arg projectSlug "$project_slug" \
+            --arg projectSlug "$entry_project_slug" \
             --arg projectName "$project_display_name" \
             --arg manifestExisting "$manifest_existing_id" \
             --arg manifestOriginal "$manifest_original_id" \
@@ -1005,14 +1038,15 @@ JQ
             --arg manifestWarning "$manifest_warning" \
             --arg manifestNote "$manifest_note" \
             --slurpfile folders "$folder_array_file" \
-            '{
-                id: ($id | select(. != "")),
-                manifestActualWorkflowId: ($manifestActual | select(. != "")),
-                manifestExistingWorkflowId: ($manifestExisting | select(. != "")),
-                manifestOriginalWorkflowId: ($manifestOriginal | select(. != "")),
-                manifestResolutionStrategy: ($manifestStrategy | select(. != "")),
-                manifestResolutionWarning: ($manifestWarning | select(. != "")),
-                manifestResolutionNote: ($manifestNote | select(. != "")),
+            'def blanknull($v): if $v == "" then null else $v end;
+            {
+                id: blanknull($id),
+                manifestActualWorkflowId: blanknull($manifestActual),
+                manifestExistingWorkflowId: blanknull($manifestExisting),
+                manifestOriginalWorkflowId: blanknull($manifestOriginal),
+                manifestResolutionStrategy: blanknull($manifestStrategy),
+                manifestResolutionWarning: blanknull($manifestWarning),
+                manifestResolutionNote: blanknull($manifestNote),
                 name: $name,
                 filename: $filename,
                 relativePath: $relative,
@@ -1024,7 +1058,12 @@ JQ
                     slug: $projectSlug
                 },
                 folders: ($folders[0] // [])
-            }' 2>"$entry_err")
+            }
+            | with_entries(
+                if (.key == "project" or .key == "folders") then .
+                elif (.value == null or (.value | type) == "string" and (.value | length) == 0) then empty
+                else . end
+            )' 2>"$entry_err")
         local entry_status=$?
 
         if [[ $entry_status -ne 0 || -z "$entry_json" || "$entry_json" == "null" ]]; then
@@ -1034,6 +1073,8 @@ JQ
                 if [[ -n "$entry_error_preview" ]]; then
                     log DEBUG "jq error while building folder entry for '$workflow_name': $entry_error_preview"
                 fi
+            elif [[ "$verbose" == "true" ]]; then
+                log DEBUG "Folder entry builder returned status=$entry_status payload='${entry_json:-<empty>}' for '$workflow_name'"
             fi
             log WARN "Unable to build folder entry payload for '$workflow_name'; skipping."
             rm -f "$entry_err"
@@ -2082,6 +2123,8 @@ apply_directory_structure_entries() {
     local folder_created_count=0
     local folder_moved_count=0
     local workflow_assignment_count=0
+    local license_feature_blocked=false
+    local license_notice_emitted=false
 
     local entry_records_file
     entry_records_file=$(mktemp -t n8n-folder-entries-XXXXXXXX.json)
@@ -2289,9 +2332,10 @@ apply_directory_structure_entries() {
             fi
         fi
 
-        local parent_folder_id=""
-        local current_slug_path=""
-        local folder_failure=false
+    local parent_folder_id=""
+    local current_slug_path=""
+    local folder_failure=false
+    local folder_license_block=false
 
         for folder_entry in "${folder_entries[@]}"; do
             local folder_name
@@ -2424,12 +2468,41 @@ apply_directory_structure_entries() {
                 if [[ "$verbose" == "true" ]]; then
                     log DEBUG "Creating folder '$create_name' (slug: ${folder_slug:-<none>}) under project '${target_project_id}' parent '${parent_folder_id:-root}'"
                 fi
+                local create_tmp
+                create_tmp=$(mktemp -t n8n-folder-create-XXXXXXXX.json)
+                if [[ -z "$create_tmp" ]]; then
+                    log ERROR "Failed to allocate temporary file for folder creation request."
+                    folder_failure=true
+                    break
+                fi
+
                 local create_response
-                if ! create_response=$(n8n_api_create_folder "$create_name" "$target_project_id" "$parent_folder_id"); then
+                if ! n8n_api_create_folder "$create_name" "$target_project_id" "$parent_folder_id" >"$create_tmp"; then
+                    local api_status
+                    api_status=$(printf '%s' "${N8N_API_LAST_STATUS:-}" | tr -d '[:space:]')
+                    local api_body_lower
+                    api_body_lower=$(printf '%s' "${N8N_API_LAST_BODY:-}" | tr '[:upper:]' '[:lower:]')
+                    if [[ "$verbose" == "true" ]]; then
+                        log DEBUG "Folder create failure status='${api_status:-<unset>}' body_preview='${api_body_lower:-<empty>}'"
+                    fi
+                    if [[ "$api_status" == 403* ]] && [[ "$api_body_lower" == *"plan lacks license"* ]]; then
+                        folder_license_block=true
+                        if [[ "$license_notice_emitted" != "true" ]]; then
+                            log INFO "Skipping n8n folder creation because the current plan lacks Projects & Folders access. Folder operations will be skipped for the remaining workflows."
+                            license_notice_emitted=true
+                        else
+                            log DEBUG "n8n plan lacks Projects & Folders access; folder creation for '$create_name' skipped."
+                        fi
+                        rm -f "$create_tmp"
+                        break
+                    fi
+                    rm -f "$create_tmp"
                     log ERROR "Failed to create folder '$create_name' in project '${project_id_map[$target_project_id]:-Default}'"
                     folder_failure=true
                     break
                 fi
+                create_response=$(cat "$create_tmp" 2>/dev/null)
+                rm -f "$create_tmp"
                 local create_data
                 create_data=$(printf '%s' "$create_response" | jq '.data // .' 2>/dev/null)
                 if [[ "$verbose" == "true" ]]; then
@@ -2490,6 +2563,11 @@ apply_directory_structure_entries() {
             parent_folder_id="$existing_folder_id"
             current_slug_path="$candidate_path"
         done
+
+        if [[ "$folder_license_block" == "true" ]]; then
+            license_feature_blocked=true
+            break
+        fi
 
         if $folder_failure; then
             overall_success=false
@@ -2567,6 +2645,28 @@ apply_directory_structure_entries() {
         fi
 
         if ! n8n_api_update_workflow_assignment "$workflow_id" "$target_project_id" "$assignment_folder_id" "$version_id" "$version_mode"; then
+            local assign_status
+            assign_status=$(printf '%s' "${N8N_API_LAST_STATUS:-}" | tr -d '[:space:]')
+            local assign_body_lower
+            assign_body_lower=$(printf '%s' "${N8N_API_LAST_BODY:-}" | tr '[:upper:]' '[:lower:]')
+            if [[ "$assign_status" == 403* ]] && [[ "$assign_body_lower" == *"plan lacks license"* ]]; then
+                license_feature_blocked=true
+                if [[ "$license_notice_emitted" != "true" ]]; then
+                    log INFO "Skipping workflow folder reassignments because the current n8n plan lacks Projects & Folders access."
+                    license_notice_emitted=true
+                else
+                    log DEBUG "n8n plan lacks Projects & Folders access; workflow '$workflow_name' ($workflow_id) remains in its existing folder."
+                fi
+                local license_note="$assignment_note"
+                if [[ -n "$license_note" ]]; then
+                    license_note="$license_note;license-blocked"
+                else
+                    license_note="license-blocked"
+                fi
+                append_assignment_audit_record "$assignment_tracking_file" "$workflow_id" "$workflow_name" "$target_project_id" "$assignment_folder_id" "$display_path" "$version_id" "$version_mode" "license-blocked" "$license_note"
+                assignment_tracking_count=$((assignment_tracking_count + 1))
+                continue
+            fi
             log WARN "Failed to assign workflow '$workflow_name' ($workflow_id) to target folder structure."
             overall_success=false
             local failure_note="$assignment_note"
@@ -2612,6 +2712,11 @@ apply_directory_structure_entries() {
     finalize_n8n_api_auth
 
     log INFO "Folder synchronization summary: ${project_created_count} project(s) created, ${folder_created_count} folder(s) created, ${folder_moved_count} folder(s) repositioned, ${workflow_assignment_count} workflow(s) reassigned."
+
+    if [[ "$license_feature_blocked" == "true" ]]; then
+        log INFO "Folder structure restoration skipped because the current n8n plan lacks Projects & Folders access. Workflows remain imported with their default placement."
+        return 0
+    fi
 
     if ! $overall_success; then
         log WARN "Folder structure restoration completed with warnings (${moved_count}/${total_count} workflows updated)."
