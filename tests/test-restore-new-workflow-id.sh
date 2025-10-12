@@ -83,7 +83,7 @@ mkdir -p \
 cat <<'JSON' >"$RESTORE_BASE/Personal/Projects/Acme/Inbound/001_trigger.json"
 {
   "id": "wf-1",
-  "name": "Inbound Sync Flow",
+  "name": "Bad ID Workflow",
   "nodes": [
     {
       "parameters": {},
@@ -102,8 +102,7 @@ JSON
 
 cat <<'JSON' >"$RESTORE_BASE/Personal/Projects/Acme/Outbound/002_notifier.json"
 {
-  "id": "wf-2",
-  "name": "Outbound Notifier",
+  "name": "No ID Workflow",
   "nodes": [
     {
       "parameters": {},
@@ -122,8 +121,8 @@ JSON
 
 cat <<'JSON' >"$RESTORE_BASE/Personal/Inbox/003_cleanup.json"
 {
-  "id": "wf-3",
-  "name": "Inbox Cleanup",
+  "id": "12345678abcdefgh",
+  "name": "Correct ID Workflow",
   "nodes": [
     {
       "parameters": {},
@@ -140,10 +139,31 @@ cat <<'JSON' >"$RESTORE_BASE/Personal/Inbox/003_cleanup.json"
 }
 JSON
 
+cat <<'JSON' >"$RESTORE_BASE/Personal/Inbox/004_extra.json"
+{
+  "id": "87654321hgfedcba",
+  "name": "Additional Inbox Workflow",
+  "nodes": [
+    {
+      "parameters": {},
+      "name": "Cron",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [360, 160]
+    }
+  ],
+  "meta": {
+    "instanceId": "test-instance-4"
+  },
+  "connections": {}
+}
+JSON
+
 chmod 600 \
   "$RESTORE_BASE"/Personal/Projects/Acme/Inbound/001_trigger.json \
   "$RESTORE_BASE"/Personal/Projects/Acme/Outbound/002_notifier.json \
-  "$RESTORE_BASE"/Personal/Inbox/003_cleanup.json
+  "$RESTORE_BASE"/Personal/Inbox/003_cleanup.json \
+  "$RESTORE_BASE"/Personal/Inbox/004_extra.json
 
 log "Creating n8n session user"
 docker exec -u node "$CONTAINER_NAME" \
@@ -222,8 +242,8 @@ docker exec -u node "$CONTAINER_NAME" sh -c 'n8n export:workflow --all --output=
 POST_EXPORT=$(docker exec -u node "$CONTAINER_NAME" sh -c 'cat /tmp/export.json')
 
 WORKFLOW_COUNT=$(printf '%s' "$POST_EXPORT" | jq 'length')
-if [[ "$WORKFLOW_COUNT" -ne 3 ]]; then
-    echo "Expected three workflows after restore, found $WORKFLOW_COUNT" >&2
+if [[ "$WORKFLOW_COUNT" -ne 4 ]]; then
+  echo "Expected four workflows after restore, found $WORKFLOW_COUNT" >&2
     exit 1
 fi
 
@@ -239,13 +259,17 @@ if [[ ! -f "$MANIFEST_PATH" ]]; then
 fi
 
 MANIFEST_COUNT=$(jq 'length' "$MANIFEST_PATH")
-if [[ "$MANIFEST_COUNT" -ne 3 ]]; then
-    echo "Expected manifest to contain three entries, found $MANIFEST_COUNT" >&2
+if [[ "$MANIFEST_COUNT" -ne 4 ]]; then
+  echo "Expected manifest to contain four entries, found $MANIFEST_COUNT" >&2
     cat "$MANIFEST_PATH" >&2
     exit 1
 fi
 
-MISSING_NOTES=$(jq '[ .[] | select(((.sanitizedIdNote // "") | length) == 0) ] | length' "$MANIFEST_PATH")
+MISSING_NOTES=$(jq '[ .[]
+  | select((.originalWorkflowId // "") | length > 0)
+  | select(((.originalWorkflowId // "") | test("^[A-Za-z0-9]{16}$")) | not)
+  | select(((.sanitizedIdNote // "") | length) == 0)
+] | length' "$MANIFEST_PATH")
 if [[ "$MISSING_NOTES" -ne 0 ]]; then
   echo "Manifest entries are missing sanitized ID notes" >&2
   cat "$MANIFEST_PATH" >&2
@@ -338,9 +362,10 @@ fi
 EXPECTED_FOLDERS_PATH="$TEMP_HOME/expected-folders.json"
 cat <<'JSON' >"$EXPECTED_FOLDERS_PATH"
 [
-  {"name":"Inbound Sync Flow","path":["Personal","Projects","Acme","Inbound"]},
-  {"name":"Outbound Notifier","path":["Personal","Projects","Acme","Outbound"]},
-  {"name":"Inbox Cleanup","path":["Personal","Inbox"]}
+  {"name":"Bad ID Workflow","path":["Personal","Projects","Acme","Inbound"]},
+  {"name":"No ID Workflow","path":["Personal","Projects","Acme","Outbound"]},
+  {"name":"Correct ID Workflow","path":["Personal","Inbox"]},
+  {"name":"Additional Inbox Workflow","path":["Personal","Inbox"]}
 ]
 JSON
 

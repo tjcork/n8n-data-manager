@@ -796,25 +796,25 @@ JQ
                 log DEBUG "Manifest lookup keys for '$workflow_file': storage='${storage_norm:-<empty>}' (hit=$storage_hit), relative='${rel_file_norm:-<empty>}' (hit=$rel_file_hit), canonical='${canonical_norm:-<empty>}' (hit=$canon_hit), relDir='${rel_dir_norm:-<empty>}' (hit=$rel_dir_hit), filename='${filename_norm:-<empty>}' (hit=$filename_hit)"
             fi
 
-            if [[ -n "$storage_norm" && -n "${manifest_storage_entries[$storage_norm]+set}" ]]; then
-                manifest_entry="${manifest_storage_entries[$storage_norm]}"
-                manifest_entry_source="storagePath"
+            if [[ -n "$canonical_norm" && -n "${manifest_canonical_entries[$canonical_norm]+set}" ]]; then
+                manifest_entry="${manifest_canonical_entries[$canonical_norm]}"
+                manifest_entry_source="canonical"
             fi
             if [[ -z "$manifest_entry" && -n "$rel_file_norm" && -n "${manifest_relpath_entries[$rel_file_norm]+set}" ]]; then
                 manifest_entry="${manifest_relpath_entries[$rel_file_norm]}"
                 manifest_entry_source="relativePath"
             fi
-            if [[ -z "$manifest_entry" && -n "$canonical_norm" && -n "${manifest_canonical_entries[$canonical_norm]+set}" ]]; then
-                manifest_entry="${manifest_canonical_entries[$canonical_norm]}"
-                manifest_entry_source="canonical"
+            if [[ -z "$manifest_entry" && -n "$filename_norm" && -n "${manifest_filename_entries[$filename_norm]+set}" ]]; then
+                manifest_entry="${manifest_filename_entries[$filename_norm]}"
+                manifest_entry_source="filename"
+            fi
+            if [[ -z "$manifest_entry" && -n "$storage_norm" && -n "${manifest_storage_entries[$storage_norm]+set}" ]]; then
+                manifest_entry="${manifest_storage_entries[$storage_norm]}"
+                manifest_entry_source="storagePath"
             fi
             if [[ -z "$manifest_entry" && -n "$rel_dir_norm" && -n "${manifest_reldir_entries[$rel_dir_norm]+set}" ]]; then
                 manifest_entry="${manifest_reldir_entries[$rel_dir_norm]}"
                 manifest_entry_source="relativeDir"
-            fi
-            if [[ -z "$manifest_entry" && -n "$filename_norm" && -n "${manifest_filename_entries[$filename_norm]+set}" ]]; then
-                manifest_entry="${manifest_filename_entries[$filename_norm]}"
-                manifest_entry_source="filename"
             fi
         fi
 
@@ -2975,15 +2975,24 @@ JQ
             fi
 
             if [[ "$id_is_known" != "true" ]]; then
-                if jq 'del(.id)' "$staged_path" > "${staged_path}.tmp"; then
-                    mv "${staged_path}.tmp" "$staged_path"
+                if [[ "$staged_id_valid" == "true" ]]; then
                     if [[ "$verbose" == "true" ]]; then
-                        log DEBUG "Cleared orphan workflow ID '${staged_id}' for '${staged_name:-$dest_filename}' (no matching workflow found)."
+                        log DEBUG "Retained user-provided workflow ID '${staged_id}' for '${staged_name:-$dest_filename}' (no conflicts detected)."
                     fi
-                    staged_id=""
                 else
-                    rm -f "${staged_path}.tmp"
-                    log WARN "Unable to clear orphan workflow ID '${staged_id}' for '${staged_name:-$dest_filename}'."
+                    if jq 'del(.id)' "$staged_path" > "${staged_path}.tmp"; then
+                        mv "${staged_path}.tmp" "$staged_path"
+                        if [[ "$verbose" == "true" ]]; then
+                            log DEBUG "Cleared orphan workflow ID '${staged_id}' for '${staged_name:-$dest_filename}' (no matching workflow found)."
+                        fi
+                        if [[ -z "$id_sanitized_note" ]]; then
+                            id_sanitized_note="sanitized-orphan-invalid"
+                        fi
+                        staged_id=""
+                    else
+                        rm -f "${staged_path}.tmp"
+                        log WARN "Unable to clear orphan workflow ID '${staged_id}' for '${staged_name:-$dest_filename}'."
+                    fi
                 fi
             elif [[ "$staged_id_valid" != "true" ]]; then
                 # ID was invalid but matched a known workflow; ensure file does not contain bad ID
