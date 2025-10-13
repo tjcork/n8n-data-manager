@@ -108,6 +108,13 @@ normalize_identifier() {
         printf ''
         return
     fi
+
+    # Strip common control characters and trim surrounding whitespace so that IDs
+    # coming from Windows-style newlines (\r\n) or padded fields normalize to the
+    # same key that downstream lookup tables expect.
+    value="$(printf '%s' "$value" | tr -d '\r\n\t')"
+    value="$(printf '%s' "$value" | sed 's/^[[:space:]]\+//;s/[[:space:]]\+$//')"
+
     case "$value" in
         0)
             printf ''

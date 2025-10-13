@@ -527,13 +527,11 @@ assign_manifest_lookup_entry() {
 
 compute_entry_folder_context() {
     local relative_dir="${1:-}"
-    local repo_root_slug="${2:-}"
-    local repo_root_display="${3:-}"
-    local project_slug_ref="$4"
-    local project_display_ref="$5"
-    local folder_slugs_ref="$6"
-    local folder_displays_ref="$7"
-    local display_path_ref="$8"
+    local project_slug_ref="$2"
+    local project_display_ref="$3"
+    local folder_slugs_ref="$4"
+    local folder_displays_ref="$5"
+    local display_path_ref="$6"
 
     declare -n _project_slug_ref="$project_slug_ref"
     declare -n _project_display_ref="$project_display_ref"
@@ -609,6 +607,9 @@ compute_entry_folder_context() {
         fi
     fi
 
+    _folder_slugs_ref=()
+    _folder_displays_ref=()
+
     local -a base_folder_slugs=()
     local -a base_folder_displays=()
 
@@ -625,28 +626,37 @@ compute_entry_folder_context() {
                 local base_slug
                 base_slug=$(sanitize_slug "$base_segment")
                 [[ -z "$base_slug" ]] && continue
-                base_folder_slugs+=("$base_slug")
                 local base_display_part
                 base_display_part="$(unslug_to_title "$base_slug")"
+                base_folder_slugs+=("$base_slug")
                 base_folder_displays+=("$base_display_part")
             done
         fi
     fi
 
-    if ((${#base_folder_slugs[@]} == 0)) && [[ -n "$repo_root_slug" ]]; then
-        local sanitized_repo_root
-        sanitized_repo_root="$(sanitize_slug "$repo_root_slug")"
-        if [[ -n "$sanitized_repo_root" ]]; then
-            base_folder_slugs+=("$sanitized_repo_root")
-            local repo_display_part="$repo_root_display"
-            if [[ -z "$repo_display_part" ]]; then
-                repo_display_part="$(unslug_to_title "$sanitized_repo_root")"
-            fi
-            base_folder_displays+=("$repo_display_part")
+    local project_lower
+    project_lower=$(printf '%s' "$configured_project_slug" | tr '[:upper:]' '[:lower:]')
+
+    local idx
+    for idx in "${!base_folder_slugs[@]}"; do
+        local base_slug="${base_folder_slugs[$idx]}"
+        local base_lower
+        base_lower=$(printf '%s' "$base_slug" | tr '[:upper:]' '[:lower:]')
+        if [[ "$base_lower" == "$project_lower" ]]; then
+            continue
         fi
-    fi
+        local base_display="${base_folder_displays[$idx]}"
+        if [[ -z "$base_display" ]]; then
+            base_display="$(unslug_to_title "$base_slug")"
+        fi
+        _folder_slugs_ref+=("$base_slug")
+        _folder_displays_ref+=("$base_display")
+    done
+
+    local initial_base_count=${#_folder_slugs_ref[@]}
 
     local segment
+    local seg_index=0
     for segment in "${folder_segments[@]}"; do
         local slug
         slug=$(sanitize_slug "$segment")
@@ -656,55 +666,24 @@ compute_entry_folder_context() {
         if [[ -z "$slug" ]]; then
             continue
         fi
+        local slug_lower
+        slug_lower=$(printf '%s' "$slug" | tr '[:upper:]' '[:lower:]')
+        if (( seg_index < initial_base_count )); then
+            local existing_lower
+            existing_lower=$(printf '%s' "${_folder_slugs_ref[$seg_index]}" | tr '[:upper:]' '[:lower:]')
+            if [[ "$existing_lower" == "$slug_lower" ]]; then
+                seg_index=$((seg_index + 1))
+                continue
+            fi
+        fi
         _folder_slugs_ref+=("$slug")
         if [[ -n "$segment" ]]; then
             _folder_displays_ref+=("$segment")
         else
             _folder_displays_ref+=("$(unslug_to_title "$slug")")
         fi
+        seg_index=$((seg_index + 1))
     done
-
-    if ((${#base_folder_slugs[@]} > 0)); then
-    local project_lower
-    project_lower=$(printf '%s' "$configured_project_slug" | tr '[:upper:]' '[:lower:]')
-    local -a prepend_slugs=()
-    local -a prepend_displays=()
-        local idx
-        for ((idx=0; idx<${#base_folder_slugs[@]}; idx++)); do
-            local base_slug="${base_folder_slugs[$idx]}"
-            [[ -z "$base_slug" ]] && continue
-            local base_lower
-            base_lower=$(printf '%s' "$base_slug" | tr '[:upper:]' '[:lower:]')
-            if [[ "$base_lower" == "$project_lower" ]]; then
-                continue
-            fi
-
-            local existing_slug=""
-            if (( ${#_folder_slugs_ref[@]} > idx )); then
-                existing_slug="${_folder_slugs_ref[$idx]}"
-            fi
-            local existing_lower=""
-            if [[ -n "$existing_slug" ]]; then
-                existing_lower=$(printf '%s' "$existing_slug" | tr '[:upper:]' '[:lower:]')
-            fi
-
-            if [[ "$existing_lower" == "$base_lower" ]]; then
-                continue
-            fi
-
-            local base_display="${base_folder_displays[$idx]}"
-            if [[ -z "$base_display" ]]; then
-                base_display="$(unslug_to_title "$base_slug")"
-            fi
-            prepend_slugs+=("$base_slug")
-            prepend_displays+=("$base_display")
-        done
-
-        if ((${#prepend_slugs[@]} > 0)); then
-            _folder_slugs_ref=("${prepend_slugs[@]}" "${_folder_slugs_ref[@]}")
-            _folder_displays_ref=("${prepend_displays[@]}" "${_folder_displays_ref[@]}")
-        fi
-    fi
 
     _project_slug_ref="$configured_project_slug"
     _project_display_ref="$configured_project_display"
@@ -744,21 +723,6 @@ collect_directory_structure_entries() {
 
     local success=true
     local processed=0
-
-    local repo_prefix=""
-    repo_prefix="$(effective_repo_prefix)"
-    local repo_prefix_root_slug=""
-    local repo_prefix_root_display=""
-    if [[ -n "$repo_prefix" ]]; then
-        local repo_prefix_basename="${repo_prefix##*/}"
-        repo_prefix_root_slug="$(sanitize_slug "$repo_prefix_basename")"
-        if [[ -n "$repo_prefix_root_slug" ]]; then
-            repo_prefix_root_display="$(unslug_to_title "$repo_prefix_root_slug")"
-        else
-            repo_prefix_root_slug=""
-            repo_prefix_root_display=""
-        fi
-    fi
 
     local manifest_indexed=false
     declare -A manifest_storage_entries=()
@@ -1062,6 +1026,95 @@ JQ
             workflow_name="Unnamed Workflow"
         fi
 
+        local mapping_lookup_path="${existing_mapping:-}"
+        if [[ -n "$mapping_lookup_path" && -f "$mapping_lookup_path" && -n "$staged_name" ]]; then
+            local folder_lookup_payload
+            folder_lookup_payload=$(jq -n \
+                --arg path "$expected_relative_path" \
+                --arg projectSlug "$expected_project_slug" \
+                --arg display "$expected_display_path" \
+                --arg name "$staged_name" \
+                --slurpfile mapping "$mapping_lookup_path" '
+                    def norm(v):
+                        (v // "")
+                        | gsub("\\\\"; "/")
+                        | gsub("[[:space:]]+"; " ")
+                        | gsub("^ "; "")
+                        | gsub(" $"; "")
+                        | ascii_downcase
+                        | gsub("/+"; "/")
+                        | gsub("^/"; "")
+                        | gsub("/$"; "");
+
+                    ($mapping[0].workflows // []) as $entries
+                    | [ $entries[] | select(
+                            ((($path | length) > 0) and (norm(.relativePath) == norm($path)))
+                            or ((($path | length) == 0) and (($projectSlug | length) > 0) and (norm(.relativePath) == norm($projectSlug)))
+                            or ((($display | length) > 0) and (norm(.displayPath) == norm($display)))
+                        )
+                      ] as $folder_entries
+                    | [ $folder_entries[] | select(norm(.name) == norm($name)) ] as $name_matches
+                    | {
+                        folderEntries: $folder_entries,
+                        nameMatches: $name_matches,
+                        nameMatchId: (
+                            if ($name_matches | length) == 1 then ($name_matches[0].id // "") else "" end
+                        ),
+                        nameMatchCount: ($name_matches | length)
+                    }
+                ' 2>/dev/null || printf '')
+
+            if [[ -n "$folder_lookup_payload" && "$folder_lookup_payload" != "null" ]]; then
+                local folder_existing_list
+                folder_existing_list=$(printf '%s' "$folder_lookup_payload" | jq -r '[.folderEntries[] | "\(.name // \"Workflow\") (#\(.id // \"unknown\"))"] | join(", ")' 2>/dev/null)
+                if [[ "$verbose" == "true" && -n "$folder_existing_list" ]]; then
+                    local folder_label="$expected_display_path"
+                    if [[ -z "$folder_label" ]]; then
+                        folder_label="$expected_project_display"
+                    fi
+                    log DEBUG "Existing workflows in target folder '${folder_label:-Personal}': $folder_existing_list"
+                fi
+
+                folder_name_match_count=$(printf '%s' "$folder_lookup_payload" | jq -r '.nameMatchCount // 0' 2>/dev/null || echo 0)
+                local folder_name_match_id
+                folder_name_match_id=$(printf '%s' "$folder_lookup_payload" | jq -r '.nameMatchId // empty' 2>/dev/null)
+
+                if (( folder_name_match_count == 1 )) && [[ -n "$folder_name_match_id" ]]; then
+                    folder_match_applied="true"
+                    name_match_allowed="true"
+                    name_match_type="folder-name"
+                    id_conflict_resolved_via_name="true"
+                    folder_name_match_entry=$(printf '%s' "$folder_lookup_payload" | jq -c '.nameMatches[0]' 2>/dev/null)
+                    local folder_match_relpath
+                    folder_match_relpath=$(printf '%s' "$folder_name_match_entry" | jq -r '.relativePath // empty' 2>/dev/null)
+                    local folder_match_display
+                    folder_match_display=$(printf '%s' "$folder_name_match_entry" | jq -r '.displayPath // empty' 2>/dev/null)
+
+                    existing_workflow_id="$folder_name_match_id"
+                    name_match_id="$folder_name_match_id"
+                    name_match_relpath="$folder_match_relpath"
+                    if [[ -z "$resolved_id_source" ]]; then
+                        resolved_id_source="folder-name"
+                    fi
+                    if [[ -z "$existing_storage_path" ]]; then
+                        existing_storage_path="$folder_match_relpath"
+                    fi
+                    if [[ -z "$existing_display_path" ]]; then
+                        existing_display_path="$folder_match_display"
+                    fi
+
+                    duplicate_match_json=$(jq -n \
+                        --arg matchType "folder-name" \
+                        --arg id "$folder_name_match_id" \
+                        --arg rel "$folder_match_relpath" \
+                        --arg display "$folder_match_display" '{matchType: $matchType, workflow: {id: $id, relativePath: $rel, displayPath: $display}, storagePath: $rel, displayPath: $display}')
+                    name_match_json="$duplicate_match_json"
+                elif (( folder_name_match_count > 1 )) && [[ "$verbose" == "true" ]]; then
+                    log DEBUG "Multiple workflows named '${staged_name}' detected in target folder; skipping ID reuse."
+                fi
+        fi
+        fi
+
         if [[ "$verbose" == "true" && -n "$manifest_entry_source" && -n "$manifest_entry" ]]; then
             log DEBUG "Matched manifest entry for '$workflow_name' via ${manifest_entry_source} lookup."
         fi
@@ -1095,8 +1148,6 @@ JQ
 
         compute_entry_folder_context \
             "$relative_dir_without_prefix" \
-            "$repo_prefix_root_slug" \
-            "$repo_prefix_root_display" \
             entry_project_slug \
             entry_project_display \
             folder_slugs \
@@ -1466,9 +1517,13 @@ lookup_workflow_in_mapping() {
                     id: (e.id // ""),
                     name: (e.name // ""),
                     relativePath: (e.relativePath // ""),
+                    displayPath: (e.displayPath // ""),
+                    project: (if ((e.project // null) | type) == "object" then e.project else null end),
+                    folders: (if ((e.folders // []) | type) == "array" then e.folders else [] end),
                     updatedAt: (e.updatedAt // "")
                 },
                 storagePath: (e.relativePath // ""),
+                displayPath: (e.displayPath // ""),
                 resolutionNote: (note // null)
             };
 
@@ -2024,22 +2079,6 @@ apply_directory_structure_entries() {
         return 0
     fi
 
-    local repo_prefix_value
-    repo_prefix_value="$(effective_repo_prefix)"
-    local repo_prefix_root_slug=""
-    local repo_prefix_root_display=""
-    local repo_prefix_root_slug_lower=""
-    if [[ -n "$repo_prefix_value" ]]; then
-        local repo_prefix_basename="${repo_prefix_value##*/}"
-        repo_prefix_root_slug="$(sanitize_slug "$repo_prefix_basename")"
-        if [[ -n "$repo_prefix_root_slug" ]]; then
-            repo_prefix_root_display="$(unslug_to_title "$repo_prefix_root_slug")"
-            repo_prefix_root_slug_lower="$(printf '%s' "$repo_prefix_root_slug" | tr '[:upper:]' '[:lower:]')"
-        else
-            repo_prefix_root_slug=""
-        fi
-    fi
-
     local projects_json
     if ! projects_json=$(n8n_api_get_projects); then
         finalize_n8n_api_auth
@@ -2163,7 +2202,7 @@ apply_directory_structure_entries() {
     total_count=$(jq -r '.workflows | length' "$entries_path" 2>/dev/null || echo 0)
     if [[ "$total_count" -eq 0 ]]; then
         finalize_n8n_api_auth
-    log INFO "Folder structure entries empty; nothing to apply."
+        log INFO "Folder structure entries empty; nothing to apply."
         return 0
     fi
 
@@ -2183,7 +2222,7 @@ apply_directory_structure_entries() {
     if ! jq -c '.workflows[]' "$entries_path" > "$entry_records_file" 2>"$entry_records_err"; then
         local jq_error
         jq_error=$(cat "$entry_records_err" 2>/dev/null)
-    log ERROR "Failed to parse folder structure entries data."
+        log ERROR "Failed to parse folder structure entries data."
         if [[ -n "$jq_error" ]]; then
             log DEBUG "jq error (entries): $jq_error"
         fi
@@ -2325,62 +2364,6 @@ apply_directory_structure_entries() {
                 folder_entries+=("$folder_obj")
             fi
         done < <(printf '%s' "$entry" | jq -c '.folders[]?' 2>/dev/null)
-
-        if [[ -n "$repo_prefix_root_slug_lower" && ${#folder_entries[@]} -ge 2 ]]; then
-            local first_segment_json="${folder_entries[0]}"
-            local first_segment_slug
-            first_segment_slug=$(printf '%s' "$first_segment_json" | jq -r '.slug // empty' 2>/dev/null)
-            local first_segment_name
-            first_segment_name=$(printf '%s' "$first_segment_json" | jq -r '.name // empty' 2>/dev/null)
-            if [[ -z "$first_segment_slug" || "$first_segment_slug" == "null" ]]; then
-                first_segment_slug="$(sanitize_slug "$first_segment_name")"
-            fi
-            local first_segment_slug_lower=""
-            if [[ -n "$first_segment_slug" && "$first_segment_slug" != "null" ]]; then
-                first_segment_slug_lower="$(printf '%s' "$first_segment_slug" | tr '[:upper:]' '[:lower:]')"
-            fi
-
-            if [[ -n "$first_segment_slug_lower" && "$first_segment_slug_lower" == "$repo_prefix_root_slug_lower" ]]; then
-                local second_segment_json="${folder_entries[1]}"
-                local second_segment_slug
-                second_segment_slug=$(printf '%s' "$second_segment_json" | jq -r '.slug // empty' 2>/dev/null)
-                local second_segment_name
-                second_segment_name=$(printf '%s' "$second_segment_json" | jq -r '.name // empty' 2>/dev/null)
-                if [[ -z "$second_segment_slug" || "$second_segment_slug" == "null" ]]; then
-                    second_segment_slug="$(sanitize_slug "$second_segment_name")"
-                fi
-                local second_segment_slug_lower=""
-                if [[ -n "$second_segment_slug" && "$second_segment_slug" != "null" ]]; then
-                    second_segment_slug_lower="$(printf '%s' "$second_segment_slug" | tr '[:upper:]' '[:lower:]')"
-                fi
-                local second_segment_name_lower=""
-                if [[ -n "$second_segment_name" && "$second_segment_name" != "null" ]]; then
-                    second_segment_name_lower="$(printf '%s' "$second_segment_name" | tr '[:upper:]' '[:lower:]')"
-                fi
-
-                local root_lookup_id=""
-                if [[ -n "$second_segment_slug_lower" ]]; then
-                    local root_slug_key="$target_project_id|root|$second_segment_slug_lower"
-                    if [[ -n "${folder_slug_lookup["$root_slug_key"]+set}" ]]; then
-                        root_lookup_id="${folder_slug_lookup["$root_slug_key"]}"
-                    fi
-                fi
-                if [[ -z "$root_lookup_id" && -n "$second_segment_name_lower" ]]; then
-                    local root_name_key="$target_project_id|root|$second_segment_name_lower"
-                    if [[ -n "${folder_name_lookup["$root_name_key"]+set}" ]]; then
-                        root_lookup_id="${folder_name_lookup["$root_name_key"]}"
-                    fi
-                fi
-
-                if [[ -n "$root_lookup_id" ]]; then
-                    folder_entries=("${folder_entries[@]:1}")
-                    if [[ "$verbose" == "true" ]]; then
-                        local skip_label="${repo_prefix_root_display:-$repo_prefix_root_slug}"
-                        log DEBUG "Reusing existing root folder '${second_segment_name:-$second_segment_slug}' and skipping repo prefix '${skip_label}'."
-                    fi
-                fi
-            fi
-        fi
 
     local parent_folder_id=""
     local current_slug_path=""
@@ -2870,6 +2853,11 @@ JQ
         relative_dir="${relative_dir#/}"
         relative_dir="${relative_dir%/}"
 
+        local relative_dir_without_prefix
+        relative_dir_without_prefix="$(strip_github_path_prefix "$relative_dir")"
+        relative_dir_without_prefix="${relative_dir_without_prefix#/}"
+        relative_dir_without_prefix="${relative_dir_without_prefix%/}"
+
         local canonical_relative_path
         canonical_relative_path="$(strip_github_path_prefix "$relative_path")"
         canonical_relative_path="${canonical_relative_path#/}"
@@ -2881,9 +2869,48 @@ JQ
         repo_entry_path="${repo_entry_path%/}"
 
         local canonical_storage_path
-        canonical_storage_path="$(compose_repo_storage_path "$(strip_github_path_prefix "$relative_dir")")"
+        canonical_storage_path="$(compose_repo_storage_path "$relative_dir_without_prefix")"
         canonical_storage_path="${canonical_storage_path#/}"
         canonical_storage_path="${canonical_storage_path%/}"
+
+        local expected_project_slug=""
+        local expected_project_display=""
+        local -a expected_folder_slugs=()
+        local -a expected_folder_displays=()
+        local expected_display_path=""
+
+        compute_entry_folder_context \
+            "$relative_dir_without_prefix" \
+            expected_project_slug \
+            expected_project_display \
+            expected_folder_slugs \
+            expected_folder_displays \
+            expected_display_path
+
+        local expected_folder_slug_path=""
+        if ((${#expected_folder_slugs[@]} > 0)); then
+            expected_folder_slug_path=$(IFS=/; printf '%s' "${expected_folder_slugs[*]}")
+        fi
+
+        local expected_folder_display_path=""
+        if ((${#expected_folder_displays[@]} > 0)); then
+            expected_folder_display_path=$(IFS=/; printf '%s' "${expected_folder_displays[*]}")
+        fi
+
+        local expected_project_and_slug_path=""
+        if [[ -n "$expected_project_slug" ]]; then
+            expected_project_and_slug_path="$expected_project_slug"
+            if [[ -n "$expected_folder_slug_path" ]]; then
+                expected_project_and_slug_path+="/$expected_folder_slug_path"
+            fi
+        elif [[ -n "$expected_folder_slug_path" ]]; then
+            expected_project_and_slug_path="$expected_folder_slug_path"
+        fi
+
+        local expected_relative_path="$expected_project_and_slug_path"
+        if [[ -z "$expected_relative_path" && -n "$expected_project_slug" ]]; then
+            expected_relative_path="$expected_project_slug"
+        fi
 
         if [[ -n "$repo_entry_path" ]] && ! path_matches_github_prefix "$repo_entry_path"; then
             log DEBUG "Skipping workflow outside configured GITHUB_PATH: $workflow_file"
@@ -2920,6 +2947,7 @@ JQ
         local mapping_match_json=""
     local duplicate_match_json=""
     local existing_storage_path=""
+    local existing_display_path=""
     local existing_workflow_id=""
     local name_match_json=""
     local name_match_id=""
@@ -2928,6 +2956,9 @@ JQ
     local name_match_allowed="false"
     local id_conflict_resolved_via_name="false"
     local name_match_candidate_path=""
+        local folder_match_applied="false"
+        local folder_name_match_entry=""
+        local folder_name_match_count=0
 
         if [[ -n "$staged_id" ]]; then
             if [[ "$staged_id" =~ ^[A-Za-z0-9]{16}$ ]]; then
@@ -2947,31 +2978,42 @@ JQ
             fi
         fi
 
-        if [[ -n "$existing_mapping" && -f "$existing_mapping" && -n "$staged_name" ]]; then
-            mapping_match_json=$(lookup_workflow_in_mapping "$existing_mapping" "$canonical_storage_path" "$staged_name") || mapping_match_json=""
-            if [[ "$mapping_match_json" == "null" ]]; then
-                mapping_match_json=""
+        if [[ "$folder_match_applied" != "true" ]]; then
+            if [[ -n "$existing_mapping" && -f "$existing_mapping" && -n "$staged_name" ]]; then
+                mapping_match_json=$(lookup_workflow_in_mapping "$existing_mapping" "$canonical_storage_path" "$staged_name") || mapping_match_json=""
+                if [[ "$mapping_match_json" == "null" ]]; then
+                    mapping_match_json=""
+                fi
             fi
-        fi
 
-        if [[ -n "$mapping_match_json" ]]; then
-            duplicate_match_json="$mapping_match_json"
-            resolved_id_source=$(printf '%s' "$mapping_match_json" | jq -r '.matchType // empty' 2>/dev/null)
-        fi
+            if [[ -n "$mapping_match_json" ]]; then
+                duplicate_match_json="$mapping_match_json"
+                resolved_id_source=$(printf '%s' "$mapping_match_json" | jq -r '.matchType // empty' 2>/dev/null)
+            fi
 
-        if [[ -z "$duplicate_match_json" ]]; then
-            if [[ -n "$existing_snapshot" && -f "$existing_snapshot" ]]; then
-                duplicate_match_json=$(match_existing_workflow "$existing_snapshot" "$staged_id" "$staged_instance" "$staged_name" "$staged_description" "$repo_entry_path" "$existing_mapping") || duplicate_match_json=""
-            elif [[ -n "$existing_mapping" && -f "$existing_mapping" ]]; then
-                duplicate_match_json=$(match_existing_workflow "" "$staged_id" "$staged_instance" "$staged_name" "$staged_description" "$repo_entry_path" "$existing_mapping") || duplicate_match_json=""
+            if [[ -z "$duplicate_match_json" ]]; then
+                if [[ -n "$existing_snapshot" && -f "$existing_snapshot" ]]; then
+                    duplicate_match_json=$(match_existing_workflow "$existing_snapshot" "$staged_id" "$staged_instance" "$staged_name" "$staged_description" "$repo_entry_path" "$existing_mapping") || duplicate_match_json=""
+                elif [[ -n "$existing_mapping" && -f "$existing_mapping" ]]; then
+                    duplicate_match_json=$(match_existing_workflow "" "$staged_id" "$staged_instance" "$staged_name" "$staged_description" "$repo_entry_path" "$existing_mapping") || duplicate_match_json=""
+                fi
             fi
         fi
 
         local duplicate_match_type=""
         if [[ -n "$duplicate_match_json" ]]; then
             duplicate_match_type=$(printf '%s' "$duplicate_match_json" | jq -r '.matchType // empty' 2>/dev/null)
-            existing_workflow_id=$(printf '%s' "$duplicate_match_json" | jq -r '.workflow.id // empty' 2>/dev/null)
-            existing_storage_path=$(printf '%s' "$duplicate_match_json" | jq -r '.storagePath // empty' 2>/dev/null)
+            local duplicate_existing_id
+            duplicate_existing_id=$(printf '%s' "$duplicate_match_json" | jq -r '.workflow.id // empty' 2>/dev/null)
+            if [[ "$folder_match_applied" != "true" || -z "$existing_workflow_id" ]]; then
+                existing_workflow_id="$duplicate_existing_id"
+            fi
+            if [[ -z "$existing_storage_path" ]]; then
+                existing_storage_path=$(printf '%s' "$duplicate_match_json" | jq -r '.storagePath // .workflow.relativePath // empty' 2>/dev/null)
+            fi
+            if [[ -z "$existing_display_path" ]]; then
+                existing_display_path=$(printf '%s' "$duplicate_match_json" | jq -r '.displayPath // .workflow.displayPath // empty' 2>/dev/null)
+            fi
             if [[ -z "$resolved_id_source" && -n "$duplicate_match_type" ]]; then
                 resolved_id_source="$duplicate_match_type"
             fi
@@ -2982,7 +3024,7 @@ JQ
             log DEBUG "No duplicate match found for '${staged_name:-$dest_filename}' (name='${staged_name:-<none>}', instance='${staged_instance:-<none>}')."
         fi
 
-        if [[ -n "$staged_name" ]]; then
+        if [[ "$folder_match_applied" != "true" && -n "$staged_name" ]]; then
             name_match_json=$(match_existing_workflow "$existing_snapshot" "" "$staged_instance" "$staged_name" "$staged_description" "$repo_entry_path" "$existing_mapping") || name_match_json=""
             if [[ "$name_match_json" == "null" ]]; then
                 name_match_json=""
@@ -3020,19 +3062,77 @@ JQ
                     candidate_norm=$(normalize_manifest_lookup_key "$name_match_candidate_path")
                 fi
 
-                if [[ "$mapping_candidate_found" == "true" ]]; then
-                    if [[ -z "$candidate_norm" && -z "$canonical_path_norm" ]]; then
-                        name_match_allowed="true"
-                    elif [[ -n "$candidate_norm" && "$candidate_norm" == "$canonical_path_norm" ]]; then
-                        name_match_allowed="true"
+                declare -A expected_norms_lookup=()
+                local expected_norm_value=""
+
+                expected_norm_value="$canonical_path_norm"
+                if [[ -n "$expected_norm_value" ]]; then
+                    expected_norms_lookup["$expected_norm_value"]=1
+                fi
+
+                expected_norm_value=$(normalize_manifest_lookup_key "$relative_dir_without_prefix")
+                if [[ -n "$expected_norm_value" ]]; then
+                    expected_norms_lookup["$expected_norm_value"]=1
+                fi
+
+                expected_norm_value=$(normalize_manifest_lookup_key "$expected_folder_slug_path")
+                if [[ -n "$expected_norm_value" ]]; then
+                    expected_norms_lookup["$expected_norm_value"]=1
+                fi
+
+                expected_norm_value=$(normalize_manifest_lookup_key "$expected_project_and_slug_path")
+                if [[ -n "$expected_norm_value" ]]; then
+                    expected_norms_lookup["$expected_norm_value"]=1
+                fi
+
+                expected_norm_value=$(normalize_manifest_lookup_key "$expected_display_path")
+                if [[ -n "$expected_norm_value" ]]; then
+                    expected_norms_lookup["$expected_norm_value"]=1
+                fi
+
+                expected_norm_value=$(normalize_manifest_lookup_key "$expected_folder_display_path")
+                if [[ -n "$expected_norm_value" ]]; then
+                    expected_norms_lookup["$expected_norm_value"]=1
+                fi
+
+                expected_norm_value=$(normalize_manifest_lookup_key "$expected_project_display")
+                if [[ -n "$expected_norm_value" ]]; then
+                    expected_norms_lookup["$expected_norm_value"]=1
+                fi
+
+                local candidate_matches_expected="false"
+                if [[ -n "$candidate_norm" ]]; then
+                    if [[ -n "${expected_norms_lookup[$candidate_norm]+set}" ]]; then
+                        candidate_matches_expected="true"
                     fi
-                elif [[ -n "$name_match_relpath" && -n "$candidate_norm" && "$candidate_norm" == "$canonical_path_norm" ]]; then
+                else
+                    if [[ ${#expected_folder_slugs[@]} -eq 0 && -z "$relative_dir_without_prefix" ]]; then
+                        candidate_matches_expected="true"
+                    fi
+                fi
+
+                if [[ "$candidate_matches_expected" == "true" ]]; then
                     name_match_allowed="true"
+                elif [[ "$verbose" == "true" ]]; then
+                    local -a expected_norm_keys=()
+                    local norm_key
+                    for norm_key in "${!expected_norms_lookup[@]}"; do
+                        expected_norm_keys+=("$norm_key")
+                    done
+                    local expected_norm_debug=""
+                    if ((${#expected_norm_keys[@]} > 0)); then
+                        expected_norm_debug=$(printf '%s,' "${expected_norm_keys[@]}")
+                        expected_norm_debug="${expected_norm_debug%,}"
+                    fi
+                    log DEBUG "Skipping name-based duplicate alignment for '${staged_name:-$dest_filename}' due to folder mismatch (candidate='${candidate_norm:-<empty>}', expected='${expected_norm_debug:-<empty>}')."
                 fi
 
                 if [[ "$name_match_allowed" == "true" ]]; then
                     if [[ -z "$existing_storage_path" && -n "$name_match_candidate_path" ]]; then
                         existing_storage_path="$name_match_candidate_path"
+                    fi
+                    if [[ -z "$existing_display_path" && -n "$expected_display_path" ]]; then
+                        existing_display_path="$expected_display_path"
                     fi
                     if [[ -z "$duplicate_match_json" ]]; then
                         duplicate_match_json="$name_match_json"
@@ -3044,8 +3144,6 @@ JQ
                             resolved_id_source="$name_match_type"
                         fi
                     fi
-                elif [[ "$verbose" == "true" ]]; then
-                    log DEBUG "Skipping name-based duplicate alignment for '${staged_name:-$dest_filename}' due to folder mismatch or missing mapping context."
                 fi
             fi
         fi
@@ -3120,13 +3218,15 @@ JQ
 
         if [[ "$preserve_ids" != "true" && -n "$staged_id" ]]; then
             local clear_reason=""
-            if [[ "$no_overwrite" == "true" ]]; then
+            if [[ "$name_match_allowed" != "true" ]]; then
+                clear_reason="folder-name-mismatch"
+            elif [[ "$no_overwrite" == "true" ]]; then
                 clear_reason="no-overwrite"
             elif [[ "$id_exists_in_target" == "true" ]]; then
                 if [[ "$id_conflict_resolved_via_name" == "true" ]]; then
                     clear_reason=""
                 else
-                clear_reason="id-conflict"
+                    clear_reason="id-conflict"
                 fi
             fi
 
@@ -3136,6 +3236,8 @@ JQ
                     if [[ "$verbose" == "true" ]]; then
                         if [[ "$clear_reason" == "no-overwrite" ]]; then
                             log DEBUG "Cleared workflow ID '${staged_id}' for '${staged_name:-$dest_filename}' because --no-overwrite is enabled."
+                        elif [[ "$clear_reason" == "folder-name-mismatch" ]]; then
+                            log DEBUG "Cleared workflow ID '${staged_id}' for '${staged_name:-$dest_filename}' because no matching workflow exists in the target folder."
                         else
                             log DEBUG "Cleared workflow ID '${staged_id}' for '${staged_name:-$dest_filename}' due to existing ID conflict in target instance."
                         fi
@@ -3143,6 +3245,8 @@ JQ
                     staged_id=""
                     if [[ "$clear_reason" == "no-overwrite" ]]; then
                         id_sanitized_note=$(append_sanitized_note "$id_sanitized_note" "no-overwrite")
+                    elif [[ "$clear_reason" == "folder-name-mismatch" ]]; then
+                        id_sanitized_note=$(append_sanitized_note "$id_sanitized_note" "folder-name-mismatch")
                     else
                         id_sanitized_note=$(append_sanitized_note "$id_sanitized_note" "id-conflict")
                     fi
@@ -3242,6 +3346,9 @@ JQ
                 if [[ -z "$existing_storage_path" ]]; then
                     existing_storage_path=$(printf '%s' "$duplicate_match_json" | jq -r '.storagePath // empty' 2>/dev/null)
                 fi
+                if [[ -z "$existing_display_path" ]]; then
+                    existing_display_path=$(printf '%s' "$duplicate_match_json" | jq -r '.displayPath // .workflow.displayPath // empty' 2>/dev/null)
+                fi
             fi
 
             # Manifest entry contains:
@@ -3261,6 +3368,7 @@ JQ
                 --arg relative "$relative_path" \
                 --arg storage "$canonical_storage_path" \
                 --arg existingStorage "$existing_storage_path" \
+                --arg existingDisplay "$existing_display_path" \
                 --arg idSource "$resolved_id_source" \
                 --arg sanitizeNote "$id_sanitized_note" \
                 --arg preserveMode "$preserve_ids" \
@@ -3269,6 +3377,11 @@ JQ
                 --arg nameMatchPath "$name_match_relpath" \
                 --arg nameMatchType "$name_match_type" \
                 --arg alignedByName "$id_conflict_resolved_via_name" \
+                --arg targetProjectSlug "$expected_project_slug" \
+                --arg targetProjectName "$expected_project_display" \
+                --arg targetDisplayPath "$expected_display_path" \
+                --arg targetFolderSlugPath "$expected_folder_slug_path" \
+                --arg targetFolderDisplayPath "$expected_folder_display_path" \
                                 '{
                                     filename: $filename,
                                     id: $id,
@@ -3281,6 +3394,7 @@ JQ
                                     relativePath: $relative,
                                     storagePath: $storage,
                                     existingStoragePath: $existingStorage,
+                                    existingDisplayPath: (if ($existingDisplay | length) > 0 then $existingDisplay else null end),
                                     idResolutionSource: $idSource,
                                     sanitizedIdNote: $sanitizeNote,
                                     preserveIds: ($preserveMode == "true"),
@@ -3288,7 +3402,12 @@ JQ
                                     nameMatchWorkflowId: (if ($nameMatchId | length) > 0 then $nameMatchId else null end),
                                     nameMatchRelativePath: (if ($nameMatchPath | length) > 0 then $nameMatchPath else null end),
                                     nameMatchType: (if ($nameMatchType | length) > 0 then $nameMatchType else null end),
-                                    idAlignedByNameMatch: ($alignedByName == "true")
+                                    idAlignedByNameMatch: ($alignedByName == "true"),
+                                    targetProjectSlug: (if ($targetProjectSlug | length) > 0 then $targetProjectSlug else null end),
+                                    targetProjectName: (if ($targetProjectName | length) > 0 then $targetProjectName else null end),
+                                    targetDisplayPath: (if ($targetDisplayPath | length) > 0 then $targetDisplayPath else null end),
+                                    targetFolderSlugPath: (if ($targetFolderSlugPath | length) > 0 then $targetFolderSlugPath else null end),
+                                    targetFolderDisplayPath: (if ($targetFolderDisplayPath | length) > 0 then $targetFolderDisplayPath else null end)
                                 }
                                 | with_entries(
                                         if (.value == null or (.value | tostring) == "") then empty else . end

@@ -273,22 +273,6 @@ normalize_repo_subpath() {
 effective_repo_prefix() {
     if [[ -n "$github_path" ]]; then
         printf '%s\n' "$github_path"
-        return
-    fi
-
-    if [[ -n "$n8n_path" ]]; then
-        printf '%s\n' "$n8n_path"
-        return
-    fi
-
-    if [[ "${n8n_path_source:-default}" != "default" && "${n8n_path_source:-unset}" != "unset" ]]; then
-        printf '%s\n' ""
-        return
-    fi
-
-    local source_state="${github_path_source:-default}"
-    if [[ "$source_state" == "default" || "$source_state" == "unset" ]]; then
-        printf '%s\n' "$project_slug"
     else
         printf '%s\n' ""
     fi
