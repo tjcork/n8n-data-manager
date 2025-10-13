@@ -31,13 +31,14 @@ git_commit_email=""
 : "${assume_defaults_source:=unset}"
 : "${environment_source:=unset}"
 : "${github_path_source:=unset}"
+: "${n8n_path_source:=unset}"
 : "${project_name_source:=unset}"
 
 project_name="${project_name:-Personal}"
 project_slug=""
-declare -a project_folder_prefix_segments=()
 
 github_path="${github_path:-}"
+n8n_path="${n8n_path:-}"
 
 # ANSI colors for better UI (using printf for robustness)
 printf -v RED     '\033[0;31m'
@@ -225,32 +226,34 @@ set_project_from_path() {
         raw_input="Personal"
     fi
 
-    local IFS='/'
-    local -a project_parts=()
-    read -r -a project_parts <<< "$raw_input"
-    if ((${#project_parts[@]} == 0)); then
-        project_parts=("Personal")
-    fi
-
-    local primary_part="${project_parts[0]}"
-    primary_part="$(printf '%s' "$primary_part" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-    if [[ -z "$primary_part" ]]; then
-        primary_part="Personal"
-    fi
-
-    project_name="$primary_part"
+    project_name="$raw_input"
     update_project_slug
+}
 
-    project_folder_prefix_segments=()
-    if ((${#project_parts[@]} > 1)); then
-        local idx
-        for ((idx=1; idx<${#project_parts[@]}; idx++)); do
-            local segment="${project_parts[$idx]}"
-            segment="$(printf '%s' "$segment" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-            if [[ -n "$segment" ]]; then
-                project_folder_prefix_segments+=("$segment")
+set_n8n_path_hint() {
+    local raw_input="$1"
+    local source_label="$2"
+
+    if [[ -z "$raw_input" ]]; then
+        n8n_path=""
+    else
+        local normalized
+        normalized="$(normalize_github_path_prefix "$raw_input")"
+        if [[ -z "$normalized" ]]; then
+            if [[ "$raw_input" != "/" && -n "$raw_input" ]]; then
+                log WARN "Configured N8N_PATH '$raw_input' contained no usable characters after normalization; treating as repository root."
             fi
-        done
+            n8n_path=""
+        else
+            if [[ "$normalized" != "${raw_input#/}" && "$verbose" == "true" ]]; then
+                log DEBUG "Normalized N8N_PATH from '$raw_input' to '$normalized'"
+            fi
+            n8n_path="$normalized"
+        fi
+    fi
+
+    if [[ -n "$source_label" ]]; then
+        n8n_path_source="$source_label"
     fi
 }
 
@@ -270,6 +273,16 @@ normalize_repo_subpath() {
 effective_repo_prefix() {
     if [[ -n "$github_path" ]]; then
         printf '%s\n' "$github_path"
+        return
+    fi
+
+    if [[ -n "$n8n_path" ]]; then
+        printf '%s\n' "$n8n_path"
+        return
+    fi
+
+    if [[ "${n8n_path_source:-default}" != "default" && "${n8n_path_source:-unset}" != "unset" ]]; then
+        printf '%s\n' ""
         return
     fi
 
@@ -826,6 +839,12 @@ load_config() {
             fi
         fi
 
+        if [[ "${n8n_path_source:-unset}" == "unset" || "${n8n_path_source:-unset}" == "default" ]]; then
+            if [[ -n "${N8N_PATH:-}" ]]; then
+                set_n8n_path_hint "$N8N_PATH" "config"
+            fi
+        fi
+
         if [[ -n "${N8N_PROJECT:-}" ]]; then
             if [[ -z "$project_name_source" || "$project_name_source" == "unset" || "$project_name_source" == "default" ]]; then
                 set_project_from_path "$N8N_PROJECT"
@@ -930,6 +949,10 @@ load_config() {
     if [[ "$github_path_source" == "unset" ]]; then
         github_path_source="default"
     fi
+
+    if [[ "$n8n_path_source" == "unset" ]]; then
+        n8n_path_source="default"
+    fi
     
     # Set other defaults
     if [[ -z "$restore_type" ]]; then
@@ -1031,6 +1054,14 @@ load_config() {
             log DEBUG "GitHub path prefix: $effective_prefix"
         else
             log DEBUG "GitHub path prefix: <repository root>"
+        fi
+    fi
+
+    if [[ "${n8n_path_source:-default}" != "default" && "${n8n_path_source:-unset}" != "unset" ]]; then
+        if [[ -n "$n8n_path" ]]; then
+            log DEBUG "Default GitHub path hint (N8N_PATH): $n8n_path"
+        else
+            log DEBUG "Default GitHub path hint (N8N_PATH): <repository root>"
         fi
     fi
 }

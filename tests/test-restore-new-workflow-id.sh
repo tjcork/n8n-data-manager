@@ -212,7 +212,7 @@ if ! DOCKER_EXEC_USER="node" \
     "$MANAGER_SCRIPT" \
         --action restore \
         --container "$CONTAINER_NAME" \
-        --path "$RESTORE_BASE" \
+        --local-path "$RESTORE_BASE" \
         --workflows 1 \
         --credentials 0 \
         --config "$TEMP_HOME/test-config.cfg" \

@@ -55,6 +55,6 @@ JSON
 chmod 600 "$RESTORE_FIXTURE_DIR/"*.json
 
 echo "Testing restore functionality (dry run)..."
-./$SCRIPT_FILE --action restore --container test-n8n --workflows 1 --credentials 1 --path "$RESTORE_FIXTURE_DIR" --dry-run --verbose || true
+./$SCRIPT_FILE --action restore --container test-n8n --workflows 1 --credentials 1 --local-path "$RESTORE_FIXTURE_DIR" --dry-run --verbose || true
 
 rm -rf "$RESTORE_FIXTURE_DIR"

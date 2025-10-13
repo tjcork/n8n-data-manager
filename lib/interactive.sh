@@ -51,11 +51,27 @@ show_config_summary() {
     log INFO "   📄 Workflows: $workflows_desc"
     log INFO "   🔒 Credentials: $credentials_desc"
     log INFO "   🌱 Environment: $environment_desc"
-    log INFO "   🏷️ Project: ${project_name:-Personal}"
-    if [[ -n "$github_path" ]]; then
-        log INFO "   🗂️ GitHub path prefix: $github_path"
+    log INFO "   🏷️ Default project: ${project_name:-Personal}"
+
+    local effective_prefix
+    effective_prefix="$(effective_repo_prefix)"
+    if [[ -n "$effective_prefix" ]]; then
+        log INFO "   🗂️ GitHub path prefix: $effective_prefix"
     else
-        log INFO "   🗂️ GitHub path prefix: <none>"
+        log INFO "   🗂️ GitHub path prefix: <repository root>"
+    fi
+
+    if [[ "${n8n_path_source:-default}" != "default" && "${n8n_path_source:-unset}" != "unset" ]]; then
+        if [[ -n "$n8n_path" ]]; then
+            log INFO "   🧭 N8N path hint: $n8n_path (source: $n8n_path_source)"
+        else
+            log INFO "   🧭 N8N path hint: <repository root> (source: $n8n_path_source)"
+        fi
+    elif [[ -n "$github_path" && "${github_path_source:-default}" != "default" ]]; then
+        : # explicit GitHub path already shown above
+    elif [[ -z "$github_path" && -n "$n8n_path" ]]; then
+        # maintain visibility of default hint when explicitly set but treated as default
+        log INFO "   🧭 N8N path hint: $n8n_path"
     fi
     
     if [[ -n "$github_repo" ]]; then
@@ -105,110 +121,39 @@ Automated backup and restore tool for n8n Docker containers using GitHub.
 Reads configuration from local 'config' file, then ~/.config/n8n-manager/config if it exists.
 
 Options:
-  --action <action>     Action to perform: 'backup' or 'restore'.
-  --container <id|name> Target Docker container ID or name.
-  --token <pat>         GitHub Personal Access Token (PAT).
-  --repo <user/repo>    GitHub repository (e.g., 'myuser/n8n-backup').
-  --branch <branch>     GitHub branch to use (defaults to 'main').
-  --dated               Create timestamped subdirectory for backups (e.g., YYYY-MM-DD_HH-MM-SS/).
-  --workflows [mode]    Include workflows in backup. Mode: 0 (disabled), 1 (local, default), 2 (remote Git repo).
-  --credentials [mode]  Include credentials in backup. Mode: 0 (disabled), 1 (local, default), 2 (remote Git repo).
-    --environment [mode]  Include environment variables. Mode: 0 (disabled, default), 1 (local), 2 (remote Git repo).
-    --github-path <path>  Organize Git-backed files under the given repository subdirectory (defaults to project name).
-  --path <path>         Local backup directory path (defaults to '~/n8n-backup').
-  --decrypt <true|false>    If true, export credentials decrypted from n8n (not recommended, less secure).
-                        Defaults to false to ensure encrypted credential exports.
-  --rotation <limit>    Local backup rotation: '0' (overwrite), number (keep N most recent), 'unlimited' (keep all).
-  --folder-structure    Enable n8n folder structure mirroring in Git (requires API access).
-  --n8n-url <url>       n8n instance URL (e.g., 'http://localhost:5678').
-  --n8n-api-key <key>   n8n API key for folder structure access.
-    --n8n-cred <name>     n8n credential name providing Basic Auth for session login when API key is absent.
-    --preserve            Force reuse of workflow IDs when restoring structured exports (default: false; otherwise IDs are reused only when safe).
-    --no-overwrite        Force new workflow IDs on import (clears IDs even if --preserve is set).
-  --dry-run             Simulate the action without making any changes.
-    --defaults            Assume defaults for any missing inputs (non-interactive automation).
-  --verbose             Enable detailed debug logging.
-  --log-file <path>     Path to a file to append logs to.
-  --config <path>       Path to a custom configuration file.
-  -h, --help            Show this help message and exit.
+  --action <action>       Action to perform: 'backup' or 'restore'.
+  --container <id|name>   Target Docker container ID or name.
+  --token <pat>           GitHub Personal Access Token (PAT).
+  --repo <user/repo>      GitHub repository (e.g., 'myuser/n8n-backup').
+  --branch <branch>       GitHub branch to use (defaults to 'main').
+  --dated                 Create timestamped subdirectory for backups (e.g., YYYY-MM-DD_HH-MM-SS/).
+  --workflows [mode]      Include workflows in backup. Mode: 0 (disabled), 1 (local, default), 2 (remote Git repo).
+  --credentials [mode]    Include credentials in backup. Mode: 0 (disabled), 1 (local, default), 2 (remote Git repo).
+  --environment [mode]    Include environment variables. Mode: 0 (disabled, default), 1 (local), 2 (remote Git repo).
+  --github-path <path>    Organize Git-backed files under the given repository subdirectory (defaults to project name).
+  --local-path <path>     Local backup directory path (defaults to '~/n8n-backup').
+  --decrypt <true|false>  If true, export credentials decrypted from n8n (not recommended, less secure).
+                          Defaults to false to ensure encrypted credential exports.
+  --rotation <limit>      Local backup rotation: '0' (overwrite), number (keep N most recent), 'unlimited' (keep all).
+  --folder-structure      Enable n8n folder structure mirroring in Git (requires credential access).
+  --n8n-url <url>         n8n instance URL (e.g., 'http://localhost:5678').
+  --n8n-api-key <key>     n8n API key for folder structure access.
+  --n8n-cred <name>       n8n credential name providing Basic Auth for session login when API key is absent.
+  --preserve              Force reuse of workflow IDs when restoring structured exports (default: false; otherwise IDs are reused only when safe).
+  --no-overwrite          Force new workflow IDs on import (clears IDs even if --preserve is set).
+  --dry-run               Simulate the action without making any changes.
+  --defaults              Assume defaults for any missing inputs (non-interactive automation).
+  --verbose               Enable detailed debug logging.
+  --log-file <path>       Path to a file to append logs to.
+  --config <path>         Path to a custom configuration file.
+  -h, --help              Show this help message and exit.
 
 Configuration Files (checked in order):
   1. ./.config (local, project-specific)
   2. ~/.config/n8n-manager/config (user-specific)
   3. Custom path via --config option
 
-  Define variables like:
-    # === REQUIRED SETTINGS ===
-    # GitHub Personal Access Token for repository access
-    GITHUB_TOKEN="ghp_1234567890abcdef1234567890abcdef12345678"
-    
-    # GitHub repository in format: username/repository
-    GITHUB_REPO="myuser/n8n-backup"
-    
-    # Default container ID or name to backup/restore
-    DEFAULT_CONTAINER="n8n-container-name"
-    
-    # === OPTIONAL GITHUB SETTINGS ===
-    # GitHub branch to use (defaults to 'main')
-    GITHUB_BRANCH="main"
-    
-    # === BACKUP BEHAVIOR SETTINGS ===
-    # Create timestamped backup directories (true/false, defaults to false)
-    DATED_BACKUPS=true
-    
-    # Workflows storage: 0=disabled, 1=local, 2=remote (Git repo)
-    WORKFLOWS=1
-    
-    # Credentials storage: 0=disabled, 1=local (secure), 2=remote (Git repo)
-    CREDENTIALS=1
-
-    # Environment storage: 0=disabled, 1=local (secure), 2=remote (Git repo - high risk)
-    ENVIRONMENT=0
-    
-    # Decrypt credentials during export (true/false, defaults to false).
-    # When false (recommended), credentials are exported encrypted by n8n.
-    # Set to true fordecrypted exports in trusted environments.
-    DECRYPT_CREDENTIALS=false
-
-    # Assume defaults for any missing CLI values (skip prompts in automation)
-    ASSUME_DEFAULTS=false
-    
-    # === LOCAL BACKUP SETTINGS ===
-    # Custom local backup directory path (defaults to ~/n8n-backup)
-    LOCAL_BACKUP_PATH="/custom/backup/path"
-    
-    # Local backup rotation: 0 (overwrite), number (keep N), "unlimited" (keep all)
-    LOCAL_ROTATION_LIMIT="10"
-
-    # Preserve workflow IDs on restore (true forces original IDs when possible; false lets n8n reuse IDs when safe)
-    RESTORE_PRESERVE_ID=false
-
-    # Force new workflow IDs on restore (true always clears incoming IDs before import)
-    RESTORE_NO_OVERWRITE=false
-    
-    # === n8n FOLDER STRUCTURE SETTINGS ===
-    # Enable n8n folder structure mirroring in Git (requires n8n API access)
-    FOLDER_STRUCTURE=false
-    
-    # n8n instance URL (required if FOLDER_STRUCTURE=true)
-    N8N_BASE_URL="http://localhost:5678"
-    
-    # n8n API key for folder structure access (required if FOLDER_STRUCTURE=true)
-    N8N_API_KEY="n8n_api_1234567890abcdef1234567890abcdef"
-
-    # n8n credential name for session-based login (alternative to API key)
-    # Example: Basic Auth credential named "N8N REST BACKUP"
-    N8N_LOGIN_CREDENTIAL_NAME="N8N REST BACKUP"
-    
-    # === LOGGING SETTINGS ===
-    # Enable verbose debug logging (true/false, defaults to false)
-    VERBOSE=false
-    
-    # Enable dry run mode - simulate actions without making changes (true/false, defaults to false)
-    DRY_RUN=false
-    
-    # Path to log file for persistent logging (optional)
-    LOG_FILE="/var/log/n8n-manager.log"
+Run with action 'configure' to deploy or update the configuration file interactively.
 
 Command-line arguments override configuration file settings.
 For non-interactive use, required parameters (action, container, token, repo)
@@ -608,17 +553,23 @@ prompt_github_path_prefix() {
     fi
 
     while true; do
-        local enter_hint
-        if [[ "$github_path_source" == "default" ]]; then
-            enter_hint="$project_slug"
+        local hint_prefix=""
+        if [[ "$github_path_source" == "default" || "$github_path_source" == "unset" ]]; then
+            if [[ -n "$n8n_path" ]]; then
+                hint_prefix="$n8n_path"
+            elif [[ "${n8n_path_source:-default}" != "default" && "${n8n_path_source:-unset}" != "unset" ]]; then
+                hint_prefix="/"
+            else
+                hint_prefix="$project_slug"
+            fi
         else
-            enter_hint="$effective_prefix"
+            hint_prefix="$effective_prefix"
         fi
 
-        if [[ -n "$enter_hint" ]]; then
-            printf "GitHub path prefix (press Enter for %s, '/' for repository root): " "$enter_hint"
-        else
+        if [[ "$hint_prefix" == "/" || -z "$hint_prefix" ]]; then
             printf "GitHub path prefix (press Enter to keep repository root, '/' for repository root): "
+        else
+            printf "GitHub path prefix (press Enter for %s, '/' for repository root): " "$hint_prefix"
         fi
 
         local path_input

@@ -22,7 +22,8 @@ This script provides both interactive and non-interactive modes, making it suita
     *   **Dated Backups (`--dated`):** Creates timestamped subdirectories (e.g., `backup_YYYY-MM-DD_HH-MM-SS/`) for each backup, preserving history.
 *   **Restore Options:**
     *   **Selective Restore:** Use `--credentials` to restore only credentials, or `--workflow` to restore only workflows. You can specify either or both flags to control exactly what gets restored.
-    *   **Project-Aware Restore:** Directory hints for projects are honored, and workflows without hints fall back to the configured default project (`--project` flag or `N8N_PROJECT` config entry).
+    *   **Project-Aware Restore:** Directory hints for projects are honored, and workflows without hints fall back to the configured default project (`--project` flag or `N8N_PROJECT` config entry), independent of where backups live in Git.
+    *   **Flexible Git Layout:** Use `N8N_PATH` (or `--github-path`) to pick a repository subdirectory for backups without changing the default project selection.
 *   **Container Compatibility:**
     *   **Alpine Support:** Fully compatible with n8n containers based on Alpine Linux.
     *   **Ubuntu Support:** Works seamlessly with containers based on Ubuntu/Debian.
@@ -83,47 +84,30 @@ Create the directory if it doesn't exist:
 mkdir -p ~/.config/n8n-manager
 ```
 
-Create the file `~/.config/n8n-manager/config` with content like this:
+Copy the annotated template that ships with the project and edit it to match your setup:
 
-```ini
-# GitHub Personal Access Token (Required)
-GITHUB_TOKEN="ghp_YourGitHubPATGoesHere"
-
-# GitHub Repository (Required, format: username/repo)
-GITHUB_REPO="your-github-username/n8n-backups"
-
-# Default GitHub Branch (Optional, defaults to main)
-GITHUB_BRANCH="main"
-
-# Git identity for automated commits (Optional)
-# Defaults to "N8N Backup Manager" and backup@<base domain of N8N_BASE_URL>
-# GIT_COMMIT_NAME="N8N Backup Manager"
-# GIT_COMMIT_EMAIL="backup@example.com"
-
-# Default n8n Container Name or ID (Optional)
-DEFAULT_CONTAINER="my-n8n-container"
-
-# Default project to target on restore when directories don't include an explicit hint (Optional)
-N8N_PROJECT="Personal"
-
-# Use Dated Backups by default (Optional, true/false, defaults to false)
-DATED_BACKUPS=true
-
-# Enable Verbose Logging by default (Optional, true/false, defaults to false)
-VERBOSE=false
-
-# Log output to a file (Optional, must be an absolute path)
-LOG_FILE="/var/log/n8n-manager.log"
-
-# n8n credential used for session authentication when building folder structure (Optional)
-# N8N_LOGIN_CREDENTIAL_NAME="N8N REST BACKUP"
+```bash
+cp .config.example ~/.config/n8n-manager/config
 ```
 
-**Security Note:** Ensure the configuration file has appropriate permissions (e.g., `chmod 600 ~/.config/n8n-manager/config`) as it contains your GitHub PAT.
+Set permissions for security
+```bash
+chmod 600 ~/.config/n8n-manager/config
+```
+
+The example file shows supported options. Open it in your editor and adjust the sections that matter:
+
+*   **GitHub access:** `GITHUB_TOKEN`, `GITHUB_REPO`, and optional `GITHUB_BRANCH`, commit identity, or `GITHUB_PATH` subdirectory.
+*   **Default project selection:** `N8N_PROJECT` should be the literal project name as it appears in n8n. Path-like values are treated literally now.
+*   **Optional location hints:** Set `N8N_PATH` when you want to back up or restore a nested folder structure inside the chosen project; leave it empty to land at the project root.
+*   **Storage modes & logging:** `WORKFLOWS`, `CREDENTIALS`, `ENVIRONMENT`, `DATED_BACKUPS`, `VERBOSE`, and related flags control how data is stored and how much output you see.
+*   **Folder structure export:** Configure `FOLDER_STRUCTURE`, `N8N_BASE_URL`, `N8N_API_KEY`, or `N8N_LOGIN_CREDENTIAL_NAME` if you mirror the n8n UI folder layout.
+
+**Security Note:** Ensure the configuration file has appropriate permissions (e.g., `chmod 600 ~/.config/n8n-manager/config`) as it contains your GitHub PAT. Keep the file out of version control.
 
 Command-line arguments always override settings from the configuration file.
 
-When restoring workflows, `n8n-manager` first honors any explicit project hints in the backup directory structure (such as `projects/<slug>/`). If no hint is present, it falls back to the project specified by `--project` or the `N8N_PROJECT` value in your config file. If neither is provided, the Personal project is used.
+When restoring workflows, `n8n-manager` uses the project specified by `--project` or `N8N_PROJECT`. The workflows land inside the folder represented by `N8N_PATH` when set; otherwise, they import at the project root.
 
 ## 💡 Usage
 
@@ -159,7 +143,7 @@ n8n-manager.sh --action <action> --container <id|name> --token <pat> --repo <use
 **Optional Arguments:**
 
 *   `--branch <branch>`: GitHub branch to use (defaults to `main`).
-*   `--project <name>`: Project to target when restoring workflows unless a directory explicitly overrides it.
+*   `--project <name>`: Project to target when restoring workflows unless a directory explicitly overrides it. Provide the exact name as shown in n8n; path-like values are treated literally.
 *   `--dated`: (Backup only) Create a timestamped subdirectory for the backup.
 *   `--environment <mode>`: Control environment backups (`0` disabled, `1` local, `2` remote Git).
 *   `--dry-run`: Simulate the action without making changes.

@@ -55,6 +55,8 @@ needs_github="" # tracks if GitHub access is required
 
 github_path=""
 github_path_source="unset"
+n8n_path=""
+n8n_path_source="unset"
 
 # Git/GitHub settings  
 github_token=""
@@ -160,7 +162,7 @@ main() {
                        exit 1 ;;
                 esac
                 ;;
-            --path) local_backup_path="$2"; local_backup_path_source="cli"; shift 2 ;;
+            --local-path) local_backup_path="$2"; local_backup_path_source="cli"; shift 2 ;;
             --github-path)
                 local raw_github_path="$2"
                 github_path="$(normalize_github_path_prefix "$raw_github_path")"
