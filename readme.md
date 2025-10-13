@@ -76,6 +76,18 @@ Alternatively, you can download the `n8n-manager.sh` script manually, make it ex
 
 ## ⚙️ Configuration File (Optional)
 
+You can bootstrap your configuration in two ways:
+
+1. **Interactive wizard:** Run the script with the configure action to generate a config from guided prompts (you can choose `./.config`, the user config path, or any custom/`--config` location).
+
+    ```bash
+    n8n-manager.sh --action configure
+    ```
+
+    The same wizard is available in the interactive menu (`Configure defaults`). It captures GitHub settings when needed, workflow storage preferences, folder structure options, and writes the file with secure permissions.
+
+2. **Manual copy/edit:** Start from the sample config if you prefer to edit values yourself.
+
 For convenience, you can create a configuration file to store default settings. The script looks for this file at `~/.config/n8n-manager/config` by default. You can specify a different path using the `--config` argument.
 
 Create the directory if it doesn't exist:

@@ -570,50 +570,81 @@ compute_entry_folder_context() {
         segments=("${segments[@]}")
     fi
 
-    local effective_project_slug=""
-    local effective_project_display=""
-    local fallback_project_slug="${project_slug:-Personal}"
-    local fallback_project_display="${project_name:-Personal}"
-    if [[ -z "$fallback_project_slug" ]]; then
-        fallback_project_slug="Personal"
+    local configured_project_name="${project_name:-}"
+    local configured_project_slug="${project_slug:-}"
+    if [[ -z "$configured_project_name" || "$configured_project_name" == "null" ]]; then
+        configured_project_name=""
     fi
-    fallback_project_slug="$(sanitize_slug "$fallback_project_slug")"
-    if [[ -z "$fallback_project_display" ]]; then
-        fallback_project_display="$(unslug_to_title "$fallback_project_slug")"
+    if [[ -z "$configured_project_slug" || "$configured_project_slug" == "null" ]]; then
+        configured_project_slug=""
+    fi
+    if [[ -n "$configured_project_slug" ]]; then
+        configured_project_slug="$(sanitize_slug "$configured_project_slug")"
+    fi
+    if [[ -z "$configured_project_slug" && -n "$configured_project_name" ]]; then
+        configured_project_slug="$(sanitize_slug "$configured_project_name")"
+    fi
+    if [[ -z "$configured_project_slug" ]]; then
+        configured_project_slug="personal"
+    fi
+
+    local configured_project_display="$configured_project_name"
+    if [[ -z "$configured_project_display" ]]; then
+        configured_project_display="$(unslug_to_title "$configured_project_slug")"
     fi
 
     local -a folder_segments=("${segments[@]}")
 
-    if [[ -n "$repo_root_slug" ]]; then
-        effective_project_slug="$repo_root_slug"
-        effective_project_display="${repo_root_display:-$(unslug_to_title "$repo_root_slug")}"
-    else
-        effective_project_slug="$fallback_project_slug"
-        effective_project_display="$fallback_project_display"
-        if ((${#folder_segments[@]} > 0)); then
-            local first_segment_slug
-            first_segment_slug=$(sanitize_slug "${folder_segments[0]}")
-            if [[ -n "$first_segment_slug" ]]; then
-                local first_lower
-                first_lower=$(printf '%s' "$first_segment_slug" | tr '[:upper:]' '[:lower:]')
-                local project_lower
-                project_lower=$(printf '%s' "$effective_project_slug" | tr '[:upper:]' '[:lower:]')
-                if [[ "$first_lower" == "$project_lower" ]]; then
-                    folder_segments=("${folder_segments[@]:1}")
-                fi
+    if ((${#folder_segments[@]} > 0)); then
+        local first_segment_slug
+        first_segment_slug=$(sanitize_slug "${folder_segments[0]}")
+        if [[ -n "$first_segment_slug" ]]; then
+            local first_lower
+            first_lower=$(printf '%s' "$first_segment_slug" | tr '[:upper:]' '[:lower:]')
+            local project_lower
+            project_lower=$(printf '%s' "$configured_project_slug" | tr '[:upper:]' '[:lower:]')
+            if [[ "$first_lower" == "$project_lower" ]]; then
+                folder_segments=("${folder_segments[@]:1}")
             fi
         fi
     fi
 
-    if [[ -z "$effective_project_slug" ]]; then
-        effective_project_slug="personal"
-        effective_project_display="Personal"
-    elif [[ -z "$effective_project_display" ]]; then
-        effective_project_display="$(unslug_to_title "$effective_project_slug")"
+    local -a base_folder_slugs=()
+    local -a base_folder_displays=()
+
+    if [[ -n "$n8n_path" ]]; then
+        local path_prefix_trimmed
+        path_prefix_trimmed="${n8n_path#/}"
+        path_prefix_trimmed="${path_prefix_trimmed%/}"
+        if [[ -n "$path_prefix_trimmed" ]]; then
+            local -a _path_segments=()
+            IFS='/' read -r -a _path_segments <<< "$path_prefix_trimmed"
+            local base_segment
+            for base_segment in "${_path_segments[@]}"; do
+                [[ -z "$base_segment" ]] && continue
+                local base_slug
+                base_slug=$(sanitize_slug "$base_segment")
+                [[ -z "$base_slug" ]] && continue
+                base_folder_slugs+=("$base_slug")
+                local base_display_part
+                base_display_part="$(unslug_to_title "$base_slug")"
+                base_folder_displays+=("$base_display_part")
+            done
+        fi
     fi
 
-    _project_slug_ref="$effective_project_slug"
-    _project_display_ref="$effective_project_display"
+    if ((${#base_folder_slugs[@]} == 0)) && [[ -n "$repo_root_slug" ]]; then
+        local sanitized_repo_root
+        sanitized_repo_root="$(sanitize_slug "$repo_root_slug")"
+        if [[ -n "$sanitized_repo_root" ]]; then
+            base_folder_slugs+=("$sanitized_repo_root")
+            local repo_display_part="$repo_root_display"
+            if [[ -z "$repo_display_part" ]]; then
+                repo_display_part="$(unslug_to_title "$sanitized_repo_root")"
+            fi
+            base_folder_displays+=("$repo_display_part")
+        fi
+    fi
 
     local segment
     for segment in "${folder_segments[@]}"; do
@@ -632,6 +663,51 @@ compute_entry_folder_context() {
             _folder_displays_ref+=("$(unslug_to_title "$slug")")
         fi
     done
+
+    if ((${#base_folder_slugs[@]} > 0)); then
+    local project_lower
+    project_lower=$(printf '%s' "$configured_project_slug" | tr '[:upper:]' '[:lower:]')
+    local -a prepend_slugs=()
+    local -a prepend_displays=()
+        local idx
+        for ((idx=0; idx<${#base_folder_slugs[@]}; idx++)); do
+            local base_slug="${base_folder_slugs[$idx]}"
+            [[ -z "$base_slug" ]] && continue
+            local base_lower
+            base_lower=$(printf '%s' "$base_slug" | tr '[:upper:]' '[:lower:]')
+            if [[ "$base_lower" == "$project_lower" ]]; then
+                continue
+            fi
+
+            local existing_slug=""
+            if (( ${#_folder_slugs_ref[@]} > idx )); then
+                existing_slug="${_folder_slugs_ref[$idx]}"
+            fi
+            local existing_lower=""
+            if [[ -n "$existing_slug" ]]; then
+                existing_lower=$(printf '%s' "$existing_slug" | tr '[:upper:]' '[:lower:]')
+            fi
+
+            if [[ "$existing_lower" == "$base_lower" ]]; then
+                continue
+            fi
+
+            local base_display="${base_folder_displays[$idx]}"
+            if [[ -z "$base_display" ]]; then
+                base_display="$(unslug_to_title "$base_slug")"
+            fi
+            prepend_slugs+=("$base_slug")
+            prepend_displays+=("$base_display")
+        done
+
+        if ((${#prepend_slugs[@]} > 0)); then
+            _folder_slugs_ref=("${prepend_slugs[@]}" "${_folder_slugs_ref[@]}")
+            _folder_displays_ref=("${prepend_displays[@]}" "${_folder_displays_ref[@]}")
+        fi
+    fi
+
+    _project_slug_ref="$configured_project_slug"
+    _project_display_ref="$configured_project_display"
 
     if ((${#_folder_displays_ref[@]} > 0)); then
         local assembled="${_folder_displays_ref[0]}"

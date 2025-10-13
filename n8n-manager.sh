@@ -380,6 +380,11 @@ main() {
     log DEBUG "Local Path: $local_backup_path, Rotation: $local_rotation_limit"
 
     # Check if running non-interactively
+    if [[ "$action" == "configure" && "$interactive_mode" != "true" ]]; then
+        log ERROR "The configure action requires an interactive terminal."
+        exit 1
+    fi
+
     if [[ "$interactive_mode" != "true" ]]; then
         log DEBUG "Running in non-interactive mode."
         
@@ -472,6 +477,11 @@ main() {
         fi
         log DEBUG "Action selected: $action"
         
+        if [[ "$action" == "configure" ]]; then
+            run_configuration_wizard
+            exit 0
+        fi
+
         # Handle reconfigure action
         if [[ "$action" == "reconfigure" ]]; then
             log INFO "🔄 Reconfiguring - will re-prompt for all settings..."
@@ -515,244 +525,20 @@ main() {
         fi
         log DEBUG "Container selected: $container"
         
-        if [[ "$project_name_source" == "default" || "$reconfigure_mode" == "true" ]]; then
-            printf "Project to manage [${project_name:-Personal}]: "
-            local project_input
-            read -r project_input
-            if [[ -n "$project_input" ]]; then
-                set_project_from_path "$project_input"
-                project_name_source="interactive"
-            fi
-        fi
-        log INFO "Project scope: ${project_name:-Personal}"
-
-        # Interactive dated backup prompt (only if value originated from defaults or reconfigure mode)
-        if [[ "$action" == "backup" ]] && ([[ "$dated_backups_source" == "default" ]] || [[ "$reconfigure_mode" == "true" ]]); then
-             printf "Create a dated backup (in a timestamped subdirectory)? (yes/no) [no]: "
-             local confirm_dated
-             read -r confirm_dated
-             if [[ "$confirm_dated" == "yes" || "$confirm_dated" == "y" ]]; then
-                 dated_backups=true
-             else
-                 dated_backups=false
-             fi
-             dated_backups_source="interactive"
-        fi
-        log DEBUG "Use Dated Backup: $dated_backups"
-        
-        # Interactive storage configuration using new selection functions
         if [[ "$action" == "backup" ]]; then
-            local prompt_workflows=false
-            local prompt_credentials=false
-            local prompt_environment=false
-
-            if [[ "$reconfigure_mode" == "true" ]]; then
-                prompt_workflows=true
-                prompt_credentials=true
-                prompt_environment=true
+            collect_backup_preferences "$reconfigure_mode" "false"
+            log INFO "Project scope: ${project_name:-Personal}"
+            if [[ -n "$n8n_path" ]]; then
+                log INFO "n8n path hint: $n8n_path"
             else
-                if [[ "$workflows_source" == "default" ]]; then
-                    prompt_workflows=true
-                fi
-                if [[ "$credentials_source" == "default" ]]; then
-                    prompt_credentials=true
-                fi
-                if [[ "$environment_source" == "default" ]]; then
-                    prompt_environment=true
-                fi
+                log INFO "n8n path hint: <project root>"
             fi
-
-            if [[ "$prompt_workflows" == true ]] || [[ "$prompt_credentials" == true ]] || [[ "$prompt_environment" == true ]]; then
-                log INFO "Configure backup storage locations:"
-            fi
-
-            if [[ "$prompt_workflows" == true ]]; then
-                select_workflows_storage
-                workflows_source="interactive"
-            fi
-
-            if [[ "$prompt_credentials" == true ]]; then
-                select_credentials_storage
-                credentials_source="interactive"
-            fi
-
-            if [[ "$prompt_environment" == true ]]; then
-                select_environment_storage
-                environment_source="interactive"
-            fi
-
-            if [[ "$prompt_workflows" == true ]] || [[ "$prompt_credentials" == true ]] || [[ "$prompt_environment" == true ]]; then
-                log INFO "Selected: Workflows=($workflows) $(format_storage_value $workflows), Credentials=($credentials) $(format_storage_value $credentials), Environment=($environment) $(format_storage_value $environment)"
-            fi
-
-            local needs_local_path_prompt=false
-            local has_local_storage=false
-            if [[ "$workflows" == "1" ]] || [[ "$credentials" == "1" ]] || [[ "$environment" == "1" ]]; then
-                has_local_storage=true
-            fi
-
-            if [[ "$has_local_storage" == true ]]; then
-                if [[ "$reconfigure_mode" == "true" ]]; then
-                    needs_local_path_prompt=true
-                elif [[ "$local_backup_path_source" == "default" ]] || [[ "$prompt_workflows" == true ]] || [[ "$prompt_credentials" == true ]] || [[ "$prompt_environment" == true ]]; then
-                    needs_local_path_prompt=true
-                fi
-            fi
-
-            if [[ "$needs_local_path_prompt" == true ]]; then
-                printf "Local backup directory [${local_backup_path}]: "
-                read -r custom_backup_path
-                if [[ -n "$custom_backup_path" ]]; then
-                    if [[ "$custom_backup_path" =~ ^~ ]]; then
-                        custom_backup_path="${custom_backup_path/#\~/$HOME}"
-                    fi
-                    local_backup_path="$custom_backup_path"
-                    local_backup_path_source="interactive"
-                    log INFO "Using local backup directory: $local_backup_path"
-                fi
-            fi
-
-            local needs_rotation_prompt=false
-            if [[ "$has_local_storage" == true ]]; then
-                if [[ "$reconfigure_mode" == "true" ]]; then
-                    needs_rotation_prompt=true
-                elif [[ "$local_rotation_limit_source" == "default" ]]; then
-                    needs_rotation_prompt=true
-                fi
-            fi
-
-            if [[ "$needs_rotation_prompt" == true ]]; then
-                while true; do
-                    printf "Local backup rotation limit [${local_rotation_limit}]: "
-                    read -r rotation_input
-                    rotation_input=${rotation_input:-$local_rotation_limit}
-                    if [[ "$rotation_input" =~ ^(0|[0-9]+|unlimited)$ ]]; then
-                        local_rotation_limit="$rotation_input"
-                        local_rotation_limit_source="interactive"
-                        break
-                    else
-                        log ERROR "Invalid rotation value. Use 0, a positive number, or 'unlimited'."
-                    fi
-                done
-            fi
-
-            # Ask about n8n folder structure if workflows are going to remote
-            if [[ "$workflows" == "2" ]] && ([[ "$folder_structure_source" == "default" ]] || [[ "$reconfigure_mode" == "true" ]] || [[ "$prompt_workflows" == true ]]); then
-                printf "Create n8n folder structure in Git repository? (yes/no) [no]: "
-                read -r folder_structure_choice
-                if [[ "$folder_structure_choice" == "yes" || "$folder_structure_choice" == "y" ]]; then
-                    folder_structure=true
-                else
-                    folder_structure=false
-                fi
-                folder_structure_source="interactive"
-
-                if [[ "$folder_structure" == "true" ]]; then
-                    if [[ -z "$n8n_base_url" ]] || [[ "$reconfigure_mode" == "true" ]]; then
-                        printf "n8n base URL (e.g., http://localhost:5678): "
-                        read -r n8n_url
-                        if [[ -n "$n8n_url" ]]; then
-                            n8n_base_url="$n8n_url"
-                        else
-                            log ERROR "n8n base URL is required for folder structure"
-                            exit 1
-                        fi
-                    fi
-
-                    if [[ -z "$n8n_api_key" ]] || [[ "$reconfigure_mode" == "true" ]]; then
-                        printf "n8n API key (leave blank to use stored Basic Auth credential): "
-                        read -r -s n8n_api_key_input
-                        echo
-                        if [[ -n "$n8n_api_key_input" ]]; then
-                            n8n_api_key="$n8n_api_key_input"
-                        else
-                            n8n_api_key=""
-                        fi
-                    fi
-
-                    if [[ -z "$n8n_api_key" ]]; then
-                        local default_cred_name="${n8n_session_credential:-N8N REST BACKUP}"
-                        if [[ -z "$n8n_session_credential" ]] || [[ "$reconfigure_mode" == "true" ]]; then
-                            printf "n8n credential name for session auth [${default_cred_name}]: "
-                            read -r credential_name_input
-                            credential_name_input=${credential_name_input:-$default_cred_name}
-                            n8n_session_credential="$credential_name_input"
-                        fi
-                    elif [[ "$reconfigure_mode" == "true" ]]; then
-                        n8n_session_credential=""
-                    fi
-
-                    log INFO "Validating n8n API access..."
-                    if ! validate_n8n_api_access "$n8n_base_url" "$n8n_api_key" "$n8n_email" "$n8n_password" "$container" "$n8n_session_credential"; then
-                        log ERROR "❌ n8n API validation failed!"
-                        log ERROR "Authentication failed with all available methods."
-                        log ERROR "Cannot proceed with folder structure creation."
-                        log INFO "💡 Please verify:"
-                        log INFO "   1. n8n instance is running and accessible"
-                        log INFO "   2. Credentials (API key or stored credential) are correct"
-                        log INFO "   3. No authentication barriers blocking access"
-                        exit 1
-                    fi
-
-                    log SUCCESS "✅ n8n API configuration validated successfully!"
-                    log INFO "✅ Folder structure enabled with n8n API integration"
-                fi
-            fi
-
-            # Decide whether to prompt for encrypted credential exports
-            if [[ "$credentials" != "0" ]]; then
-                if [[ "$assume_defaults" == "true" ]]; then
-                    if [[ -z "$credentials_encrypted" ]]; then
-                        credentials_encrypted=true
-                        credentials_encrypted_source="defaults"
-                    fi
-                    log DEBUG "Defaults mode enabled - keeping credentials encrypted without prompting."
-                else
-                    local prompt_encryption=false
-                    if [[ "$reconfigure_mode" == "true" ]]; then
-                        prompt_encryption=true
-                    elif [[ "$credentials_encrypted_source" == "default" ]]; then
-                        prompt_encryption=true
-                    fi
-
-                    if [[ "$prompt_encryption" == true ]]; then
-                        local encryption_default_label="yes"
-                        if [[ "${credentials_encrypted:-true}" == "false" ]]; then
-                            encryption_default_label="no"
-                        fi
-
-                        printf "Export credentials encrypted by n8n (recommended)? (yes/no) [%s]: " "$encryption_default_label"
-                        local encryption_choice
-                        read -r encryption_choice
-                        encryption_choice=${encryption_choice:-$encryption_default_label}
-
-                        if [[ "$encryption_choice" == "yes" || "$encryption_choice" == "y" ]]; then
-                            credentials_encrypted=true
-                            credentials_encrypted_source="interactive"
-                        else
-                            # Warn user about decrypted exports
-                            log WARN "⚠️  Credentials will be exported in decrypted form. Keep the files extremely secure."
-                            if [[ "$credentials" == "2" ]]; then
-                                printf "Decrypted credentials would be stored in Git history. Continue? (yes/no) [no]: "
-                                local decrypted_confirm
-                                read -r decrypted_confirm
-                                decrypted_confirm=${decrypted_confirm:-no}
-                                if [[ "$decrypted_confirm" == "yes" || "$decrypted_confirm" == "y" ]]; then
-                                    credentials_encrypted=false
-                                    credentials_encrypted_source="interactive"
-                                    log WARN "⚠️  Proceeding with decrypted credentials for Git storage."
-                                else
-                                    credentials_encrypted=true
-                                    credentials_encrypted_source="interactive"
-                                    log INFO "Using encrypted credential export instead."
-                                fi
-                            else
-                                credentials_encrypted=false
-                                credentials_encrypted_source="interactive"
-                            fi
-                        fi
-                    fi
-                fi
+            log INFO "Selected: Workflows=($workflows) $(format_storage_value $workflows), Credentials=($credentials) $(format_storage_value $credentials), Environment=($environment) $(format_storage_value $environment)"
+        else
+            prompt_project_scope "$reconfigure_mode"
+            log INFO "Project scope: ${project_name:-Personal}"
+            if [[ -n "$n8n_path" ]]; then
+                log INFO "n8n path hint: $n8n_path"
             fi
         fi
 
@@ -768,22 +554,7 @@ main() {
         fi
 
         # Offer dry-run selection when value came from defaults or during reconfigure
-        if [[ "$dry_run_source" == "default" ]] || [[ "$reconfigure_mode" == "true" ]]; then
-            local dry_run_default_label="no"
-            if [[ "$dry_run" == "true" ]]; then
-                dry_run_default_label="yes"
-            fi
-            printf "Run in dry-run mode (no changes will be made)? (yes/no) [%s]: " "$dry_run_default_label"
-            local dry_run_choice
-            read -r dry_run_choice
-            dry_run_choice=${dry_run_choice:-$dry_run_default_label}
-            if [[ "$dry_run_choice" == "yes" || "$dry_run_choice" == "y" ]]; then
-                dry_run=true
-            else
-                dry_run=false
-            fi
-            dry_run_source="interactive"
-        fi
+        prompt_dry_run_choice "$reconfigure_mode"
 
         # Get GitHub config only if needed
         if [[ $needs_github == true ]]; then

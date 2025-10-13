@@ -121,7 +121,7 @@ Automated backup and restore tool for n8n Docker containers using GitHub.
 Reads configuration from local 'config' file, then ~/.config/n8n-manager/config if it exists.
 
 Options:
-  --action <action>       Action to perform: 'backup' or 'restore'.
+  --action <action>       Action to perform: 'backup', 'restore', or 'configure'.
   --container <id|name>   Target Docker container ID or name.
   --token <pat>           GitHub Personal Access Token (PAT).
   --repo <user/repo>      GitHub repository (e.g., 'myuser/n8n-backup').
@@ -246,19 +246,21 @@ select_action() {
     
     echo "1) Backup n8n - Use current configuration"
     echo "2) Restore n8n - Use current configuration" 
-    echo "3) Reconfigure - Reset and configure interactively"
-    echo "4) Quit"
+    echo "3) Configure config file - Create/update interactively"
+    echo "4) Interactive - Execute with specific configuration"
+    echo "5) Quit"
 
     local choice
     while true; do
-        printf "\nSelect an option (1-4): "
+        printf "\nSelect an option (1-5): "
         read -r choice
         case "$choice" in
             1) SELECTED_ACTION="backup"; return ;; 
             2) SELECTED_ACTION="restore"; return ;;
-            3) SELECTED_ACTION="reconfigure"; return ;;
-            4) log INFO "Exiting..."; exit 0 ;; 
-            *) log ERROR "Invalid option. Please select 1, 2, 3, or 4." ;; 
+            3) SELECTED_ACTION="configure"; return ;;
+            4) SELECTED_ACTION="reconfigure"; return ;;
+            5) log INFO "Exiting..."; exit 0 ;; 
+            *) log ERROR "Invalid option. Please select 1, 2, 3, 4, or 5." ;; 
         esac
     done
 }
@@ -445,6 +447,523 @@ get_github_config() {
     github_token="$local_token"
     github_repo="$local_repo"
     github_branch="$local_branch"
+}
+
+prompt_default_container() {
+    local current_default="${default_container:-${container:-}}"
+    printf "Default container name or ID [%s]: " "${current_default:-<none>}"
+    local container_input
+    read -r container_input
+    container_input=${container_input:-$current_default}
+    if [[ -n "$container_input" && "$container_input" != "<none>" ]]; then
+        default_container="$container_input"
+    fi
+}
+
+prompt_project_scope() {
+    local force_reprompt="${1:-false}"
+    local project_default="${project_name:-Personal}"
+    if [[ "$project_name_source" != "default" && "$force_reprompt" != "true" ]]; then
+        return
+    fi
+
+    printf "Project to manage [%s]: " "$project_default"
+    local project_input
+    read -r project_input
+    if [[ -n "$project_input" ]]; then
+        set_project_from_path "$project_input"
+        project_name_source="interactive"
+    fi
+
+    local current_hint="${n8n_path:-}"
+    if [[ -z "$current_hint" ]]; then
+        printf "Optional n8n folder path within project (leave blank for project root): "
+    else
+        printf "Optional n8n folder path within project [%s]: " "$current_hint"
+    fi
+    local path_input
+    read -r path_input
+    if [[ -n "$path_input" ]]; then
+        set_n8n_path_hint "$path_input" "interactive"
+    elif [[ "$force_reprompt" == "true" ]]; then
+        set_n8n_path_hint "$current_hint" "interactive"
+    fi
+}
+
+prompt_dated_backup_choice() {
+    local force_reprompt="${1:-false}"
+    if [[ "$action" != "backup" ]]; then
+        return
+    fi
+    if [[ "$dated_backups_source" != "default" && "$force_reprompt" != "true" ]]; then
+        return
+    fi
+    local default_label="no"
+    if [[ "$dated_backups" == "true" ]]; then
+        default_label="yes"
+    fi
+    printf "Create dated backups (timestamped directories)? (yes/no) [%s]: " "$default_label"
+    local choice
+    read -r choice
+    choice=${choice:-$default_label}
+    if [[ "$choice" =~ ^([Yy]es|[Yy])$ ]]; then
+        dated_backups=true
+    else
+        dated_backups=false
+    fi
+    dated_backups_source="interactive"
+}
+
+prompt_local_backup_settings() {
+    local force_reprompt="${1:-false}"
+    local has_local_storage=false
+    if [[ "$workflows" == "1" ]] || [[ "$credentials" == "1" ]] || [[ "$environment" == "1" ]]; then
+        has_local_storage=true
+    fi
+
+    if [[ "$has_local_storage" == true ]] && ([[ "$local_backup_path_source" == "default" ]] || [[ "$force_reprompt" == "true" ]]); then
+        printf "Local backup directory [%s]: " "$local_backup_path"
+        local backup_input
+        read -r backup_input
+        if [[ -n "$backup_input" ]]; then
+            if [[ "$backup_input" =~ ^~ ]]; then
+                backup_input="${backup_input/#\~/$HOME}"
+            fi
+            local_backup_path="$backup_input"
+            local_backup_path_source="interactive"
+        fi
+    fi
+
+    if [[ "$has_local_storage" == true ]] && ([[ "$local_rotation_limit_source" == "default" ]] || [[ "$force_reprompt" == "true" ]]); then
+        while true; do
+            printf "Local backup rotation limit [%s]: " "$local_rotation_limit"
+            local rotation_input
+            read -r rotation_input
+            rotation_input=${rotation_input:-$local_rotation_limit}
+            if [[ "$rotation_input" =~ ^(0|[0-9]+|unlimited)$ ]]; then
+                local_rotation_limit="$rotation_input"
+                local_rotation_limit_source="interactive"
+                break
+            fi
+            log ERROR "Invalid rotation value. Use 0, a positive number, or 'unlimited'."
+        done
+    fi
+}
+
+prompt_credentials_encryption() {
+    local force_reprompt="${1:-false}"
+    if [[ "$credentials" == "0" ]]; then
+        return
+    fi
+    if [[ "$assume_defaults" == "true" && "$force_reprompt" != "true" ]]; then
+        return
+    fi
+    if [[ "$credentials_encrypted_source" != "default" && "$force_reprompt" != "true" ]]; then
+        return
+    fi
+
+    local default_label="yes"
+    if [[ "$credentials_encrypted" == "false" ]]; then
+        default_label="no"
+    fi
+    printf "Export credentials encrypted by n8n (recommended)? (yes/no) [%s]: " "$default_label"
+    local choice
+    read -r choice
+    choice=${choice:-$default_label}
+    if [[ "$choice" =~ ^([Yy]es|[Yy])$ ]]; then
+        credentials_encrypted=true
+        credentials_encrypted_source="interactive"
+        return
+    fi
+
+    log WARN "⚠️  Credentials will be exported decrypted. Protect the files carefully."
+    if [[ "$credentials" == "2" ]]; then
+        printf "Decrypted credentials would be stored in Git history. Continue? (yes/no) [no]: "
+        local confirm
+        read -r confirm
+        confirm=${confirm:-no}
+        if [[ "$confirm" =~ ^([Yy]es|[Yy])$ ]]; then
+            credentials_encrypted=false
+            credentials_encrypted_source="interactive"
+        else
+            credentials_encrypted=true
+            credentials_encrypted_source="interactive"
+        fi
+    else
+        credentials_encrypted=false
+        credentials_encrypted_source="interactive"
+    fi
+}
+
+prompt_folder_structure_settings() {
+    local force_reprompt="${1:-false}"
+    local skip_validation="${2:-false}"
+
+    if [[ "$workflows" != "2" ]]; then
+        folder_structure=false
+        return
+    fi
+
+    if [[ "$folder_structure_source" != "default" && "$force_reprompt" != "true" ]]; then
+        return
+    fi
+
+    printf "Mirror n8n folder structure in Git? (yes/no) [no]: "
+    local choice
+    read -r choice
+    choice=${choice:-no}
+    if [[ "$choice" =~ ^([Yy]es|[Yy])$ ]]; then
+        folder_structure=true
+    else
+        folder_structure=false
+    fi
+    folder_structure_source="interactive"
+
+    if [[ "$folder_structure" != "true" ]]; then
+        return
+    fi
+
+    while [[ -z "$n8n_base_url" ]]; do
+        printf "n8n base URL (e.g., http://localhost:5678): "
+        read -r n8n_base_url
+        if [[ -z "$n8n_base_url" ]]; then
+            log ERROR "n8n base URL is required when folder structure is enabled."
+        fi
+    done
+
+    printf "n8n API key (leave blank to use stored credential): "
+    read -r -s n8n_api_key
+    echo
+    if [[ -z "$n8n_api_key" ]]; then
+        local default_cred_name="${n8n_session_credential:-N8N REST BACKUP}"
+        printf "n8n credential name for session auth [%s]: " "$default_cred_name"
+        read -r n8n_session_credential
+        n8n_session_credential=${n8n_session_credential:-$default_cred_name}
+    else
+        n8n_session_credential=""
+    fi
+
+    if [[ "$skip_validation" != "true" ]]; then
+        log INFO "Validating n8n API access..."
+        if ! validate_n8n_api_access "$n8n_base_url" "$n8n_api_key" "$n8n_email" "$n8n_password" "$container" "$n8n_session_credential"; then
+            log ERROR "❌ n8n API validation failed!"
+            log ERROR "Authentication failed with all available methods."
+            log ERROR "Cannot proceed with folder structure creation."
+            log INFO "💡 Please verify:"
+            log INFO "   1. n8n instance is running and accessible"
+            log INFO "   2. Credentials (API key or stored credential) are correct"
+            log INFO "   3. No authentication barriers blocking access"
+            exit 1
+        else
+            log SUCCESS "✅ n8n API configuration validated successfully!"
+            log INFO "✅ Folder structure enabled with n8n API integration"
+        fi
+    else
+        log INFO "Skipping n8n API validation (configuration wizard)."
+    fi
+}
+
+prompt_storage_modes() {
+    local force_reprompt="${1:-false}"
+    if [[ "$force_reprompt" == "true" || "$workflows_source" == "default" ]]; then
+        select_workflows_storage
+        workflows_source="interactive"
+    fi
+    if [[ "$force_reprompt" == "true" || "$credentials_source" == "default" ]]; then
+        select_credentials_storage
+        credentials_source="interactive"
+    fi
+    if [[ "$force_reprompt" == "true" || "$environment_source" == "default" ]]; then
+        select_environment_storage
+        environment_source="interactive"
+    fi
+}
+
+prompt_dry_run_choice() {
+    local force_reprompt="${1:-false}"
+    if [[ "$dry_run_source" != "default" && "$force_reprompt" != "true" ]]; then
+        return
+    fi
+    local default_label="no"
+    if [[ "$dry_run" == "true" ]]; then
+        default_label="yes"
+    fi
+    printf "Run in dry-run mode by default? (yes/no) [%s]: " "$default_label"
+    local choice
+    read -r choice
+    choice=${choice:-$default_label}
+    if [[ "$choice" =~ ^([Yy]es|[Yy])$ ]]; then
+        dry_run=true
+    else
+        dry_run=false
+    fi
+    dry_run_source="interactive"
+}
+
+collect_backup_preferences() {
+    local force_reprompt="${1:-false}"
+    local skip_validation="${2:-false}"
+
+    prompt_project_scope "$force_reprompt"
+    prompt_dated_backup_choice "$force_reprompt"
+    prompt_storage_modes "$force_reprompt"
+    prompt_local_backup_settings "$force_reprompt"
+    prompt_folder_structure_settings "$force_reprompt" "$skip_validation"
+    prompt_credentials_encryption "$force_reprompt"
+}
+
+expand_config_path() {
+    local raw="$1"
+    if [[ -z "$raw" ]]; then
+        printf '%s\n' ""
+        return
+    fi
+    if [[ "$raw" == ~* ]]; then
+        printf '%s\n' "${raw/#\~/$HOME}"
+    else
+        printf '%s\n' "$raw"
+    fi
+}
+
+escape_config_value() {
+    local value="$1"
+    printf '%s' "$value" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+write_config_file() {
+    local destination_path
+    destination_path="$(expand_config_path "$1")"
+
+    if [[ -z "$destination_path" ]]; then
+        log ERROR "No configuration destination provided."
+        return 1
+    fi
+
+    local target_dir
+    target_dir="$(dirname "$destination_path")"
+
+    if ! mkdir -p "$target_dir"; then
+        log ERROR "Failed to create config directory: $target_dir"
+        return 1
+    fi
+
+    local -a lines
+    lines+=("# Generated by n8n-manager configuration wizard on $(date -u +%Y-%m-%dT%H:%M:%SZ)")
+    lines+=("# Location: $destination_path")
+    lines+=("")
+
+    if [[ -n "$github_token" ]]; then
+        lines+=("GITHUB_TOKEN=\"$(escape_config_value "$github_token")\"")
+    fi
+    if [[ -n "$github_repo" ]]; then
+        lines+=("GITHUB_REPO=\"$(escape_config_value "$github_repo")\"")
+    fi
+    if [[ -n "$github_branch" ]]; then
+        lines+=("GITHUB_BRANCH=\"$(escape_config_value "$github_branch")\"")
+    fi
+    if [[ -n "$github_path" ]]; then
+        lines+=("GITHUB_PATH=\"$(escape_config_value "$github_path")\"")
+    fi
+
+    if [[ -n "$default_container" ]]; then
+        lines+=("DEFAULT_CONTAINER=\"$(escape_config_value "$default_container")\"")
+    fi
+
+    if [[ -n "$project_name" ]]; then
+        lines+=("N8N_PROJECT=\"$(escape_config_value "$project_name")\"")
+    fi
+    if [[ -n "$n8n_path" ]]; then
+        lines+=("N8N_PATH=\"$(escape_config_value "$n8n_path")\"")
+    fi
+
+    if [[ -n "$workflows" ]]; then
+        lines+=("WORKFLOWS=\"$workflows\"")
+    fi
+    if [[ -n "$credentials" ]]; then
+        lines+=("CREDENTIALS=\"$credentials\"")
+    fi
+    if [[ -n "$environment" ]]; then
+        lines+=("ENVIRONMENT=\"$environment\"")
+    fi
+
+    if [[ -n "$local_backup_path" ]]; then
+        lines+=("LOCAL_BACKUP_PATH=\"$(escape_config_value "$local_backup_path")\"")
+    fi
+    if [[ -n "$local_rotation_limit" ]]; then
+        lines+=("LOCAL_ROTATION_LIMIT=\"$(escape_config_value "$local_rotation_limit")\"")
+    fi
+
+    if [[ -n "$dated_backups" ]]; then
+        lines+=("DATED_BACKUPS=\"$dated_backups\"")
+    fi
+
+    if [[ "$credentials_encrypted" == "false" ]]; then
+        lines+=("DECRYPT_CREDENTIALS=\"true\"")
+    else
+        lines+=("DECRYPT_CREDENTIALS=\"false\"")
+    fi
+
+    if [[ -n "$folder_structure" ]]; then
+        lines+=("FOLDER_STRUCTURE=\"$folder_structure\"")
+    fi
+    if [[ "$folder_structure" == "true" ]]; then
+        lines+=("N8N_BASE_URL=\"$(escape_config_value "$n8n_base_url")\"")
+        if [[ -n "$n8n_api_key" ]]; then
+            lines+=("N8N_API_KEY=\"$(escape_config_value "$n8n_api_key")\"")
+        fi
+        if [[ -n "$n8n_session_credential" ]]; then
+            lines+=("N8N_LOGIN_CREDENTIAL_NAME=\"$(escape_config_value "$n8n_session_credential")\"")
+        fi
+    fi
+
+    if [[ -n "$dry_run" ]]; then
+        lines+=("DRY_RUN=\"$dry_run\"")
+    fi
+    if [[ -n "$verbose" ]]; then
+        lines+=("VERBOSE=\"$verbose\"")
+    fi
+
+    {
+        for line in "${lines[@]}"; do
+            printf '%s\n' "$line"
+        done
+    } > "$destination_path"
+
+    if ! chmod 600 "$destination_path" 2>/dev/null; then
+        log WARN "Could not set permissions on $destination_path. Please ensure it is protected manually."
+    fi
+
+    log SUCCESS "Configuration saved to $destination_path"
+    return 0
+}
+
+select_config_destination() {
+    local has_cli=false
+    local cli_path=""
+    if [[ -n "$config_file" ]]; then
+        cli_path="$(expand_config_path "$config_file")"
+        has_cli=true
+    fi
+
+    local default_option="2"
+    if [[ "$has_cli" == true ]]; then
+        default_option="3"
+    fi
+
+    while true; do
+        log HEADER "Choose configuration destination"
+        log INFO "1) Project config: $LOCAL_CONFIG_FILE"
+        log INFO "2) User config: $USER_CONFIG_FILE"
+        if [[ "$has_cli" == true ]]; then
+            log INFO "3) --config path: $cli_path"
+            log INFO "4) Enter a different custom path"
+        else
+            log INFO "3) Enter a custom path"
+        fi
+
+        printf "Select option [%s]: " "$default_option"
+        local selection
+        read -r selection
+        selection=${selection:-$default_option}
+
+        case "$selection" in
+            1)
+                CONFIG_WIZARD_TARGET="$LOCAL_CONFIG_FILE"
+                break
+                ;;
+            2)
+                CONFIG_WIZARD_TARGET="$USER_CONFIG_FILE"
+                break
+                ;;
+            3)
+                if [[ "$has_cli" == true ]]; then
+                    if [[ -z "$cli_path" ]]; then
+                        log ERROR "The --config path is empty; please choose another option."
+                    else
+                        CONFIG_WIZARD_TARGET="$cli_path"
+                        break
+                    fi
+                else
+                    printf "Enter full path to configuration file: "
+                    local custom_path
+                    read -r custom_path
+                    custom_path="$(expand_config_path "$custom_path")"
+                    if [[ -z "$custom_path" ]]; then
+                        log ERROR "Custom path cannot be empty."
+                    else
+                        CONFIG_WIZARD_TARGET="$custom_path"
+                        break
+                    fi
+                fi
+                ;;
+            4)
+                if [[ "$has_cli" == true ]]; then
+                    printf "Enter full path to configuration file: "
+                    local custom_path
+                    read -r custom_path
+                    custom_path="$(expand_config_path "$custom_path")"
+                    if [[ -z "$custom_path" ]]; then
+                        log ERROR "Custom path cannot be empty."
+                    else
+                        CONFIG_WIZARD_TARGET="$custom_path"
+                        break
+                    fi
+                else
+                    log ERROR "Invalid selection."
+                fi
+                ;;
+            *)
+                log ERROR "Invalid selection."
+                ;;
+        esac
+    done
+
+    log INFO "Configuration will be saved to: $CONFIG_WIZARD_TARGET"
+}
+
+run_configuration_wizard() {
+    log HEADER "n8n-manager configuration wizard"
+    select_config_destination
+    log INFO "This will create or update your configuration at $CONFIG_WIZARD_TARGET"
+
+    prompt_default_container
+
+    local wizard_force="true"
+    action="backup"
+    project_name_source="default"
+    workflows_source="default"
+    credentials_source="default"
+    environment_source="default"
+    dated_backups_source="default"
+    local_backup_path_source="${local_backup_path_source:-default}"
+    local_rotation_limit_source="${local_rotation_limit_source:-default}"
+    folder_structure_source="default"
+    credentials_encrypted_source="default"
+    dry_run_source="default"
+
+    collect_backup_preferences "$wizard_force" "true"
+    prompt_dry_run_choice "$wizard_force"
+
+    local needs_github=false
+    if [[ "$workflows" == "2" ]] || [[ "$credentials" == "2" ]] || [[ "$environment" == "2" ]]; then
+        needs_github=true
+    fi
+
+    if [[ "$needs_github" == true ]]; then
+        get_github_config "true"
+        local previous_action="$action"
+        action="backup"
+        prompt_github_path_prefix
+        action="$previous_action"
+    else
+        log INFO "GitHub settings omitted (local-only storage)."
+        github_token=""
+        github_repo=""
+        github_branch=""
+        github_path=""
+    fi
+
+    write_config_file "$CONFIG_WIZARD_TARGET"
 }
 
 # Select workflows backup mode (0=disabled, 1=local, 2=remote)
