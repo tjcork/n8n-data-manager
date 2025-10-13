@@ -22,7 +22,7 @@ This script provides both interactive and non-interactive modes, making it suita
     *   **Dated Backups (`--dated`):** Creates timestamped subdirectories (e.g., `backup_YYYY-MM-DD_HH-MM-SS/`) for each backup, preserving history.
 *   **Restore Options:**
     *   **Selective Restore:** Use `--credentials` to restore only credentials, or `--workflow` to restore only workflows. You can specify either or both flags to control exactly what gets restored.
-    *   **Project-Aware Restore:** Directory hints for projects are honored, and workflows without hints fall back to the configured default project (`--project` flag or `PROJECT` config entry).
+    *   **Project-Aware Restore:** Directory hints for projects are honored, and workflows without hints fall back to the configured default project (`--project` flag or `N8N_PROJECT` config entry).
 *   **Container Compatibility:**
     *   **Alpine Support:** Fully compatible with n8n containers based on Alpine Linux.
     *   **Ubuntu Support:** Works seamlessly with containers based on Ubuntu/Debian.
@@ -104,7 +104,7 @@ GITHUB_BRANCH="main"
 DEFAULT_CONTAINER="my-n8n-container"
 
 # Default project to target on restore when directories don't include an explicit hint (Optional)
-PROJECT="Team Automation"
+N8N_PROJECT="Personal"
 
 # Use Dated Backups by default (Optional, true/false, defaults to false)
 DATED_BACKUPS=true
@@ -123,7 +123,7 @@ LOG_FILE="/var/log/n8n-manager.log"
 
 Command-line arguments always override settings from the configuration file.
 
-When restoring workflows, `n8n-manager` first honors any explicit project hints in the backup directory structure (such as `projects/<slug>/`). If no hint is present, it falls back to the project specified by `--project` or the `PROJECT` value in your config file. If neither is provided, the Personal project is used.
+When restoring workflows, `n8n-manager` first honors any explicit project hints in the backup directory structure (such as `projects/<slug>/`). If no hint is present, it falls back to the project specified by `--project` or the `N8N_PROJECT` value in your config file. If neither is provided, the Personal project is used.
 
 ## 💡 Usage
 

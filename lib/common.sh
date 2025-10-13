@@ -35,6 +35,7 @@ git_commit_email=""
 
 project_name="${project_name:-Personal}"
 project_slug=""
+declare -a project_folder_prefix_segments=()
 
 github_path="${github_path:-}"
 
@@ -215,6 +216,45 @@ update_project_slug() {
     fi
     project_slug="$sanitized"
 }
+
+set_project_from_path() {
+    local raw_input="$1"
+    raw_input="$(printf '%s' "$raw_input" | tr -d '\r')"
+    raw_input="$(printf '%s' "$raw_input" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    if [[ -z "$raw_input" ]]; then
+        raw_input="Personal"
+    fi
+
+    local IFS='/'
+    local -a project_parts=()
+    read -r -a project_parts <<< "$raw_input"
+    if ((${#project_parts[@]} == 0)); then
+        project_parts=("Personal")
+    fi
+
+    local primary_part="${project_parts[0]}"
+    primary_part="$(printf '%s' "$primary_part" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    if [[ -z "$primary_part" ]]; then
+        primary_part="Personal"
+    fi
+
+    project_name="$primary_part"
+    update_project_slug
+
+    project_folder_prefix_segments=()
+    if ((${#project_parts[@]} > 1)); then
+        local idx
+        for ((idx=1; idx<${#project_parts[@]}; idx++)); do
+            local segment="${project_parts[$idx]}"
+            segment="$(printf '%s' "$segment" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+            if [[ -n "$segment" ]]; then
+                project_folder_prefix_segments+=("$segment")
+            fi
+        done
+    fi
+}
+
+set_project_from_path "$project_name"
 
 normalize_repo_subpath() {
     local raw_input="$1"
@@ -644,19 +684,6 @@ load_config() {
             fi
         fi
         
-        # Handle restore overwrite alias
-        if [[ -z "$restore_duplicate_strategy" && -n "${RESTORE_OVERWRITE:-}" ]]; then
-            local overwrite_cfg="$RESTORE_OVERWRITE"
-            overwrite_cfg=$(echo "$overwrite_cfg" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
-            if [[ "$overwrite_cfg" == "true" || "$overwrite_cfg" == "1" || "$overwrite_cfg" == "yes" || "$overwrite_cfg" == "on" ]]; then
-                restore_duplicate_strategy="overwrite"
-                restore_duplicate_strategy_source="config"
-            elif [[ "$overwrite_cfg" == "false" || "$overwrite_cfg" == "0" || "$overwrite_cfg" == "no" || "$overwrite_cfg" == "off" ]]; then
-                restore_duplicate_strategy="replace"
-                restore_duplicate_strategy_source="config"
-            fi
-        fi
-
         # Handle verbose boolean config
         if [[ -z "$verbose" && -n "${VERBOSE:-}" ]]; then
             local verbose_config="$VERBOSE"
@@ -672,24 +699,37 @@ load_config() {
             fi
         fi
 
-        if [[ -z "$restore_duplicate_strategy" && -n "${RESTORE_DUPLICATE_STRATEGY:-}" ]]; then
-            local duplicate_strategy_config="${RESTORE_DUPLICATE_STRATEGY,,}"
-            duplicate_strategy_config=$(echo "$duplicate_strategy_config" | tr -d '"\047' | xargs)
-            case "$duplicate_strategy_config" in
-                skip|overwrite|replace)
-                    restore_duplicate_strategy="$duplicate_strategy_config"
-                    restore_duplicate_strategy_source="config"
-                    ;;
-                ""|none)
-                    restore_duplicate_strategy="replace"
-                    restore_duplicate_strategy_source="config"
-                    ;;
-                *)
-                    log WARN "Invalid RESTORE_DUPLICATE_STRATEGY value '$RESTORE_DUPLICATE_STRATEGY'. Using default: replace"
-                    restore_duplicate_strategy="replace"
-                    restore_duplicate_strategy_source="default"
-                    ;;
-            esac
+        # Handle restore preserve ID toggle
+        if [[ -z "$restore_preserve_ids" && -n "${RESTORE_PRESERVE_ID:-}" ]]; then
+            local preserve_cfg="$RESTORE_PRESERVE_ID"
+            preserve_cfg=$(echo "$preserve_cfg" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
+            if [[ "$preserve_cfg" == "true" || "$preserve_cfg" == "1" || "$preserve_cfg" == "yes" || "$preserve_cfg" == "on" ]]; then
+                restore_preserve_ids=true
+                restore_preserve_ids_source="config"
+            elif [[ "$preserve_cfg" == "false" || "$preserve_cfg" == "0" || "$preserve_cfg" == "no" || "$preserve_cfg" == "off" ]]; then
+                restore_preserve_ids=false
+                restore_preserve_ids_source="config"
+            else
+                log WARN "Invalid RESTORE_PRESERVE_ID value in config: '$preserve_cfg'. Must be true/false. Using default: false"
+                restore_preserve_ids=false
+                restore_preserve_ids_source="default"
+            fi
+        fi
+
+        if [[ -z "$restore_no_overwrite" && -n "${RESTORE_NO_OVERWRITE:-}" ]]; then
+            local no_overwrite_cfg="$RESTORE_NO_OVERWRITE"
+            no_overwrite_cfg=$(echo "$no_overwrite_cfg" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
+            if [[ "$no_overwrite_cfg" == "true" || "$no_overwrite_cfg" == "1" || "$no_overwrite_cfg" == "yes" || "$no_overwrite_cfg" == "on" ]]; then
+                restore_no_overwrite=true
+                restore_no_overwrite_source="config"
+            elif [[ "$no_overwrite_cfg" == "false" || "$no_overwrite_cfg" == "0" || "$no_overwrite_cfg" == "no" || "$no_overwrite_cfg" == "off" ]]; then
+                restore_no_overwrite=false
+                restore_no_overwrite_source="config"
+            else
+                log WARN "Invalid RESTORE_NO_OVERWRITE value in config: '$no_overwrite_cfg'. Must be true/false. Using default: false"
+                restore_no_overwrite=false
+                restore_no_overwrite_source="default"
+            fi
         fi
         
         # Handle dry_run boolean config
@@ -786,16 +826,11 @@ load_config() {
             fi
         fi
 
-        if [[ -z "$project_name" && -n "${PROJECT:-}" ]]; then
-            local raw_project_name="$PROJECT"
-            raw_project_name="$(echo "$raw_project_name" | tr -d '\r' | xargs)"
-            if [[ -z "$raw_project_name" ]]; then
-                project_name="Personal"
-            else
-                project_name="$raw_project_name"
+        if [[ -n "${N8N_PROJECT:-}" ]]; then
+            if [[ -z "$project_name_source" || "$project_name_source" == "unset" || "$project_name_source" == "default" ]]; then
+                set_project_from_path "$N8N_PROJECT"
+                project_name_source="config"
             fi
-            project_name_source="config"
-            update_project_slug
         fi
         
         # === N8N API SETTINGS ===
@@ -881,11 +916,15 @@ load_config() {
     fi
 
     if [[ -z "$project_name" ]]; then
-        project_name="Personal"
+        set_project_from_path "Personal"
         if [[ "$project_name_source" == "unset" ]]; then
             project_name_source="default"
         fi
-        update_project_slug
+    else
+        # Ensure prefix segments reflect the resolved project value when not set via setter yet
+        if [[ -z "$project_name_source" || "$project_name_source" == "unset" || "$project_name_source" == "default" ]]; then
+            set_project_from_path "$project_name"
+        fi
     fi
 
     if [[ "$github_path_source" == "unset" ]]; then

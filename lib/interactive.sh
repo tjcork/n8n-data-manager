@@ -123,9 +123,8 @@ Options:
   --n8n-url <url>       n8n instance URL (e.g., 'http://localhost:5678').
   --n8n-api-key <key>   n8n API key for folder structure access.
     --n8n-cred <name>     n8n credential name providing Basic Auth for session login when API key is absent.
-    --overwrite           Shortcut for --duplicate-strategy overwrite.
-        --duplicate-strategy <skip|replace|overwrite>
-                                                                                                Duplicate workflow behavior during restore. Defaults to 'replace'.
+    --preserve            Force reuse of workflow IDs when restoring structured exports (default: false; otherwise IDs are reused only when safe).
+    --no-overwrite        Force new workflow IDs on import (clears IDs even if --preserve is set).
   --dry-run             Simulate the action without making any changes.
     --defaults            Assume defaults for any missing inputs (non-interactive automation).
   --verbose             Enable detailed debug logging.
@@ -181,10 +180,11 @@ Configuration Files (checked in order):
     # Local backup rotation: 0 (overwrite), number (keep N), "unlimited" (keep all)
     LOCAL_ROTATION_LIMIT="10"
 
-    # Duplicate workflow handling during restore: skip, replace (default), or overwrite (sync entire folder)
-    RESTORE_DUPLICATE_STRATEGY="replace"
-    # Or use a simple toggle for full folder sync:
-    # RESTORE_OVERWRITE=true
+    # Preserve workflow IDs on restore (true forces original IDs when possible; false lets n8n reuse IDs when safe)
+    RESTORE_PRESERVE_ID=false
+
+    # Force new workflow IDs on restore (true always clears incoming IDs before import)
+    RESTORE_NO_OVERWRITE=false
     
     # === n8n FOLDER STRUCTURE SETTINGS ===
     # Enable n8n folder structure mirroring in Git (requires n8n API access)

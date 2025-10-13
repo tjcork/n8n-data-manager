@@ -76,11 +76,11 @@ SESSION_COOKIES="$TEMP_HOME/session.cookies"
 : >"$SESSION_COOKIES"
 RESTORE_BASE="$TEMP_HOME/n8n-backup"
 mkdir -p \
-  "$RESTORE_BASE/Personal/Projects/Acme/Inbound" \
-  "$RESTORE_BASE/Personal/Projects/Acme/Outbound" \
-  "$RESTORE_BASE/Personal/Inbox"
+  "$RESTORE_BASE/Personal/Projects/Folder/Subfolder" \
+  "$RESTORE_BASE/Personal/Project1" \
+  "$RESTORE_BASE/Personal/Project2"
 
-cat <<'JSON' >"$RESTORE_BASE/Personal/Projects/Acme/Inbound/001_trigger.json"
+cat <<'JSON' >"$RESTORE_BASE/Personal/Projects/Folder/Subfolder/001_bad_id.json"
 {
   "id": "wf-1",
   "name": "Bad ID Workflow",
@@ -100,7 +100,7 @@ cat <<'JSON' >"$RESTORE_BASE/Personal/Projects/Acme/Inbound/001_trigger.json"
 }
 JSON
 
-cat <<'JSON' >"$RESTORE_BASE/Personal/Projects/Acme/Outbound/002_notifier.json"
+cat <<'JSON' >"$RESTORE_BASE/Personal/002_no_id.json"
 {
   "name": "No ID Workflow",
   "nodes": [
@@ -119,7 +119,7 @@ cat <<'JSON' >"$RESTORE_BASE/Personal/Projects/Acme/Outbound/002_notifier.json"
 }
 JSON
 
-cat <<'JSON' >"$RESTORE_BASE/Personal/Inbox/003_cleanup.json"
+cat <<'JSON' >"$RESTORE_BASE/Personal/Project1/003_correct.json"
 {
   "id": "12345678abcdefgh",
   "name": "Correct ID Workflow",
@@ -139,10 +139,10 @@ cat <<'JSON' >"$RESTORE_BASE/Personal/Inbox/003_cleanup.json"
 }
 JSON
 
-cat <<'JSON' >"$RESTORE_BASE/Personal/Inbox/004_extra.json"
+cat <<'JSON' >"$RESTORE_BASE/Personal/Project2/004_duplicate.json"
 {
-  "id": "87654321hgfedcba",
-  "name": "Additional Inbox Workflow",
+  "id": "12345678abcdefgh",
+  "name": "Duplicate ID Workflow",
   "nodes": [
     {
       "parameters": {},
@@ -160,10 +160,10 @@ cat <<'JSON' >"$RESTORE_BASE/Personal/Inbox/004_extra.json"
 JSON
 
 chmod 600 \
-  "$RESTORE_BASE"/Personal/Projects/Acme/Inbound/001_trigger.json \
-  "$RESTORE_BASE"/Personal/Projects/Acme/Outbound/002_notifier.json \
-  "$RESTORE_BASE"/Personal/Inbox/003_cleanup.json \
-  "$RESTORE_BASE"/Personal/Inbox/004_extra.json
+  "$RESTORE_BASE"/Personal/Projects/Folder/Subfolder/001_bad_id.json \
+  "$RESTORE_BASE"/Personal/002_no_id.json \
+  "$RESTORE_BASE"/Personal/Project1/003_correct.json \
+  "$RESTORE_BASE"/Personal/Project2/004_duplicate.json
 
 log "Creating n8n session user"
 docker exec -u node "$CONTAINER_NAME" \
@@ -200,9 +200,8 @@ N8N_BASE_URL="http://localhost:5679"
 N8N_EMAIL="$TEST_EMAIL"
 N8N_PASSWORD="$TEST_PASSWORD"
 N8N_LOGIN_CREDENTIAL_NAME="session-login"
-GITHUB_PATH_PREFIX="/"
+GITHUB_PATH="Personal/"
 CFG
-
 MANIFEST_PATH="$TEMP_HOME/manifest.json"
 RESTORE_LOG="$TEMP_HOME/restore.log"
 
@@ -216,7 +215,6 @@ if ! DOCKER_EXEC_USER="node" \
         --path "$RESTORE_BASE" \
         --workflows 1 \
         --credentials 0 \
-        --duplicate-strategy replace \
         --config "$TEMP_HOME/test-config.cfg" \
         --defaults \
         --verbose 2>&1 | tee "$RESTORE_LOG"; then
@@ -362,10 +360,10 @@ fi
 EXPECTED_FOLDERS_PATH="$TEMP_HOME/expected-folders.json"
 cat <<'JSON' >"$EXPECTED_FOLDERS_PATH"
 [
-  {"name":"Bad ID Workflow","path":["Personal","Projects","Acme","Inbound"]},
-  {"name":"No ID Workflow","path":["Personal","Projects","Acme","Outbound"]},
-  {"name":"Correct ID Workflow","path":["Personal","Inbox"]},
-  {"name":"Additional Inbox Workflow","path":["Personal","Inbox"]}
+  {"name":"Bad ID Workflow","path":["Projects","Folder","Subfolder"]},
+  {"name":"No ID Workflow","path":[]},
+  {"name":"Correct ID Workflow","path":["Project1"]},
+  {"name":"Duplicate ID Workflow","path":["Project2"]}
 ]
 JSON
 
@@ -412,10 +410,19 @@ FOLDER_VERIFICATION=$(jq -n \
         (workflow_parent_id($wf)) as $folderRef |
         (path_from_folder($folderRef; $map)) as $path |
         (workflow_project_name($wf)) as $projectName |
-        (if ($projectName // "") == "" then $path
-         elif (($path | length) > 0 and $path[0] == $projectName) then $path
-         else [$projectName] + $path end) as $fullPath |
-        if ($fullPath == $exp.path) then empty else {name: $exp.name, status: "path_mismatch", actual: $fullPath, expected: $exp.path} end
+    (if ($projectName // "") == "" then $path
+     elif (($path | length) > 0 and $path[0] == $projectName) then $path
+     else [$projectName] + $path end) as $fullPath |
+    (if (($projectName // "") | ascii_downcase) == "personal" then
+       if (($fullPath | length) > 0) and (($fullPath[0] // "" | ascii_downcase) == "personal") then
+         $fullPath[1:]
+       else
+         $fullPath
+       end
+     else
+       $fullPath
+     end) as $normalizedFullPath |
+    if ($normalizedFullPath == $exp.path) then empty else {name: $exp.name, status: "path_mismatch", actual: $normalizedFullPath, expected: $exp.path} end
       end
     ]
   ')
