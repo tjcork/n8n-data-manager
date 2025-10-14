@@ -96,9 +96,8 @@ sanitize_slug_value() {
     value="${value//$'\r'/}"
     value="${value//$'\n'/}"
     value="${value//$'\t'/}"
-    value="${value// /_}"
     value="${value//\//_}"
-    value="$(printf '%s' "$value" | sed 's/[^A-Za-z0-9._-]//g')"
+    value="$(printf '%s' "$value" | sed 's/[^A-Za-z0-9._ -]//g')"
     printf '%s' "$value"
 }
 
@@ -367,11 +366,11 @@ get_workflow_folder_mapping() {
         local session_workflows=""
 
         if ! session_projects=$(fetch_n8n_projects_session "$base_url"); then
-            cleanup_n8n_session
+            cleanup_n8n_session force
             return 1
         fi
         if ! session_workflows=$(fetch_workflows_with_folders_session "$base_url" ""); then
-            cleanup_n8n_session
+            cleanup_n8n_session force
             return 1
         fi
 
@@ -394,7 +393,7 @@ get_workflow_folder_mapping() {
     if [[ -z "$projects_response" || -z "$workflows_response" ]]; then
         log ERROR "Failed to retrieve workflow metadata from n8n"
         if $using_session; then
-            cleanup_n8n_session
+            cleanup_n8n_session force
         fi
         return 1
     fi
@@ -428,7 +427,7 @@ get_workflow_folder_mapping() {
         sample="$(printf '%s' "$projects_response" | tr '\n' ' ' | head -c 200)"
         log ERROR "Projects response is not valid JSON (sample: ${sample}...)"
         if $using_session; then
-            cleanup_n8n_session
+            cleanup_n8n_session force
         fi
         return 1
     fi
@@ -442,7 +441,7 @@ get_workflow_folder_mapping() {
         sample="$(printf '%s' "$workflows_response" | tr '\n' ' ' | head -c 200)"
         log ERROR "Workflows response is not valid JSON (sample: ${sample}...)"
         if $using_session; then
-            cleanup_n8n_session
+            cleanup_n8n_session force
         fi
         return 1
     fi
@@ -474,7 +473,7 @@ get_workflow_folder_mapping() {
         rm -f "$projects_tmp" "$workflows_tmp"
         trap - RETURN
         if $using_session; then
-            cleanup_n8n_session
+            cleanup_n8n_session force
         fi
         return 1
     fi
@@ -550,7 +549,7 @@ get_workflow_folder_mapping() {
         rm -f "$projects_tmp" "$workflows_tmp"
         trap - RETURN
         if $using_session; then
-            cleanup_n8n_session
+            cleanup_n8n_session force
         fi
         return 1
     fi
@@ -595,7 +594,7 @@ get_workflow_folder_mapping() {
         rm -f "$projects_tmp" "$workflows_tmp"
         trap - RETURN
         if $using_session; then
-            cleanup_n8n_session
+            cleanup_n8n_session force
         fi
         return 1
     fi
@@ -843,9 +842,21 @@ fetch_workflows_with_folders() {
 # Session-based Authentication Functions for REST API (/rest/* endpoints)
 # ============================================================================
 
-# Global variable to store session cookie file path
-N8N_SESSION_COOKIE_FILE="/tmp/n8n-session-cookies-$$"
+# Global variable to store session cookie state
+N8N_SESSION_COOKIE_FILE=""
+N8N_SESSION_COOKIE_INITIALIZED="false"
+N8N_SESSION_COOKIE_READY="false"
+N8N_SESSION_REUSE_ENABLED="true"
 N8N_API_AUTH_MODE=""
+
+ensure_n8n_session_cookie_file() {
+    if [[ "$N8N_SESSION_COOKIE_INITIALIZED" != "true" || -z "$N8N_SESSION_COOKIE_FILE" ]]; then
+        local cookie_path
+        cookie_path=$(mktemp -t n8n-session-cookies-XXXXXXXX)
+        N8N_SESSION_COOKIE_FILE="$cookie_path"
+        N8N_SESSION_COOKIE_INITIALIZED="true"
+    fi
+}
 
 # Authenticate with n8n and get session cookie for REST API endpoints
 authenticate_n8n_session() {
@@ -856,6 +867,18 @@ authenticate_n8n_session() {
     
     # Clean up URL
     base_url="${base_url%/}"
+
+    ensure_n8n_session_cookie_file
+
+    if [[ "$N8N_SESSION_COOKIE_READY" == "true" && -s "$N8N_SESSION_COOKIE_FILE" ]]; then
+        if [[ "$verbose" == "true" ]]; then
+            log DEBUG "Reusing existing n8n session cookie at $N8N_SESSION_COOKIE_FILE"
+        fi
+        return 0
+    fi
+
+    : >"$N8N_SESSION_COOKIE_FILE"
+    N8N_SESSION_COOKIE_READY="false"
     
     local attempt=1
     local auth_response
@@ -899,24 +922,28 @@ authenticate_n8n_session() {
         if [[ "$http_status" == "200" ]]; then
             log SUCCESS "Successfully authenticated with n8n session!" >&2
             log DEBUG "Session cookie stored at $N8N_SESSION_COOKIE_FILE"
-            
+            N8N_SESSION_COOKIE_READY="true"
             return 0
         elif [[ "$http_status" == "401" ]]; then
             log ERROR "Invalid credentials (HTTP 401) - attempt $attempt/$max_attempts"
             if [[ $attempt -eq $max_attempts ]]; then
                 log ERROR "Max login attempts reached. Please verify your credentials."
+                : >"$N8N_SESSION_COOKIE_FILE"
                 return 1
             fi
         elif [[ "$http_status" == "403" ]]; then
             log ERROR "Access forbidden (HTTP 403) - account may be locked or disabled"
+            : >"$N8N_SESSION_COOKIE_FILE"
             return 1
         elif [[ "$http_status" == "429" ]]; then
             log ERROR "Too many requests (HTTP 429) - please wait before trying again"
+            : >"$N8N_SESSION_COOKIE_FILE"
             return 1
         else
             log ERROR "Login failed with HTTP $http_status (attempt $attempt/$max_attempts)"
             if [[ $attempt -eq $max_attempts ]]; then
                 log ERROR "Max attempts reached. Server may be experiencing issues."
+                : >"$N8N_SESSION_COOKIE_FILE"
                 return 1
             fi
         fi
@@ -1066,10 +1093,34 @@ test_n8n_session_auth() {
 
 # Cleanup session cookie file
 cleanup_n8n_session() {
-    if [[ -f "$N8N_SESSION_COOKIE_FILE" ]]; then
-        rm -f "$N8N_SESSION_COOKIE_FILE"
-        log DEBUG "Cleaned up session cookie file"
+    local mode="${1:-auto}"
+
+    if [[ "$mode" == "force" ]]; then
+        if [[ -n "$N8N_SESSION_COOKIE_FILE" && -f "$N8N_SESSION_COOKIE_FILE" ]]; then
+            rm -f "$N8N_SESSION_COOKIE_FILE"
+            if [[ "$verbose" == "true" ]]; then
+                log DEBUG "Cleaned up session cookie file"
+            fi
+        fi
+        N8N_SESSION_COOKIE_FILE=""
+        N8N_SESSION_COOKIE_INITIALIZED="false"
+        N8N_SESSION_COOKIE_READY="false"
+        return 0
     fi
+
+    if [[ "$N8N_SESSION_REUSE_ENABLED" != "true" ]]; then
+        if [[ -n "$N8N_SESSION_COOKIE_FILE" && -f "$N8N_SESSION_COOKIE_FILE" ]]; then
+            rm -f "$N8N_SESSION_COOKIE_FILE"
+            if [[ "$verbose" == "true" ]]; then
+                log DEBUG "Cleaned up session cookie file"
+            fi
+        fi
+        N8N_SESSION_COOKIE_FILE=""
+        N8N_SESSION_COOKIE_INITIALIZED="false"
+        N8N_SESSION_COOKIE_READY="false"
+    fi
+
+    return 0
 }
 
 prepare_n8n_api_auth() {
@@ -1081,7 +1132,7 @@ prepare_n8n_api_auth() {
     fi
 
     if [[ "$N8N_API_AUTH_MODE" == "session" ]]; then
-        if [[ -f "$N8N_SESSION_COOKIE_FILE" ]]; then
+        if [[ "$N8N_SESSION_COOKIE_READY" == "true" && -f "$N8N_SESSION_COOKIE_FILE" ]]; then
             if [[ "$verbose" == "true" ]]; then
                 log DEBUG "Reusing existing n8n session credentials."
             fi
@@ -1121,8 +1172,8 @@ prepare_n8n_api_auth() {
 }
 
 finalize_n8n_api_auth() {
-    if [[ "$N8N_API_AUTH_MODE" == "session" ]]; then
-        cleanup_n8n_session
+    if [[ "$N8N_API_AUTH_MODE" == "session" && "$verbose" == "true" ]]; then
+        log DEBUG "Leaving n8n session authentication active for reuse."
     fi
     N8N_API_AUTH_MODE=""
 }

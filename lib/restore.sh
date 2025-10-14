@@ -459,15 +459,15 @@ normalize_manifest_lookup_key() {
 
     local normalized
     normalized="${raw_input//\\/\/}"
-    normalized=$(printf '%s' "$normalized" | sed 's/[[:space:]]\+/ /g; s/^ *//; s/ *$//')
-    normalized=$(printf '%s' "$normalized" | sed 's:/\+:/:g')
+    normalized=$(printf '%s' "$normalized" | sed 's/^[[:space:]]\+//; s/[[:space:]]\+$//')
+    normalized=$(printf '%s' "$normalized" | sed 's:[[:space:]]*/[[:space:]]*:/:g')
+    normalized=$(printf '%s' "$normalized" | sed 's:/\{2,\}:/:g')
     normalized="${normalized#/}"
     normalized="${normalized%/}"
     if [[ -z "$normalized" ]]; then
         printf ''
         return 0
     fi
-    normalized=$(printf '%s' "$normalized" | tr '[:upper:]' '[:lower:]')
     printf '%s' "$normalized"
     return 0
 }
@@ -3055,76 +3055,66 @@ JQ
                     fi
                 fi
 
-                local canonical_path_norm
-                canonical_path_norm=$(normalize_manifest_lookup_key "$canonical_storage_path")
-                local candidate_norm=""
+                local candidate_folder_display=""
+                candidate_folder_display=$(printf '%s' "$name_match_json" | jq -r '.workflow.folders | (map(.name) | join("/")) // empty' 2>/dev/null)
+                local candidate_folder_path=""
                 if [[ -n "$name_match_candidate_path" ]]; then
-                    candidate_norm=$(normalize_manifest_lookup_key "$name_match_candidate_path")
+                    candidate_folder_path="${name_match_candidate_path%/*}"
+                    if [[ "$candidate_folder_path" == "$name_match_candidate_path" ]]; then
+                        candidate_folder_path=""
+                    fi
+                fi
+                candidate_folder_path="${candidate_folder_path#/}"
+                candidate_folder_path="${candidate_folder_path%/}"
+
+                local expected_folder_display="$expected_folder_display_path"
+                if [[ -z "$expected_folder_display" ]]; then
+                    expected_folder_display="$expected_display_path"
+                fi
+                local expected_folder_path="$canonical_storage_path"
+
+                local candidate_storage_norm=""
+                local expected_storage_norm=""
+                if [[ -n "$candidate_folder_path" ]]; then
+                    candidate_storage_norm=$(normalize_manifest_lookup_key "$candidate_folder_path")
+                fi
+                if [[ -n "$expected_folder_path" ]]; then
+                    expected_storage_norm=$(normalize_manifest_lookup_key "$expected_folder_path")
                 fi
 
-                declare -A expected_norms_lookup=()
-                local expected_norm_value=""
-
-                expected_norm_value="$canonical_path_norm"
-                if [[ -n "$expected_norm_value" ]]; then
-                    expected_norms_lookup["$expected_norm_value"]=1
+                local candidate_path_norm=""
+                if [[ -n "$name_match_candidate_path" ]]; then
+                    candidate_path_norm=$(normalize_manifest_lookup_key "$name_match_candidate_path")
+                fi
+                local expected_path_norm=""
+                if [[ -n "$repo_entry_path" ]]; then
+                    expected_path_norm=$(normalize_manifest_lookup_key "$repo_entry_path")
                 fi
 
-                expected_norm_value=$(normalize_manifest_lookup_key "$relative_dir_without_prefix")
-                if [[ -n "$expected_norm_value" ]]; then
-                    expected_norms_lookup["$expected_norm_value"]=1
-                fi
-
-                expected_norm_value=$(normalize_manifest_lookup_key "$expected_folder_slug_path")
-                if [[ -n "$expected_norm_value" ]]; then
-                    expected_norms_lookup["$expected_norm_value"]=1
-                fi
-
-                expected_norm_value=$(normalize_manifest_lookup_key "$expected_project_and_slug_path")
-                if [[ -n "$expected_norm_value" ]]; then
-                    expected_norms_lookup["$expected_norm_value"]=1
-                fi
-
-                expected_norm_value=$(normalize_manifest_lookup_key "$expected_display_path")
-                if [[ -n "$expected_norm_value" ]]; then
-                    expected_norms_lookup["$expected_norm_value"]=1
-                fi
-
-                expected_norm_value=$(normalize_manifest_lookup_key "$expected_folder_display_path")
-                if [[ -n "$expected_norm_value" ]]; then
-                    expected_norms_lookup["$expected_norm_value"]=1
-                fi
-
-                expected_norm_value=$(normalize_manifest_lookup_key "$expected_project_display")
-                if [[ -n "$expected_norm_value" ]]; then
-                    expected_norms_lookup["$expected_norm_value"]=1
-                fi
+                local candidate_display_norm
+                candidate_display_norm=$(normalize_manifest_lookup_key "$candidate_folder_display")
+                local expected_display_norm
+                expected_display_norm=$(normalize_manifest_lookup_key "$expected_folder_display")
 
                 local candidate_matches_expected="false"
-                if [[ -n "$candidate_norm" ]]; then
-                    if [[ -n "${expected_norms_lookup[$candidate_norm]+set}" ]]; then
+                if [[ -n "$candidate_path_norm" && -n "$expected_path_norm" && "$candidate_path_norm" == "$expected_path_norm" ]]; then
+                    candidate_matches_expected="true"
+                elif [[ -n "$candidate_storage_norm" && -n "$expected_storage_norm" ]]; then
+                    if [[ "$candidate_storage_norm" == "$expected_storage_norm" ]]; then
                         candidate_matches_expected="true"
                     fi
-                else
-                    if [[ ${#expected_folder_slugs[@]} -eq 0 && -z "$relative_dir_without_prefix" ]]; then
+                elif [[ -n "$candidate_display_norm" && -n "$expected_display_norm" ]]; then
+                    if [[ "$candidate_display_norm" == "$expected_display_norm" ]]; then
                         candidate_matches_expected="true"
                     fi
+                elif [[ -z "$candidate_storage_norm" && -z "$expected_storage_norm" && -z "$candidate_display_norm" && -z "$expected_display_norm" ]]; then
+                    candidate_matches_expected="true"
                 fi
 
                 if [[ "$candidate_matches_expected" == "true" ]]; then
                     name_match_allowed="true"
                 elif [[ "$verbose" == "true" ]]; then
-                    local -a expected_norm_keys=()
-                    local norm_key
-                    for norm_key in "${!expected_norms_lookup[@]}"; do
-                        expected_norm_keys+=("$norm_key")
-                    done
-                    local expected_norm_debug=""
-                    if ((${#expected_norm_keys[@]} > 0)); then
-                        expected_norm_debug=$(printf '%s,' "${expected_norm_keys[@]}")
-                        expected_norm_debug="${expected_norm_debug%,}"
-                    fi
-                    log DEBUG "Skipping name-based duplicate alignment for '${staged_name:-$dest_filename}' due to folder mismatch (candidate='${candidate_norm:-<empty>}', expected='${expected_norm_debug:-<empty>}')."
+                    log DEBUG "Skipping name-based duplicate alignment for '${staged_name:-$dest_filename}' due to folder mismatch (candidate='${candidate_folder_display:-<empty>}', expected='${expected_folder_display:-<empty>}')."
                 fi
 
                 if [[ "$name_match_allowed" == "true" ]]; then
