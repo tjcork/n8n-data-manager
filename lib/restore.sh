@@ -457,18 +457,114 @@ normalize_manifest_lookup_key() {
         return 0
     fi
 
-    local normalized
-    normalized="${raw_input//\\/\/}"
+    local normalized="$raw_input"
+    normalized="${normalized//$'\r'/}"
+    normalized="${normalized//$'\n'/}"
+    normalized="${normalized//$'\t'/}"
+    normalized="${normalized//\\/\/}"
+    normalized=$(printf '%s' "$normalized" | tr -s ' ')
     normalized=$(printf '%s' "$normalized" | sed 's/^[[:space:]]\+//; s/[[:space:]]\+$//')
     normalized=$(printf '%s' "$normalized" | sed 's:[[:space:]]*/[[:space:]]*:/:g')
     normalized=$(printf '%s' "$normalized" | sed 's:/\{2,\}:/:g')
+    normalized=$(printf '%s' "$normalized" | tr '[:upper:]' '[:lower:]')
     normalized="${normalized#/}"
     normalized="${normalized%/}"
+
     if [[ -z "$normalized" ]]; then
         printf ''
         return 0
     fi
+
     printf '%s' "$normalized"
+    return 0
+}
+
+manifest_lookup_path_matches() {
+    local candidate="${1:-}"
+    local expected="${2:-}"
+    local project_prefix="${3:-}"
+
+    if [[ -z "$candidate" || -z "$expected" ]]; then
+        return 1
+    fi
+
+    if [[ "$candidate" == "$expected" ]]; then
+        return 0
+    fi
+
+    local -a prefixes=()
+    if [[ -n "$project_prefix" ]]; then
+        prefixes+=("$project_prefix")
+    fi
+    if [[ -z "$project_prefix" || "$project_prefix" != "personal" ]]; then
+        prefixes+=("personal")
+    fi
+
+    local prefix
+    for prefix in "${prefixes[@]}"; do
+        [[ -z "$prefix" ]] && continue
+
+        local candidate_prefix="${candidate%%/*}"
+        if [[ "$candidate_prefix" == "$prefix" && "$candidate" != "$prefix" ]]; then
+            local candidate_without_prefix="${candidate#*/}"
+            if [[ "$candidate_without_prefix" == "$expected" ]]; then
+                return 0
+            fi
+        fi
+
+        local expected_prefix="${expected%%/*}"
+        if [[ "$expected_prefix" == "$prefix" && "$expected" != "$prefix" ]]; then
+            local expected_without_prefix="${expected#*/}"
+            if [[ "$expected_without_prefix" == "$candidate" ]]; then
+                return 0
+            fi
+        fi
+    done
+
+    return 1
+}
+
+normalize_manifest_id_key() {
+    local raw_input="${1:-}"
+    if [[ -z "$raw_input" ]]; then
+        printf ''
+        return 0
+    fi
+
+    local normalized="$raw_input"
+    normalized="${normalized//$'\r'/}"
+    normalized="${normalized//$'\n'/}"
+    normalized="${normalized//$'\t'/}"
+    normalized=$(printf '%s' "$normalized" | tr -d ' ')
+    normalized=$(printf '%s' "$normalized" | tr '[:upper:]' '[:lower:]')
+
+    if [[ -z "$normalized" ]]; then
+        printf ''
+        return 0
+    fi
+
+    printf '%s' "$normalized"
+    return 0
+}
+
+build_manifest_name_key() {
+    local folder_path="${1:-}"
+    local workflow_name="${2:-}"
+
+    local name_norm
+    name_norm=$(normalize_manifest_lookup_key "$workflow_name")
+    if [[ -z "$name_norm" ]]; then
+        printf ''
+        return 0
+    fi
+
+    local folder_norm
+    folder_norm=$(normalize_manifest_lookup_key "$folder_path")
+    if [[ -n "$folder_norm" ]]; then
+        printf '%s|%s' "$folder_norm" "$name_norm"
+    else
+        printf '%s' "$name_norm"
+    fi
     return 0
 }
 
@@ -725,21 +821,15 @@ collect_directory_structure_entries() {
     local processed=0
 
     local manifest_indexed=false
-    declare -A manifest_storage_entries=()
-    declare -A manifest_storage_scores=()
-    declare -A manifest_storage_updates=()
-    declare -A manifest_relpath_entries=()
-    declare -A manifest_relpath_scores=()
-    declare -A manifest_relpath_updates=()
-    declare -A manifest_reldir_entries=()
-    declare -A manifest_reldir_scores=()
-    declare -A manifest_reldir_updates=()
-    declare -A manifest_filename_entries=()
-    declare -A manifest_filename_scores=()
-    declare -A manifest_filename_updates=()
-    declare -A manifest_canonical_entries=()
-    declare -A manifest_canonical_scores=()
-    declare -A manifest_canonical_updates=()
+    declare -A manifest_path_entries=()
+    declare -A manifest_path_scores=()
+    declare -A manifest_path_updates=()
+    declare -A manifest_id_entries=()
+    declare -A manifest_id_scores=()
+    declare -A manifest_id_updates=()
+    declare -A manifest_folder_name_entries=()
+    declare -A manifest_folder_name_scores=()
+    declare -A manifest_folder_name_updates=()
 
     if [[ -n "$manifest_path" && -f "$manifest_path" ]]; then
         local manifest_index_file
@@ -764,21 +854,6 @@ collect_directory_structure_entries() {
                 | gsub("^/"; "")
                 | gsub("/$"; "");
 
-            def dir_norm(v):
-                (v // "")
-                | gsub("\\\\"; "/")
-                | gsub("^/+"; "")
-                | gsub("/+"; "/")
-                | gsub("/$"; "")
-                | split("/") as $parts
-                | if ($parts | length) <= 1 then "" else ($parts[0:-1] | join("/")) end
-                | gsub("[[:space:]]+"; " ")
-                | ascii_downcase
-                | gsub("^ "; "")
-                | gsub(" $"; "")
-                | gsub("^/+"; "")
-                | gsub("/$"; "");
-
             def canonical(storage; filename):
                 if (storage // "" | length) > 0 and (filename // "" | length) > 0 then
                     norm((storage // "") + "/" + (filename // ""))
@@ -786,14 +861,39 @@ collect_directory_structure_entries() {
                     norm(filename)
                 else "" end;
 
+            def name_key(storage; name):
+                if (name // "" | length) == 0 then ""
+                else
+                    norm(name) as $n |
+                    if ($n | length) == 0 then ""
+                    else
+                        norm(storage) as $s |
+                        if ($s | length) > 0 then $s + "|" + $n else $n end
+                    end
+                end;
+
+            def id_norm(v):
+                (v // "")
+                | gsub("[[:space:]]+"; "")
+                | ascii_downcase
+                | select((. | length) > 0);
+
+            def id_list(entry):
+                [
+                    entry.actualImportedId,
+                    entry.id,
+                    entry.existingWorkflowId,
+                    entry.originalWorkflowId
+                ]
+                | map(id_norm(.))
+                | unique;
+
             ($manifest[0] // [])
             | map(
                 . + {
-                    _normalizedStorage: norm(.storagePath),
-                    _normalizedRelative: norm(.relativePath),
-                    _normalizedRelativeDir: dir_norm(.relativePath),
-                    _normalizedFilename: norm(.filename),
-                    _normalizedCanonical: canonical(.storagePath; .filename),
+                    _normalizedPath: canonical(.storagePath; .filename),
+                    _normalizedNameKey: name_key(.storagePath; .name),
+                    _normalizedIds: id_list(.),
                     _score: (
                         if (.actualImportedId // "" | length) > 0 then 400
                         elif (.id // "" | length) > 0 then 300
@@ -816,34 +916,30 @@ JQ
                 entry_score=$(printf '%s' "$manifest_line" | jq -r '._score // 0' 2>/dev/null || printf '0')
                 local entry_updated
                 entry_updated=$(printf '%s' "$manifest_line" | jq -r '._updatedAt // empty' 2>/dev/null)
-                local storage_key
-                storage_key=$(printf '%s' "$manifest_line" | jq -r '._normalizedStorage // empty' 2>/dev/null)
-                local relative_key
-                relative_key=$(printf '%s' "$manifest_line" | jq -r '._normalizedRelative // empty' 2>/dev/null)
-                local relative_dir_key
-                relative_dir_key=$(printf '%s' "$manifest_line" | jq -r '._normalizedRelativeDir // empty' 2>/dev/null)
-                local filename_key
-                filename_key=$(printf '%s' "$manifest_line" | jq -r '._normalizedFilename // empty' 2>/dev/null)
-                local canonical_key
-                canonical_key=$(printf '%s' "$manifest_line" | jq -r '._normalizedCanonical // empty' 2>/dev/null)
+                local path_key
+                path_key=$(printf '%s' "$manifest_line" | jq -r '._normalizedPath // empty' 2>/dev/null)
+                local name_key
+                name_key=$(printf '%s' "$manifest_line" | jq -r '._normalizedNameKey // empty' 2>/dev/null)
 
                 local payload
-                payload=$(printf '%s' "$manifest_line" | jq -c 'del(._normalizedStorage, ._normalizedRelative, ._normalizedRelativeDir, ._normalizedFilename, ._normalizedCanonical, ._score, ._updatedAt)' 2>/dev/null)
+                payload=$(printf '%s' "$manifest_line" | jq -c 'del(._normalizedPath, ._normalizedNameKey, ._normalizedIds, ._score, ._updatedAt)' 2>/dev/null)
                 if [[ -z "$payload" ]]; then
                     payload="$manifest_line"
                 fi
 
-                assign_manifest_lookup_entry manifest_storage_entries manifest_storage_scores manifest_storage_updates "$storage_key" "$entry_score" "$entry_updated" "$payload"
-                assign_manifest_lookup_entry manifest_relpath_entries manifest_relpath_scores manifest_relpath_updates "$relative_key" "$entry_score" "$entry_updated" "$payload"
-                assign_manifest_lookup_entry manifest_reldir_entries manifest_reldir_scores manifest_reldir_updates "$relative_dir_key" "$entry_score" "$entry_updated" "$payload"
-                assign_manifest_lookup_entry manifest_filename_entries manifest_filename_scores manifest_filename_updates "$filename_key" "$entry_score" "$entry_updated" "$payload"
-                assign_manifest_lookup_entry manifest_canonical_entries manifest_canonical_scores manifest_canonical_updates "$canonical_key" "$entry_score" "$entry_updated" "$payload"
+                assign_manifest_lookup_entry manifest_path_entries manifest_path_scores manifest_path_updates "$path_key" "$entry_score" "$entry_updated" "$payload"
+                assign_manifest_lookup_entry manifest_folder_name_entries manifest_folder_name_scores manifest_folder_name_updates "$name_key" "$entry_score" "$entry_updated" "$payload"
+
+                while IFS= read -r id_key; do
+                    [[ -z "$id_key" ]] && continue
+                    assign_manifest_lookup_entry manifest_id_entries manifest_id_scores manifest_id_updates "$id_key" "$entry_score" "$entry_updated" "$payload"
+                done < <(printf '%s' "$manifest_line" | jq -r '._normalizedIds[]?' 2>/dev/null)
 
                 manifest_indexed=true
             done < "$manifest_index_file"
 
             if [[ "$verbose" == "true" ]]; then
-                log DEBUG "Indexed staged manifest entries for folder lookup (storage=${#manifest_storage_entries[@]}, rel=${#manifest_relpath_entries[@]}, canonical=${#manifest_canonical_entries[@]})"
+                log DEBUG "Indexed staged manifest entries for folder lookup (path=${#manifest_path_entries[@]}, id=${#manifest_id_entries[@]}, folder-name=${#manifest_folder_name_entries[@]})"
             fi
         else
             log WARN "Unable to index staged workflow manifest for folder mapping."
@@ -909,63 +1005,55 @@ JQ
         local manifest_note=""
         local manifest_entry_source=""
 
+        local workflow_id_from_file=""
+        local workflow_name_from_file=""
+        local workflow_metadata=""
+        if workflow_metadata=$(jq -c '{id: (.id // empty), name: (.name // empty)}' "$workflow_file" 2>/dev/null); then
+            workflow_id_from_file=$(printf '%s' "$workflow_metadata" | jq -r '.id // empty' 2>/dev/null)
+            workflow_name_from_file=$(printf '%s' "$workflow_metadata" | jq -r '.name // empty' 2>/dev/null)
+        fi
+
         if $manifest_indexed; then
-            local storage_norm
-            storage_norm=$(normalize_manifest_lookup_key "$storage_path")
-            local rel_file_norm
-            rel_file_norm=$(normalize_manifest_lookup_key "$canonical_relative_path")
-            local rel_dir_norm
-            rel_dir_norm=$(normalize_manifest_lookup_key "$relative_dir_without_prefix")
-            local filename_norm
-            filename_norm=$(normalize_manifest_lookup_key "$filename")
-            local canonical_norm
-            canonical_norm=$(normalize_manifest_lookup_key "${storage_path}/${filename}")
+            local manifest_path_candidate="$filename"
+            if [[ -n "$storage_path" ]]; then
+                manifest_path_candidate="${storage_path%/}/$filename"
+            fi
+            local path_norm
+            path_norm=$(normalize_manifest_lookup_key "$manifest_path_candidate")
+            local id_norm
+            id_norm=$(normalize_manifest_id_key "$workflow_id_from_file")
+            local name_norm
+            name_norm=$(build_manifest_name_key "$storage_path" "$workflow_name_from_file")
 
             if [[ "$verbose" == "true" ]]; then
-                local storage_hit="no"
-                local rel_file_hit="no"
-                local canon_hit="no"
-                local rel_dir_hit="no"
-                local filename_hit="no"
+                local path_hit="no"
+                local id_hit="no"
+                local folder_name_hit="no"
 
-                if [[ -n "$storage_norm" && -n "${manifest_storage_entries[$storage_norm]+set}" ]]; then
-                    storage_hit="yes"
+                if [[ -n "$path_norm" && -n "${manifest_path_entries[$path_norm]+set}" ]]; then
+                    path_hit="yes"
                 fi
-                if [[ -n "$rel_file_norm" && -n "${manifest_relpath_entries[$rel_file_norm]+set}" ]]; then
-                    rel_file_hit="yes"
+                if [[ -n "$id_norm" && -n "${manifest_id_entries[$id_norm]+set}" ]]; then
+                    id_hit="yes"
                 fi
-                if [[ -n "$canonical_norm" && -n "${manifest_canonical_entries[$canonical_norm]+set}" ]]; then
-                    canon_hit="yes"
-                fi
-                if [[ -n "$rel_dir_norm" && -n "${manifest_reldir_entries[$rel_dir_norm]+set}" ]]; then
-                    rel_dir_hit="yes"
-                fi
-                if [[ -n "$filename_norm" && -n "${manifest_filename_entries[$filename_norm]+set}" ]]; then
-                    filename_hit="yes"
+                if [[ -n "$name_norm" && -n "${manifest_folder_name_entries[$name_norm]+set}" ]]; then
+                    folder_name_hit="yes"
                 fi
 
-                log DEBUG "Manifest lookup keys for '$workflow_file': storage='${storage_norm:-<empty>}' (hit=$storage_hit), relative='${rel_file_norm:-<empty>}' (hit=$rel_file_hit), canonical='${canonical_norm:-<empty>}' (hit=$canon_hit), relDir='${rel_dir_norm:-<empty>}' (hit=$rel_dir_hit), filename='${filename_norm:-<empty>}' (hit=$filename_hit)"
+                log DEBUG "Manifest lookup keys for '$workflow_file': path='${path_norm:-<empty>}' (hit=$path_hit), id='${id_norm:-<empty>}' (hit=$id_hit), folderName='${name_norm:-<empty>}' (hit=$folder_name_hit)"
             fi
 
-            if [[ -n "$canonical_norm" && -n "${manifest_canonical_entries[$canonical_norm]+set}" ]]; then
-                manifest_entry="${manifest_canonical_entries[$canonical_norm]}"
-                manifest_entry_source="canonical"
+            if [[ -n "$path_norm" && -n "${manifest_path_entries[$path_norm]+set}" ]]; then
+                manifest_entry="${manifest_path_entries[$path_norm]}"
+                manifest_entry_source="path"
             fi
-            if [[ -z "$manifest_entry" && -n "$rel_file_norm" && -n "${manifest_relpath_entries[$rel_file_norm]+set}" ]]; then
-                manifest_entry="${manifest_relpath_entries[$rel_file_norm]}"
-                manifest_entry_source="relativePath"
+            if [[ -z "$manifest_entry" && -n "$id_norm" && -n "${manifest_id_entries[$id_norm]+set}" ]]; then
+                manifest_entry="${manifest_id_entries[$id_norm]}"
+                manifest_entry_source="workflow-id"
             fi
-            if [[ -z "$manifest_entry" && -n "$filename_norm" && -n "${manifest_filename_entries[$filename_norm]+set}" ]]; then
-                manifest_entry="${manifest_filename_entries[$filename_norm]}"
-                manifest_entry_source="filename"
-            fi
-            if [[ -z "$manifest_entry" && -n "$storage_norm" && -n "${manifest_storage_entries[$storage_norm]+set}" ]]; then
-                manifest_entry="${manifest_storage_entries[$storage_norm]}"
-                manifest_entry_source="storagePath"
-            fi
-            if [[ -z "$manifest_entry" && -n "$rel_dir_norm" && -n "${manifest_reldir_entries[$rel_dir_norm]+set}" ]]; then
-                manifest_entry="${manifest_reldir_entries[$rel_dir_norm]}"
-                manifest_entry_source="relativeDir"
+            if [[ -z "$manifest_entry" && -n "$name_norm" && -n "${manifest_folder_name_entries[$name_norm]+set}" ]]; then
+                manifest_entry="${manifest_folder_name_entries[$name_norm]}"
+                manifest_entry_source="folder-name"
             fi
         fi
 
@@ -977,7 +1065,7 @@ JQ
             manifest_warning=$(printf '%s' "$manifest_entry" | jq -r '.idReconciliationWarning // empty' 2>/dev/null)
             manifest_note=$(printf '%s' "$manifest_entry" | jq -r '.idResolutionNote // empty' 2>/dev/null)
         elif $manifest_indexed && [[ "$verbose" == "true" ]]; then
-            log DEBUG "No manifest entry found for '$workflow_file' (storage='$storage_path', relative='$canonical_relative_path', relDir='$relative_dir_without_prefix', filename='$filename')"
+            log DEBUG "No manifest entry found for '$workflow_file' (path='$canonical_relative_path', workflowId='${workflow_id_from_file:-<none>}', folderNameKey='$(build_manifest_name_key "$storage_path" "$workflow_name_from_file")')"
         fi
 
         # PRIORITY ORDER for workflow ID resolution:
@@ -1003,8 +1091,8 @@ JQ
         
         # Fallback to file if manifest doesn't have ID
         if [[ -z "$workflow_id" ]]; then
-            workflow_id=$(jq -r '.id // empty' "$workflow_file" 2>/dev/null)
-            if [[ -n "$workflow_id" && "$workflow_id" != "null" ]]; then
+            if [[ -n "$workflow_id_from_file" && "$workflow_id_from_file" != "null" ]]; then
+                workflow_id="$workflow_id_from_file"
                 workflow_id_source="file"
             else
                 workflow_id=""
@@ -1018,7 +1106,7 @@ JQ
         fi
 
         local workflow_name
-        workflow_name=$(jq -r '.name // empty' "$workflow_file" 2>/dev/null)
+        workflow_name="$workflow_name_from_file"
         if [[ -z "$workflow_name" && -n "$manifest_entry" ]]; then
             workflow_name=$(printf '%s' "$manifest_entry" | jq -r '.name // empty' 2>/dev/null)
         fi
@@ -2873,7 +2961,8 @@ JQ
         canonical_storage_path="${canonical_storage_path#/}"
         canonical_storage_path="${canonical_storage_path%/}"
 
-        local expected_project_slug=""
+    local expected_project_slug=""
+    local expected_project_slug_norm=""
         local expected_project_display=""
         local -a expected_folder_slugs=()
         local -a expected_folder_displays=()
@@ -2886,6 +2975,10 @@ JQ
             expected_folder_slugs \
             expected_folder_displays \
             expected_display_path
+
+        if [[ -n "$expected_project_slug" ]]; then
+            expected_project_slug_norm=$(normalize_manifest_lookup_key "$expected_project_slug")
+        fi
 
         local expected_folder_slug_path=""
         if ((${#expected_folder_slugs[@]} > 0)); then
@@ -3057,15 +3150,32 @@ JQ
 
                 local candidate_folder_display=""
                 candidate_folder_display=$(printf '%s' "$name_match_json" | jq -r '.workflow.folders | (map(.name) | join("/")) // empty' 2>/dev/null)
-                local candidate_folder_path=""
+
+                local candidate_folder_path_raw=""
                 if [[ -n "$name_match_candidate_path" ]]; then
-                    candidate_folder_path="${name_match_candidate_path%/*}"
-                    if [[ "$candidate_folder_path" == "$name_match_candidate_path" ]]; then
-                        candidate_folder_path=""
+                    candidate_folder_path_raw="$name_match_candidate_path"
+                fi
+
+                local candidate_folder_path=""
+                if [[ -n "$candidate_folder_path_raw" ]]; then
+                    local candidate_extension
+                    candidate_extension=$(printf '%s' "${candidate_folder_path_raw##*.}" | tr '[:upper:]' '[:lower:]')
+                    if [[ "$candidate_extension" == "json" ]]; then
+                        candidate_folder_path="${candidate_folder_path_raw%/*}"
+                        if [[ "$candidate_folder_path" == "$candidate_folder_path_raw" ]]; then
+                            candidate_folder_path=""
+                        fi
+                    else
+                        candidate_folder_path="$candidate_folder_path_raw"
                     fi
                 fi
+
                 candidate_folder_path="${candidate_folder_path#/}"
                 candidate_folder_path="${candidate_folder_path%/}"
+
+                if [[ -z "$candidate_folder_display" && -n "$candidate_folder_path" ]]; then
+                    candidate_folder_display="$candidate_folder_path"
+                fi
 
                 local expected_folder_display="$expected_folder_display_path"
                 if [[ -z "$expected_folder_display" ]]; then
@@ -3097,22 +3207,35 @@ JQ
                 expected_display_norm=$(normalize_manifest_lookup_key "$expected_folder_display")
 
                 local candidate_matches_expected="false"
-                if [[ -n "$candidate_path_norm" && -n "$expected_path_norm" && "$candidate_path_norm" == "$expected_path_norm" ]]; then
-                    candidate_matches_expected="true"
-                elif [[ -n "$candidate_storage_norm" && -n "$expected_storage_norm" ]]; then
-                    if [[ "$candidate_storage_norm" == "$expected_storage_norm" ]]; then
+                if [[ -n "$candidate_path_norm" && -n "$expected_path_norm" ]]; then
+                    if manifest_lookup_path_matches "$candidate_path_norm" "$expected_path_norm" "$expected_project_slug_norm"; then
                         candidate_matches_expected="true"
                     fi
-                elif [[ -n "$candidate_display_norm" && -n "$expected_display_norm" ]]; then
-                    if [[ "$candidate_display_norm" == "$expected_display_norm" ]]; then
+                fi
+
+                if [[ "$candidate_matches_expected" != "true" && -n "$candidate_storage_norm" && -n "$expected_storage_norm" ]]; then
+                    if manifest_lookup_path_matches "$candidate_storage_norm" "$expected_storage_norm" "$expected_project_slug_norm"; then
                         candidate_matches_expected="true"
                     fi
-                elif [[ -z "$candidate_storage_norm" && -z "$expected_storage_norm" && -z "$candidate_display_norm" && -z "$expected_display_norm" ]]; then
+                fi
+
+                if [[ "$candidate_matches_expected" != "true" && -n "$candidate_display_norm" && -n "$expected_display_norm" ]]; then
+                    if manifest_lookup_path_matches "$candidate_display_norm" "$expected_display_norm" "$expected_project_slug_norm"; then
+                        candidate_matches_expected="true"
+                    fi
+                fi
+
+                if [[ "$candidate_matches_expected" != "true" && -z "$candidate_storage_norm" && -z "$expected_storage_norm" && -z "$candidate_display_norm" && -z "$expected_display_norm" ]]; then
                     candidate_matches_expected="true"
                 fi
 
                 if [[ "$candidate_matches_expected" == "true" ]]; then
                     name_match_allowed="true"
+                elif [[ -n "$name_match_id" && -z "$name_match_candidate_path" ]]; then
+                    name_match_allowed="true"
+                    if [[ "$verbose" == "true" ]]; then
+                        log DEBUG "Allowing name-based duplicate alignment for '${staged_name:-$dest_filename}' (ID ${name_match_id}) despite missing folder metadata."
+                    fi
                 elif [[ "$verbose" == "true" ]]; then
                     log DEBUG "Skipping name-based duplicate alignment for '${staged_name:-$dest_filename}' due to folder mismatch (candidate='${candidate_folder_display:-<empty>}', expected='${expected_folder_display:-<empty>}')."
                 fi

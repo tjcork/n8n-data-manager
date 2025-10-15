@@ -366,11 +366,11 @@ get_workflow_folder_mapping() {
         local session_workflows=""
 
         if ! session_projects=$(fetch_n8n_projects_session "$base_url"); then
-            cleanup_n8n_session force
+            cleanup_n8n_session
             return 1
         fi
         if ! session_workflows=$(fetch_workflows_with_folders_session "$base_url" ""); then
-            cleanup_n8n_session force
+            cleanup_n8n_session
             return 1
         fi
 
@@ -393,7 +393,7 @@ get_workflow_folder_mapping() {
     if [[ -z "$projects_response" || -z "$workflows_response" ]]; then
         log ERROR "Failed to retrieve workflow metadata from n8n"
         if $using_session; then
-            cleanup_n8n_session force
+            cleanup_n8n_session
         fi
         return 1
     fi
@@ -427,7 +427,7 @@ get_workflow_folder_mapping() {
         sample="$(printf '%s' "$projects_response" | tr '\n' ' ' | head -c 200)"
         log ERROR "Projects response is not valid JSON (sample: ${sample}...)"
         if $using_session; then
-            cleanup_n8n_session force
+            cleanup_n8n_session
         fi
         return 1
     fi
@@ -441,7 +441,7 @@ get_workflow_folder_mapping() {
         sample="$(printf '%s' "$workflows_response" | tr '\n' ' ' | head -c 200)"
         log ERROR "Workflows response is not valid JSON (sample: ${sample}...)"
         if $using_session; then
-            cleanup_n8n_session force
+            cleanup_n8n_session
         fi
         return 1
     fi
@@ -473,7 +473,7 @@ get_workflow_folder_mapping() {
         rm -f "$projects_tmp" "$workflows_tmp"
         trap - RETURN
         if $using_session; then
-            cleanup_n8n_session force
+            cleanup_n8n_session
         fi
         return 1
     fi
@@ -549,7 +549,7 @@ get_workflow_folder_mapping() {
         rm -f "$projects_tmp" "$workflows_tmp"
         trap - RETURN
         if $using_session; then
-            cleanup_n8n_session force
+            cleanup_n8n_session
         fi
         return 1
     fi
@@ -594,7 +594,7 @@ get_workflow_folder_mapping() {
         rm -f "$projects_tmp" "$workflows_tmp"
         trap - RETURN
         if $using_session; then
-            cleanup_n8n_session force
+            cleanup_n8n_session
         fi
         return 1
     fi
