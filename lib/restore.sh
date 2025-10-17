@@ -9,6 +9,26 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 SNAPSHOT_EXISTING_WORKFLOWS_PATH=""
 
+readonly WORKFLOW_COUNT_FILTER=$(cat <<'JQ'
+def to_array:
+    if type == "array" then .
+    elif type == "object" then
+        if (has("data") and (.data | type == "array")) then .data
+        elif (has("workflows") and (.workflows | type == "array")) then .workflows
+        elif (has("items") and (.items | type == "array")) then .items
+        else [.] end
+    else [] end;
+to_array
+| map(select(
+        (type == "object") and (
+            (((.resource // .type // "") | tostring | ascii_downcase) == "workflow")
+            or (.nodes? | type == "array")
+        )
+    ))
+| length
+JQ
+)
+
 sanitize_slug() {
     local value="$1"
     value="${value//$'\r'/}"
@@ -125,217 +145,197 @@ reconcile_imported_workflow_ids() {
         log ERROR "Workflow staging manifest missing; cannot reconcile IDs"
         return 1
     fi
-
-    local pre_snapshot_in_use="$pre_import_snapshot"
-    local needs_pre_cleanup="false"
-    if [[ -z "$pre_snapshot_in_use" || ! -f "$pre_snapshot_in_use" ]]; then
-        pre_snapshot_in_use=$(mktemp -t n8n-empty-pre-snapshot-XXXXXXXX.json)
-        printf '[]' > "$pre_snapshot_in_use"
-        needs_pre_cleanup="true"
-        if [[ "$verbose" == "true" ]]; then
-            log DEBUG "No pre-import snapshot available; assuming empty workflow set for reconciliation."
-        fi
-    fi
-
-    local reconciliation_tmp
-    reconciliation_tmp=$(mktemp -t n8n-reconciled-manifest-XXXXXXXX.json)
-
-    local jq_error_log
-    jq_error_log=$(mktemp -t n8n-reconcile-jq-XXXXXXXX.log)
-
-    if ! jq -n \
-        --slurpfile pre "$pre_snapshot_in_use" \
-        --slurpfile post "$post_import_snapshot" \
-        --slurpfile manifest "$manifest_path" '
-            def arr(x): if (x | type) == "array" then x else [] end;
-            def ensure_string(v):
-                if (v | type) == "string" then v
-                elif (v | type) == "number" then (v | tostring)
-                else ""
-                end;
-            def norm(v): (ensure_string(v) | ascii_downcase);
-            def idx_by_id(arr):
-                arr
-                | reduce .[] as $item ({};
-                    ($item.id // "" | tostring) as $id |
-                    if ($id | length) > 0 then .[$id] = $item else . end
-                );
-            def idx_by_meta(arr):
-                arr
-                | map({meta: norm(.meta.instanceId // .meta.instanceID // ""), value: .})
-                | group_by(.meta)
-                | reduce .[] as $bucket ({};
-                    ($bucket[0].meta) as $meta |
-                    if ($meta | length) > 0 then .[$meta] = ($bucket | map(.value)) else . end
-                );
-            def idx_new_by_name(arr):
-                arr
-                | group_by(norm(.name // ""))
-                | reduce .[] as $bucket ({};
-                    norm($bucket[0].name // "") as $key |
-                    if ($key | length) > 0 then .[$key] = $bucket else . end
-                );
-            def has_post_id($postById; $id): ($id | length) > 0 and ($postById[$id] // null) != null;
-            def set_resolution($id; $strategy; $note):
-                if ($id | length) > 0 then
-                    ($id | tostring) as $resolvedId |
-                    .id = $resolvedId
-                    | .actualImportedId = $resolvedId
-                    | .idReconciled = true
-                    | .idResolutionStrategy = $strategy
-                    | (if ($note | length) > 0 then .idResolutionNote = $note else del(.idResolutionNote) end)
-                    | del(.idReconciliationWarning)
-                else
-                    .
-                end;
-            def add_warning($warning):
-                ensure_string($warning) as $warn |
-                if ($warn | length) == 0 then .
-                else
-                    ensure_string(.idReconciliationWarning) as $existingWarn |
-                    .idReconciliationWarning = (
-                        if ($existingWarn | length) > 0 then
-                            $existingWarn + "; " + $warn
-                        else
-                            $warn
-                        end)
-                end;
-            def apply_note($note):
-                ensure_string($note) as $noteStr |
-                if ($noteStr | length) == 0 then
-                    .
-                else
-                    ensure_string(.idResolutionNote) as $existingNote |
-                    .idResolutionNote = (
-                        if ($existingNote | length) > 0 then
-                            $existingNote + "; " + $noteStr
-                        else
-                            $noteStr
-                        end)
-                end;
-            def mark_unresolved:
-                .idReconciled = false
-                | .idResolutionStrategy = "unresolved"
-                | .actualImportedId = null
-                | .;
-
-            arr($pre[0]) as $preWorkflows |
-            arr($post[0]) as $postWorkflows |
-            arr($manifest[0]) as $manifestEntries |
-            idx_by_id($preWorkflows) as $preById |
-            idx_by_id($postWorkflows) as $postById |
-            idx_by_meta($postWorkflows) as $postByMeta |
-            (
-                $postWorkflows
-                | map(select((.id // "" | tostring) as $id | ($preById[$id] // null) == null))
-            ) as $newWorkflows |
-            idx_new_by_name($newWorkflows) as $newByName |
-            $manifestEntries
-            | map(
-                . as $entry |
-                ensure_string($entry.id) as $manifestId |
-                ensure_string($entry.existingWorkflowId) as $existingId |
-                ensure_string($entry.originalWorkflowId) as $originalId |
-                ensure_string($entry.metaInstanceId) as $metaIdRaw |
-                norm($metaIdRaw) as $metaIdNorm |
-                ensure_string($entry.name) as $entryName |
-                norm($entryName) as $nameLower |
-                ensure_string($entry.storagePath) as $storagePath |
-                ensure_string($entry.sanitizedIdNote) as $sanitizeNote |
-                (if ($metaIdNorm | length) > 0 then ($postByMeta[$metaIdNorm] // []) else [] end) as $metaMatchesMaybe |
-                (if ($metaMatchesMaybe | type) == "array" then $metaMatchesMaybe else [] end) as $metaMatches |
-                ($metaMatches | length) as $metaMatchCount |
-                (if ($nameLower | length) > 0 then ($newByName[$nameLower] // []) else [] end) as $nameMatchesMaybe |
-                (if ($nameMatchesMaybe | type) == "array" then $nameMatchesMaybe else [] end) as $nameMatches |
-                ($nameMatches | length) as $nameMatchCount |
-
-                ($entry
-                 | mark_unresolved
-                 | del(.idReconciliationWarning)
-                 | del(.idResolutionNote)
-                ) as $base |
-
-                (if has_post_id($postById; $manifestId) then
-                    $base
-                    | set_resolution($manifestId; "manifest-id"; "")
-                    | apply_note($sanitizeNote)
-                elif (($sanitizeNote | length) == 0) and has_post_id($postById; $existingId) then
-                    $base
-                    | set_resolution($existingId; "existing-workflow-id"; "")
-                    | apply_note($sanitizeNote)
-                elif (($sanitizeNote | length) == 0) and has_post_id($postById; $originalId) then
-                    $base
-                    | set_resolution($originalId; "original-workflow-id"; "")
-                    | apply_note($sanitizeNote)
-                elif $metaMatchCount == 1 then
-                    ($metaMatches[0].id // "" | tostring) as $resolvedId |
-                    $base
-                    | set_resolution($resolvedId; "meta-instance"; "")
-                    | apply_note($sanitizeNote)
-                elif $metaMatchCount > 1 then
-                    $base
-                    | add_warning("Multiple workflows share instanceId \($metaIdRaw)")
-                    | apply_note($sanitizeNote)
-                elif $nameMatchCount == 1 then
-                    ($nameMatches[0].id // "" | tostring) as $resolvedId |
-                    $base
-                    | set_resolution($resolvedId; "new-workflow-name"; "")
-                    | apply_note($sanitizeNote)
-                elif $nameMatchCount > 1 then
-                    $base
-                    | add_warning("Multiple newly imported workflows share the name \($entryName)")
-                    | apply_note($sanitizeNote)
-                else
-                    $base
-                    | add_warning("Unable to locate imported workflow in post-import snapshot")
-                    | apply_note($sanitizeNote)
-                end)
-            )
-        ' > "$reconciliation_tmp" 2>"$jq_error_log"; then
-        log ERROR "Failed to reconcile workflow IDs in manifest"
-        if [[ -s "$jq_error_log" ]]; then
-            local jq_error_msg
-            jq_error_msg=$(head -n 20 "$jq_error_log")
-            log DEBUG "jq reconciliation stderr: $jq_error_msg"
-        fi
-        rm -f "$reconciliation_tmp"
-        rm -f "$jq_error_log"
-        if [[ "$needs_pre_cleanup" == "true" && -f "$pre_snapshot_in_use" ]]; then
-            rm -f "$pre_snapshot_in_use"
-        fi
+    
+    # Validate manifest is not empty
+    if [[ ! -s "$manifest_path" ]]; then
+        log ERROR "Staging manifest is empty; cannot reconcile IDs"
         return 1
     fi
 
-    rm -f "$jq_error_log"
-
-    mv "$reconciliation_tmp" "$output_path"
-
-    local reconciled_count
-    reconciled_count=$(jq '[.[] | select(.idReconciled == true)] | length' "$output_path" 2>/dev/null || echo "0")
-    local warning_count
-    warning_count=$(jq '[.[] | select(.idReconciled != true)] | length' "$output_path" 2>/dev/null || echo "0")
-
-    if (( reconciled_count > 0 )); then
-        log SUCCESS "Reconciled $reconciled_count workflow ID(s) using post-import snapshot"
+    # Create indexes of workflows for fast lookup
+    local pre_workflows_by_id=$(mktemp -t n8n-pre-ids-XXXXXX.json)
+    local post_workflows_by_id=$(mktemp -t n8n-post-ids-XXXXXX.json)
+    local post_workflows_by_meta=$(mktemp -t n8n-post-meta-XXXXXX.json)
+    local new_workflows_by_name=$(mktemp -t n8n-new-names-XXXXXX.json)
+    
+    # Build pre-import ID index
+    if [[ -n "$pre_import_snapshot" && -f "$pre_import_snapshot" ]]; then
+        jq -r '.[] | select(.id != null) | {key: .id, value: .} | @json' "$pre_import_snapshot" 2>/dev/null | \
+            jq -s 'from_entries' > "$pre_workflows_by_id"
+    else
+        printf '{}' > "$pre_workflows_by_id"
     fi
-
-    if (( warning_count > 0 )); then
-        log WARN "$warning_count workflow(s) remain unresolved after ID reconciliation"
-        if [[ "$verbose" == "true" ]]; then
-            while IFS= read -r warning_entry; do
-                local name
-                local warning
-                name=$(printf '%s' "$warning_entry" | jq -r '.name // "Workflow"' 2>/dev/null)
-                warning=$(printf '%s' "$warning_entry" | jq -r '.idReconciliationWarning // ""' 2>/dev/null)
-                if [[ -n "$warning" ]]; then
-                    log DEBUG "Reconciliation warning for '$name': $warning"
-                fi
-            done < <(jq -c '.[] | select(.idReconciled != true)' "$output_path")
+    
+    # Build post-import ID index
+    jq -r '.[] | select(.id != null) | {key: .id, value: .} | @json' "$post_import_snapshot" 2>/dev/null | \
+        jq -s 'from_entries' > "$post_workflows_by_id"
+    
+    # Build post-import meta index
+    jq -r '.[] | select(.meta.instanceId != null) | 
+        {key: (.meta.instanceId | ascii_downcase), value: .} | @json' "$post_import_snapshot" 2>/dev/null | \
+        jq -s 'group_by(.key) | map({key: .[0].key, value: map(.value)}) | from_entries' > "$post_workflows_by_meta"
+    
+    # Build new workflows by name index (workflows in post but not in pre)
+    jq -n --slurpfile pre "$pre_workflows_by_id" --slurpfile post "$post_import_snapshot" '
+        $pre[0] as $preById |
+        $post[0] as $postWorkflows |
+        ($postWorkflows | map(select($preById[.id] == null)) | 
+         group_by(.name | ascii_downcase) | 
+         map({key: .[0].name | ascii_downcase, value: .}) | from_entries)
+    ' > "$new_workflows_by_name"
+    
+    # Process manifest line by line and update in place
+    local reconciled_tmp=$(mktemp -t n8n-reconciled-XXXXXX.ndjson)
+    local created=0 updated=0 unresolved=0
+    local line_count=0
+    
+    while IFS= read -r entry_line; do
+        # Skip empty lines
+        [[ -z "$entry_line" ]] && continue
+        
+        # Skip lines that aren't valid JSON
+        if ! printf '%s' "$entry_line" | jq empty 2>/dev/null; then
+            if [[ "$verbose" == "true" ]]; then
+                log DEBUG "Skipping invalid JSON line in manifest"
+            fi
+            continue
         fi
+        
+        line_count=$((line_count + 1))
+        
+        # Extract key fields from manifest entry
+        local manifest_id=$(printf '%s' "$entry_line" | jq -r '.id // ""')
+        local existing_id=$(printf '%s' "$entry_line" | jq -r '.existingWorkflowId // ""')
+        local original_id=$(printf '%s' "$entry_line" | jq -r '.originalWorkflowId // ""')
+        local meta_id=$(printf '%s' "$entry_line" | jq -r '.metaInstanceId // "" | ascii_downcase')
+        local entry_name=$(printf '%s' "$entry_line" | jq -r '.name // "" | ascii_downcase')
+        local sanitize_note=$(printf '%s' "$entry_line" | jq -r '.sanitizedIdNote // ""')
+        
+        local resolved_id="" resolution_strategy="" resolution_note=""
+        
+        # Strategy 1: manifest-id - Check if the ID from the file exists in post-import
+        if [[ -z "$resolved_id" && -n "$manifest_id" ]]; then
+            if jq -e --arg id "$manifest_id" '.[$id] != null' "$post_workflows_by_id" &>/dev/null; then
+                resolved_id="$manifest_id"
+                resolution_strategy="manifest-id"
+            fi
+        fi
+        
+        # Strategy 2: existing-workflow-id - Check if existingWorkflowId is in post-import
+        if [[ -z "$resolved_id" && -n "$existing_id" && -z "$sanitize_note" ]]; then
+            if jq -e --arg id "$existing_id" '.[$id] != null' "$post_workflows_by_id" &>/dev/null; then
+                resolved_id="$existing_id"
+                resolution_strategy="existing-workflow-id"
+            fi
+        fi
+        
+        # Strategy 3: original-workflow-id - Check if originalWorkflowId is in post-import
+        if [[ -z "$resolved_id" && -n "$original_id" && -z "$sanitize_note" ]]; then
+            if jq -e --arg id "$original_id" '.[$id] != null' "$post_workflows_by_id" &>/dev/null; then
+                resolved_id="$original_id"
+                resolution_strategy="original-workflow-id"
+            fi
+        fi
+        
+        # Strategy 4: meta-instance - Check if there's exactly one workflow with this instanceId
+        if [[ -z "$resolved_id" && -n "$meta_id" ]]; then
+            local meta_matches=$(jq --arg meta "$meta_id" '.[$meta] // [] | length' "$post_workflows_by_meta")
+            if [[ "$meta_matches" == "1" ]]; then
+                resolved_id=$(jq -r --arg meta "$meta_id" '.[$meta][0].id // ""' "$post_workflows_by_meta")
+                resolution_strategy="meta-instance"
+            elif [[ "$meta_matches" -gt 1 ]]; then
+                resolution_note="Multiple workflows share instanceId"
+            fi
+        fi
+        
+        # Strategy 5: name-only - Check if there's exactly one new workflow with this name
+        if [[ -z "$resolved_id" && -n "$entry_name" ]]; then
+            local name_matches=$(jq --arg name "$entry_name" '.[$name] // [] | length' "$new_workflows_by_name")
+            if [[ "$name_matches" == "1" ]]; then
+                resolved_id=$(jq -r --arg name "$entry_name" '.[$name][0].id // ""' "$new_workflows_by_name")
+                resolution_strategy="name-only"
+            elif [[ "$name_matches" -gt 1 ]]; then
+                if [[ -n "$resolution_note" ]]; then
+                    resolution_note="$resolution_note; Multiple workflows share this name"
+                else
+                    resolution_note="Multiple workflows share this name"
+                fi
+            fi
+        fi
+        
+        # Update entry with reconciliation results
+        if [[ -n "$resolved_id" ]]; then
+            # Successfully resolved - add reconciliation metadata
+            local updated_entry=$(printf '%s' "$entry_line" | jq -c \
+                --arg id "$resolved_id" \
+                --arg strategy "$resolution_strategy" \
+                --arg note "${sanitize_note:+$sanitize_note}" \
+                '.id = $id | 
+                 .actualImportedId = $id | 
+                 .idReconciled = true | 
+                 .idResolutionStrategy = $strategy |
+                 (if ($note != "") then .idResolutionNote = $note else . end) |
+                 del(.idReconciliationWarning)')
+            
+            printf '%s\n' "$updated_entry" >> "$reconciled_tmp"
+            
+            # Count as created or updated
+            if [[ -n "$existing_id" ]]; then
+                updated=$((updated + 1))
+            else
+                created=$((created + 1))
+            fi
+        else
+            # Could not resolve - mark as unresolved
+            local updated_entry=$(printf '%s' "$entry_line" | jq -c \
+                --arg note "$resolution_note" \
+                '.idReconciled = false | 
+                 .idResolutionStrategy = "unresolved" | 
+                 .actualImportedId = null |
+                 (if ($note != "") then .idReconciliationWarning = $note else . end)')
+            
+            printf '%s\n' "$updated_entry" >> "$reconciled_tmp"
+            unresolved=$((unresolved + 1))
+        fi
+    done < "$manifest_path"
+    
+    # Move reconciled manifest to output
+    if [[ -s "$reconciled_tmp" ]]; then
+        mv "$reconciled_tmp" "$output_path"
+    else
+        log ERROR "Reconciliation produced empty manifest (processed $line_count lines)"
+        rm -f "$reconciled_tmp" "$pre_workflows_by_id" "$post_workflows_by_id" "$post_workflows_by_meta" "$new_workflows_by_name"
+        return 1
     fi
-
-    if [[ "$needs_pre_cleanup" == "true" && -f "$pre_snapshot_in_use" ]]; then
-        rm -f "$pre_snapshot_in_use"
+    
+    # Cleanup temp files
+    rm -f "$pre_workflows_by_id" "$post_workflows_by_id" "$post_workflows_by_meta" "$new_workflows_by_name"
+    
+    # Validate counts
+    local processed_total=$((created + updated + unresolved))
+    if [[ "$processed_total" -ne "$line_count" ]]; then
+        log WARN "Reconciliation count mismatch: processed $line_count lines, but only categorized $processed_total workflows"
+    fi
+    
+    # Export metrics for summary
+    local total_workflows=$((created + updated))
+    local post_count
+    if ! post_count=$(jq -r "$WORKFLOW_COUNT_FILTER" "$post_import_snapshot" 2>/dev/null); then
+        post_count=0
+    elif [[ -z "$post_count" || "$post_count" == "null" ]]; then
+        post_count=0
+    fi
+    
+    export RESTORE_WORKFLOWS_CREATED="$created"
+    export RESTORE_WORKFLOWS_UPDATED="$updated"
+    export RESTORE_POST_IMPORT_COUNT="$post_count"
+    
+    if [[ "$verbose" == "true" ]]; then
+        log DEBUG "Reconciliation complete: processed=$line_count, created=$created, updated=$updated, unresolved=$unresolved, total=$total_workflows, post_count=$post_count"
+    fi
+    
+    if [[ "$unresolved" -gt 0 ]]; then
+        log WARN "Failed to reconcile IDs for $unresolved workflow(s); folder assignments may be incomplete"
     fi
 
     return 0
@@ -349,38 +349,67 @@ summarize_manifest_assignment_status() {
         return 0
     fi
 
-    local summary_json
-    summary_json=$(jq -n --slurpfile manifest "$manifest_path" '
-        def arr(x): if (x | type) == "array" then x else [] end;
-        ($manifest[0] | arr) as $entries
-        | {
-            total: ($entries | length),
-            resolved: ($entries | map(select(.idReconciled == true)) | length),
-            unresolved: ($entries | map(select(.idReconciled != true)) | length),
-            strategies: (
-                $entries
-                | map(select((.idResolutionStrategy // "") != ""))
-                | group_by(.idResolutionStrategy // "unknown")
-                | map({strategy: (.[0].idResolutionStrategy // "unknown"), count: length})
-            ),
-            warnings: (
-                $entries
-                | map(select((.idReconciled != true) and ((.idReconciliationWarning // "") != ""))
-                      | {name: (.name // ""), warning: .idReconciliationWarning})
-            )
-        }
-    ' 2>/dev/null)
-
-    if [[ -z "$summary_json" ]]; then
-        return 0
+    # Determine manifest format (NDJSON vs JSON array/object)
+    local entry_format="ndjson"
+    if jq -e '.' "$manifest_path" >/dev/null 2>&1; then
+        if jq -e 'type == "array"' "$manifest_path" >/dev/null 2>&1; then
+            entry_format="array"
+        elif jq -e 'type == "object" and has("workflows") and (.workflows | type == "array")' "$manifest_path" >/dev/null 2>&1; then
+            entry_format="workflows-object"
+        fi
     fi
 
-    local total resolved unresolved
-    total=$(printf '%s' "$summary_json" | jq -r '.total' 2>/dev/null)
-    resolved=$(printf '%s' "$summary_json" | jq -r '.resolved' 2>/dev/null)
-    unresolved=$(printf '%s' "$summary_json" | jq -r '.unresolved' 2>/dev/null)
+    # Process manifest entries and compute summary stats
+    local total=0 resolved=0 unresolved=0
+    declare -A strategy_counts=()
+    local -a warnings=()
+    while IFS= read -r entry_line; do
+        [[ -z "$entry_line" ]] && continue
 
-    if [[ -z "$total" || "$total" == "null" ]]; then
+        if ! printf '%s' "$entry_line" | jq empty >/dev/null 2>&1; then
+            if [[ "$verbose" == "true" ]]; then
+                log DEBUG "Skipping invalid manifest entry while summarizing"
+            fi
+            continue
+        fi
+
+        total=$((total + 1))
+
+        local is_reconciled=$(printf '%s' "$entry_line" | jq -r '.idReconciled // false' 2>/dev/null)
+        local strategy=$(printf '%s' "$entry_line" | jq -r '.idResolutionStrategy // ""' 2>/dev/null)
+        local warning_text=$(printf '%s' "$entry_line" | jq -r '.idReconciliationWarning // ""' 2>/dev/null)
+        local entry_name=$(printf '%s' "$entry_line" | jq -r '.name // "Workflow"' 2>/dev/null)
+
+        if [[ "$is_reconciled" == "true" ]]; then
+            resolved=$((resolved + 1))
+        else
+            unresolved=$((unresolved + 1))
+        fi
+        
+        if [[ -n "$strategy" ]]; then
+            strategy_counts["$strategy"]=$((${strategy_counts["$strategy"]:-0} + 1))
+        fi
+        
+        if [[ "$is_reconciled" != "true" && -n "$warning_text" ]]; then
+            warnings+=("${entry_name}\t${warning_text}")
+        fi
+    done < <(
+        {
+            case "$entry_format" in
+                array)
+                    jq -c '.[]' "$manifest_path" 2>/dev/null || true
+                    ;;
+                workflows-object)
+                    jq -c '.workflows[]' "$manifest_path" 2>/dev/null || true
+                    ;;
+                *)
+                    cat "$manifest_path" 2>/dev/null || true
+                    ;;
+            esac
+        }
+    )
+
+    if [[ "$total" -eq 0 ]]; then
         return 0
     fi
 
@@ -392,17 +421,14 @@ summarize_manifest_assignment_status() {
     log INFO "Workflow manifest reconciliation summary${label_suffix}: ${resolved}/${total} resolved, ${unresolved} unresolved."
 
     if [[ "$verbose" == "true" ]]; then
-        while IFS=$'\t' read -r strategy count; do
-            [[ -z "$strategy" ]] && continue
-            log DEBUG "  • Strategy '${strategy}': ${count} workflow(s)"
-        done < <(printf '%s' "$summary_json" | jq -r '.strategies[]? | (.strategy // "unknown") + "\t" + ((.count // 0)|tostring)' 2>/dev/null)
+        for strategy in "${!strategy_counts[@]}"; do
+            local count="${strategy_counts[$strategy]}"
+                log DEBUG "  • Strategy '${strategy}': ${count} workflow(s)"
+        done
 
         local warning_index=0
-        while IFS= read -r warning_entry; do
-            [[ -z "$warning_entry" ]] && continue
-            local warn_name warn_text
-            warn_name=$(printf '%s' "$warning_entry" | jq -r '.name // "Workflow"' 2>/dev/null)
-            warn_text=$(printf '%s' "$warning_entry" | jq -r '.warning // empty' 2>/dev/null)
+        for warning in "${warnings[@]}"; do
+            IFS=$'\t' read -r warn_name warn_text <<< "$warning"
             if [[ -n "$warn_text" ]]; then
                 log DEBUG "  ⚠️  ${warn_name}: ${warn_text}"
             fi
@@ -410,9 +436,8 @@ summarize_manifest_assignment_status() {
             if (( warning_index >= 5 )); then
                 break
             fi
-        done < <(printf '%s' "$summary_json" | jq -c '.warnings[]?' 2>/dev/null)
+        done
     fi
-
     return 0
 }
 
@@ -834,127 +859,94 @@ collect_directory_structure_entries() {
     declare -A manifest_folder_name_updates=()
 
     if [[ -n "$manifest_path" && -f "$manifest_path" ]]; then
-        local manifest_index_file
-        manifest_index_file=$(mktemp -t n8n-manifest-index-XXXXXXXX.ndjson)
-        local manifest_index_err
-        manifest_index_err=$(mktemp -t n8n-manifest-index-err-XXXXXXXX.log)
-
         if [[ "$verbose" == "true" ]]; then
             log DEBUG "Indexing staged manifest from $manifest_path"
         fi
 
-        local manifest_index_jq
-        manifest_index_jq=$(cat <<'JQ'
-            def norm(v):
-                (v // "")
-                | gsub("\\\\"; "/")
-                | gsub("[[:space:]]+"; " ")
-                | ascii_downcase
-                | gsub("^ "; "")
-                | gsub(" $"; "")
-                | gsub("/+"; "/")
-                | gsub("^/"; "")
-                | gsub("/$"; "");
+        # Process NDJSON manifest line-by-line to build indexes
+        local manifest_line entry_score entry_updated path_key name_key payload
+        while IFS= read -r manifest_line; do
+            [[ -z "$manifest_line" ]] && continue
 
-            def canonical(storage; filename):
-                if (storage // "" | length) > 0 and (filename // "" | length) > 0 then
-                    norm((storage // "") + "/" + (filename // ""))
-                elif (filename // "" | length) > 0 then
-                    norm(filename)
-                else "" end;
-
-            def name_key(storage; name):
-                if (name // "" | length) == 0 then ""
+            # Extract normalized keys using jq
+            entry_score=$(printf '%s' "$manifest_line" | jq -r '
+                if (.actualImportedId // "" | length) > 0 then 400
+                elif (.id // "" | length) > 0 then 300
+                elif (.existingWorkflowId // "" | length) > 0 then 200
+                elif (.originalWorkflowId // "" | length) > 0 then 100
+                else 0 end
+            ' 2>/dev/null || printf '0')
+            
+            entry_updated=$(printf '%s' "$manifest_line" | jq -r '.updatedAt // .metaUpdatedAt // .importedAt // ""' 2>/dev/null)
+            
+            # Compute normalized path key: storagePath/filename
+            path_key=$(printf '%s' "$manifest_line" | jq -r '
+                def norm(v):
+                    (v // "")
+                    | gsub("\\\\\\\\"; "/")
+                    | gsub("[[:space:]]+"; " ")
+                    | ascii_downcase
+                    | gsub("^ "; "")
+                    | gsub(" $"; "")
+                    | gsub("/+"; "/")
+                    | gsub("^/"; "")
+                    | gsub("/$"; "");
+                
+                if (.storagePath // "" | length) > 0 and (.filename // "" | length) > 0 then
+                    norm((.storagePath // "") + "/" + (.filename // ""))
+                elif (.filename // "" | length) > 0 then
+                    norm(.filename)
+                else "" end
+            ' 2>/dev/null)
+            
+            # Compute normalized name key: storagePath|name
+            name_key=$(printf '%s' "$manifest_line" | jq -r '
+                def norm(v):
+                    (v // "")
+                    | gsub("\\\\\\\\"; "/")
+                    | gsub("[[:space:]]+"; " ")
+                    | ascii_downcase
+                    | gsub("^ "; "")
+                    | gsub(" $"; "")
+                    | gsub("/+"; "/")
+                    | gsub("^/"; "")
+                    | gsub("/$"; "");
+                
+                if (.name // "" | length) == 0 then ""
                 else
-                    norm(name) as $n |
+                    norm(.name) as $n |
                     if ($n | length) == 0 then ""
                     else
-                        norm(storage) as $s |
+                        norm(.storagePath) as $s |
                         if ($s | length) > 0 then $s + "|" + $n else $n end
                     end
-                end;
+                end
+            ' 2>/dev/null)
+            
+            payload="$manifest_line"
 
-            def id_norm(v):
-                (v // "")
-                | gsub("[[:space:]]+"; "")
-                | ascii_downcase
-                | select((. | length) > 0);
+            assign_manifest_lookup_entry manifest_path_entries manifest_path_scores manifest_path_updates "$path_key" "$entry_score" "$entry_updated" "$payload"
+            assign_manifest_lookup_entry manifest_folder_name_entries manifest_folder_name_scores manifest_folder_name_updates "$name_key" "$entry_score" "$entry_updated" "$payload"
 
-            def id_list(entry):
-                [
-                    entry.actualImportedId,
-                    entry.id,
-                    entry.existingWorkflowId,
-                    entry.originalWorkflowId
-                ]
-                | map(id_norm(.))
-                | unique;
+            # Extract all ID fields and index by them
+            local -a id_keys=()
+            mapfile -t id_keys < <(printf '%s' "$manifest_line" | jq -r '
+                [.actualImportedId, .id, .existingWorkflowId, .originalWorkflowId] 
+                | map(select(. != null and (. | tostring | length) > 0) | tostring | gsub("[[:space:]]+"; "") | ascii_downcase) 
+                | unique[]
+            ' 2>/dev/null)
+            
+            for id_key in "${id_keys[@]}"; do
+                [[ -z "$id_key" ]] && continue
+                assign_manifest_lookup_entry manifest_id_entries manifest_id_scores manifest_id_updates "$id_key" "$entry_score" "$entry_updated" "$payload"
+            done
 
-            ($manifest[0] // [])
-            | map(
-                . + {
-                    _normalizedPath: canonical(.storagePath; .filename),
-                    _normalizedNameKey: name_key(.storagePath; .name),
-                    _normalizedIds: id_list(.),
-                    _score: (
-                        if (.actualImportedId // "" | length) > 0 then 400
-                        elif (.id // "" | length) > 0 then 300
-                        elif (.existingWorkflowId // "" | length) > 0 then 200
-                        elif (.originalWorkflowId // "" | length) > 0 then 100
-                        else 0 end
-                    ),
-                    _updatedAt: (.updatedAt // .metaUpdatedAt // .importedAt // "")
-                }
-            )
-            | .[]
-JQ
-        )
+            manifest_indexed=true
+        done < "$manifest_path"
 
-    if jq -n -c --slurpfile manifest "$manifest_path" "$manifest_index_jq" > "$manifest_index_file" 2>"$manifest_index_err"; then
-            while IFS= read -r manifest_line; do
-                [[ -z "$manifest_line" ]] && continue
-
-                local entry_score
-                entry_score=$(printf '%s' "$manifest_line" | jq -r '._score // 0' 2>/dev/null || printf '0')
-                local entry_updated
-                entry_updated=$(printf '%s' "$manifest_line" | jq -r '._updatedAt // empty' 2>/dev/null)
-                local path_key
-                path_key=$(printf '%s' "$manifest_line" | jq -r '._normalizedPath // empty' 2>/dev/null)
-                local name_key
-                name_key=$(printf '%s' "$manifest_line" | jq -r '._normalizedNameKey // empty' 2>/dev/null)
-
-                local payload
-                payload=$(printf '%s' "$manifest_line" | jq -c 'del(._normalizedPath, ._normalizedNameKey, ._normalizedIds, ._score, ._updatedAt)' 2>/dev/null)
-                if [[ -z "$payload" ]]; then
-                    payload="$manifest_line"
-                fi
-
-                assign_manifest_lookup_entry manifest_path_entries manifest_path_scores manifest_path_updates "$path_key" "$entry_score" "$entry_updated" "$payload"
-                assign_manifest_lookup_entry manifest_folder_name_entries manifest_folder_name_scores manifest_folder_name_updates "$name_key" "$entry_score" "$entry_updated" "$payload"
-
-                while IFS= read -r id_key; do
-                    [[ -z "$id_key" ]] && continue
-                    assign_manifest_lookup_entry manifest_id_entries manifest_id_scores manifest_id_updates "$id_key" "$entry_score" "$entry_updated" "$payload"
-                done < <(printf '%s' "$manifest_line" | jq -r '._normalizedIds[]?' 2>/dev/null)
-
-                manifest_indexed=true
-            done < "$manifest_index_file"
-
-            if [[ "$verbose" == "true" ]]; then
-                log DEBUG "Indexed staged manifest entries for folder lookup (path=${#manifest_path_entries[@]}, id=${#manifest_id_entries[@]}, folder-name=${#manifest_folder_name_entries[@]})"
-            fi
-        else
-            log WARN "Unable to index staged workflow manifest for folder mapping."
-            if [[ -s "$manifest_index_err" && "$verbose" == "true" ]]; then
-                local manifest_index_preview
-                manifest_index_preview=$(head -n 10 "$manifest_index_err" 2>/dev/null)
-                if [[ -n "$manifest_index_preview" ]]; then
-                    log DEBUG "Manifest index jq error: $manifest_index_preview"
-                fi
-            fi
+        if [[ "$verbose" == "true" ]]; then
+            log DEBUG "Indexed staged manifest entries for folder lookup (path=${#manifest_path_entries[@]}, id=${#manifest_id_entries[@]}, folder-name=${#manifest_folder_name_entries[@]})"
         fi
-
-        rm -f "$manifest_index_file" "$manifest_index_err"
     fi
 
     while IFS= read -r -d '' workflow_file; do
@@ -3431,7 +3423,8 @@ JQ
             # - name: Backup identifier for name-based lookup if ID lookup fails
             # - storagePath: Determines folder structure
             # - existingWorkflowId: The ID that existed before (for tracking replacements)
-            manifest_entry=$(jq -n \
+            local manifest_entry
+            manifest_entry=$(jq -nc \
                 --arg filename "$dest_filename" \
                 --arg id "$staged_id" \
                 --arg name "$staged_name" \
@@ -3486,7 +3479,10 @@ JQ
                                 }
                                 | with_entries(
                                         if (.value == null or (.value | tostring) == "") then empty else . end
-                                    )')
+                                    )') ||  {
+                log ERROR "Failed to create manifest entry for '$dest_filename'"
+                continue
+            }
             printf '%s\n' "$manifest_entry" >> "$manifest_entries_file"
         fi
 
@@ -3501,13 +3497,14 @@ JQ
         if [[ -n "$manifest_entries_file" ]]; then
             if [[ -s "$manifest_entries_file" ]]; then
                 if [[ -n "$manifest_output" ]]; then
-                    if ! jq -s -c '.' "$manifest_entries_file" > "$manifest_output" 2>/dev/null; then
+                    # Keep NDJSON format - just copy
+                    if ! cp "$manifest_entries_file" "$manifest_output" 2>/dev/null; then
                         log WARN "Unable to generate staging manifest for workflows; duplicate detection may be limited."
-                        printf '[]' > "$manifest_output" 2>/dev/null || true
+                        : > "$manifest_output" 2>/dev/null || true
                     fi
                 fi
             elif [[ -n "$manifest_output" ]]; then
-                printf '[]' > "$manifest_output" 2>/dev/null || true
+                : > "$manifest_output" 2>/dev/null || true
             fi
             rm -f "$manifest_entries_file"
         fi
@@ -3549,14 +3546,15 @@ JQ
             fi
         fi
         if [[ -s "$manifest_entries_file" ]]; then
-            if ! jq -s -c '.' "$manifest_entries_file" > "$manifest_output" 2>/dev/null; then
+            # Keep NDJSON format - just move to output
+            if ! mv "$manifest_entries_file" "$manifest_output" 2>/dev/null; then
                 log WARN "Unable to generate staging manifest for workflows; duplicate detection may be limited."
-                printf '[]' > "$manifest_output"
+                : > "$manifest_output"
             fi
         else
-            printf '[]' > "$manifest_output"
+            : > "$manifest_output"
+            rm -f "$manifest_entries_file"
         fi
-        rm -f "$manifest_entries_file"
     fi
     log SUCCESS "Prepared $staged_count workflow file(s) from directory $source_dir for import"
     return 0
@@ -3996,12 +3994,38 @@ restore() {
     
     local pre_import_workflow_count=0
     if [[ "$workflows_mode" != "0" ]] && [ "$is_dry_run" != "true" ]; then
-        local count_output
-        count_output=$(docker exec "$container_id" sh -c "n8n export:workflow --all --output=/tmp/pre_count.json 2>&1" || echo "")
-        if [[ -n "$count_output" ]] && ! echo "$count_output" | grep -q "Error\|No workflows"; then
-            pre_import_workflow_count=$(docker exec "$container_id" sh -c "cat /tmp/pre_count.json 2>/dev/null | jq 'length' 2>/dev/null || echo 0")
-            docker exec "$container_id" sh -c "rm -f /tmp/pre_count.json" 2>/dev/null || true
+        local count_output=""
+        if count_output=$(docker exec "$container_id" sh -c "n8n export:workflow --all --output=/tmp/pre_count.json" 2>&1); then
+            if [[ -n "$count_output" ]] && echo "$count_output" | grep -qi "Error\|No workflows"; then
+                local snapshot_notice="${count_output//$'\n'/ }"
+                if [[ ${#snapshot_notice} -gt 300 ]]; then
+                    snapshot_notice="${snapshot_notice:0:297}..."
+                fi
+                log DEBUG "Pre-import workflow snapshot reported: $snapshot_notice"
+            else
+                local pre_snapshot_tmp=""
+                if pre_snapshot_tmp=$(mktemp -t n8n-pre-count-XXXXXXXX.json); then
+                    if docker cp "${container_id}:/tmp/pre_count.json" "$pre_snapshot_tmp" >/dev/null 2>&1; then
+                        local counted_value
+                        if counted_value=$(jq -r "$WORKFLOW_COUNT_FILTER" "$pre_snapshot_tmp" 2>/dev/null); then
+                            if [[ -n "$counted_value" && "$counted_value" != "null" ]]; then
+                                pre_import_workflow_count="$counted_value"
+                            fi
+                        fi
+                    fi
+                    rm -f "$pre_snapshot_tmp"
+                fi
+            fi
+        else
+            if [[ -n "$count_output" ]]; then
+                local snapshot_error="${count_output//$'\n'/ }"
+                if [[ ${#snapshot_error} -gt 300 ]]; then
+                    snapshot_error="${snapshot_error:0:297}..."
+                fi
+                log DEBUG "Failed to capture pre-import workflow snapshot: $snapshot_error"
+            fi
         fi
+        docker exec "$container_id" sh -c "rm -f /tmp/pre_count.json" 2>/dev/null || true
         log DEBUG "Pre-import workflow count: $pre_import_workflow_count"
     fi
 
@@ -4125,7 +4149,6 @@ restore() {
     local copy_status="success"
     local existing_workflow_snapshot=""
     local existing_workflow_mapping=""
-    local staged_manifest_copy=""
     existing_workflow_snapshot_source=""
 
     # Copy workflow file if needed
@@ -4207,22 +4230,16 @@ restore() {
                 fi
             fi
 
+            # Preserve staged manifest for in-place updates during reconciliation
             if [[ -n "$staged_manifest_file" && -f "$staged_manifest_file" ]]; then
-                staged_manifest_copy=$(mktemp -t n8n-staged-workflows-XXXXXXXX.json)
-                if ! cp "$staged_manifest_file" "$staged_manifest_copy"; then
-                    log WARN "Unable to retain staged workflow manifest; duplicate detection may be limited."
-                    rm -f "$staged_manifest_copy"
-                    staged_manifest_copy=""
+                if [[ -n "${RESTORE_MANIFEST_STAGE_DEBUG_PATH:-}" ]]; then
+                    if ! cp "$staged_manifest_file" "${RESTORE_MANIFEST_STAGE_DEBUG_PATH}" 2>/dev/null; then
+                        log DEBUG "Unable to persist staged manifest to ${RESTORE_MANIFEST_STAGE_DEBUG_PATH}"
+                    else
+                        log DEBUG "Persisted staged manifest to ${RESTORE_MANIFEST_STAGE_DEBUG_PATH}"
+                    fi
                 fi
-                        if [[ -n "${RESTORE_MANIFEST_STAGE_DEBUG_PATH:-}" ]]; then
-                            if ! cp "$staged_manifest_file" "${RESTORE_MANIFEST_STAGE_DEBUG_PATH}" 2>/dev/null; then
-                                log DEBUG "Unable to persist staged manifest to ${RESTORE_MANIFEST_STAGE_DEBUG_PATH}"
-                            else
-                                log DEBUG "Persisted staged manifest to ${RESTORE_MANIFEST_STAGE_DEBUG_PATH}"
-                            fi
-                        fi
-                rm -f "$staged_manifest_file"
-                staged_manifest_file=""
+                # Keep staged_manifest_file for in-place reconciliation (no copy needed)
             fi
         fi
     fi
@@ -4311,7 +4328,7 @@ restore() {
                         
                         # CRITICAL: Capture post-import snapshot to identify newly created workflow IDs
                         # This handles cases where n8n rejects invalid IDs (like '47') and creates new ones
-                        if [[ -n "$existing_workflow_snapshot" && -f "$existing_workflow_snapshot" && -n "$staged_manifest_copy" && -f "$staged_manifest_copy" ]]; then
+                        if [[ -n "$existing_workflow_snapshot" && -f "$existing_workflow_snapshot" && -n "$staged_manifest_file" && -f "$staged_manifest_file" ]]; then
                             local post_import_snapshot=""
                             SNAPSHOT_EXISTING_WORKFLOWS_PATH=""
                             if snapshot_existing_workflows "$container_id" "" "$keep_api_session_alive"; then
@@ -4319,36 +4336,18 @@ restore() {
                                 log DEBUG "Captured post-import workflow snapshot for ID reconciliation"
                                 
                                 # Update manifest with actual imported workflow IDs by comparing snapshots
+                                # The reconcile function now exports metrics directly
                                 local updated_manifest
-                                updated_manifest=$(mktemp -t n8n-updated-manifest-XXXXXXXX.json)
-                                if reconcile_imported_workflow_ids "$existing_workflow_snapshot" "$post_import_snapshot" "$staged_manifest_copy" "$updated_manifest"; then
-                                    mv "$updated_manifest" "$staged_manifest_copy"
+                                updated_manifest=$(mktemp -t n8n-updated-manifest-XXXXXXXX.ndjson)
+                                if reconcile_imported_workflow_ids "$existing_workflow_snapshot" "$post_import_snapshot" "$staged_manifest_file" "$updated_manifest"; then
+                                    mv "$updated_manifest" "$staged_manifest_file"
                                     log INFO "Reconciled manifest with actual imported workflow IDs from n8n"
-                                    summarize_manifest_assignment_status "$staged_manifest_copy" "post-import"
+                                    summarize_manifest_assignment_status "$staged_manifest_file" "post-import"
                                     
-                                    # Export workflow metrics for restore summary
-                                    local post_count
-                                    post_count=$(jq 'length' "$post_import_snapshot" 2>/dev/null || echo 0)
-                                    export RESTORE_POST_IMPORT_COUNT="$post_count"
-                                    
-                                    # Count created vs updated from ORIGINAL staged manifest (not reconciled version)
-                                    # The reconciled manifest might have different structure
-                                    local created=0 updated=0
-                                    if [[ -n "$staged_manifest_file" && -f "$staged_manifest_file" ]]; then
-                                        while IFS= read -r entry; do
-                                            local existing_id staged_id
-                                            existing_id=$(printf '%s' "$entry" | jq -r '.existingWorkflowId // empty' 2>/dev/null)
-                                            staged_id=$(printf '%s' "$entry" | jq -r '.id // empty' 2>/dev/null)
-                                            if [[ -n "$existing_id" && -n "$staged_id" && "$staged_id" == "$existing_id" ]]; then
-                                                updated=$((updated + 1))
-                                            else
-                                                created=$((created + 1))
-                                            fi
-                                        done < "$staged_manifest_file"
-                                    fi
-                                    export RESTORE_WORKFLOWS_CREATED="$created"
-                                    export RESTORE_WORKFLOWS_UPDATED="$updated"
-                                    export RESTORE_WORKFLOWS_TOTAL="$((created + updated))"
+                                    # Metrics already exported by reconcile_imported_workflow_ids:
+                                    # - RESTORE_WORKFLOWS_CREATED
+                                    # - RESTORE_WORKFLOWS_UPDATED
+                                    # - RESTORE_POST_IMPORT_COUNT
                                 else
                                     rm -f "$updated_manifest"
                                     log WARN "Unable to reconcile workflow IDs from post-import snapshot; folder assignment may be affected"
@@ -4414,22 +4413,22 @@ restore() {
                 log WARN "Workflow directory unavailable for folder restoration; skipping folder assignment."
             fi
         else
-            if ! apply_folder_structure_from_directory "$folder_source_dir" "$container_id" "$is_dry_run" "" "$staged_manifest_copy"; then
+            if ! apply_folder_structure_from_directory "$folder_source_dir" "$container_id" "$is_dry_run" "" "$staged_manifest_file"; then
                 log WARN "Folder structure restoration encountered issues; workflows may require manual reorganization."
             fi
         fi
     fi
 
     # Clean up manifest and snapshot files
-    if [[ -n "$staged_manifest_copy" && -f "$staged_manifest_copy" ]]; then
+    if [[ -n "$staged_manifest_file" && -f "$staged_manifest_file" ]]; then
         if [[ -n "${RESTORE_MANIFEST_DEBUG_PATH:-}" ]]; then
-            if ! cp "$staged_manifest_copy" "${RESTORE_MANIFEST_DEBUG_PATH}" 2>/dev/null; then
+            if ! cp "$staged_manifest_file" "${RESTORE_MANIFEST_DEBUG_PATH}" 2>/dev/null; then
                 log DEBUG "Unable to persist restore manifest to ${RESTORE_MANIFEST_DEBUG_PATH}"
             else
                 log DEBUG "Persisted restore manifest to ${RESTORE_MANIFEST_DEBUG_PATH}"
             fi
         fi
-        rm -f "$staged_manifest_copy"
+        rm -f "$staged_manifest_file"
     fi
     if [[ -n "$existing_workflow_snapshot" && -f "$existing_workflow_snapshot" ]]; then
         rm -f "$existing_workflow_snapshot"

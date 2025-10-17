@@ -256,14 +256,14 @@ if [[ ! -f "$MANIFEST_PATH" ]]; then
     exit 1
 fi
 
-MANIFEST_COUNT=$(jq 'length' "$MANIFEST_PATH")
+MANIFEST_COUNT=$(jq -s 'length' "$MANIFEST_PATH")
 if [[ "$MANIFEST_COUNT" -ne 4 ]]; then
   echo "Expected manifest to contain four entries, found $MANIFEST_COUNT" >&2
     cat "$MANIFEST_PATH" >&2
     exit 1
 fi
 
-MISSING_NOTES=$(jq '[ .[]
+MISSING_NOTES=$(jq -s '[ .[]
   | select((.originalWorkflowId // "") | length > 0)
   | select(((.originalWorkflowId // "") | test("^[A-Za-z0-9]{16}$")) | not)
   | select(((.sanitizedIdNote // "") | length) == 0)
@@ -274,14 +274,14 @@ if [[ "$MISSING_NOTES" -ne 0 ]]; then
   exit 1
 fi
 
-MANIFEST_MISMATCH=$(jq -n --argjson manifest "$(cat "$MANIFEST_PATH")" --argjson exported "$POST_EXPORT" '
-  [ $manifest[] as $entry |
-  ($exported | map(select((.name // "") == ($entry.name // ""))) | first) as $match
-  | if $match == null then {name: $entry.name, reason: "missing"}
-    elif ($match.id // "") | test("^[A-Za-z0-9]{16}$") | not then {name: $entry.name, reason: "invalid_id"}
-    else empty end
+MANIFEST_MISMATCH=$(jq -s --argjson exported "$POST_EXPORT" '
+  [ .[] as $entry |
+    ($exported | map(select((.name // "") == ($entry.name // ""))) | first) as $match
+    | if $match == null then {name: $entry.name, reason: "missing"}
+      elif ($match.id // "") | test("^[A-Za-z0-9]{16}$") | not then {name: $entry.name, reason: "invalid_id"}
+      else empty end
   ]
-')
+' "$MANIFEST_PATH")
 
 if [[ "$MANIFEST_MISMATCH" != "[]" ]]; then
   echo "Manifest did not align with exported workflow IDs" >&2
