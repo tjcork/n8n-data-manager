@@ -382,10 +382,10 @@ normalize_github_path_prefix() {
             fi
             local normalized_segment
             normalized_segment="$(sanitize_filename_component "$segment" 96)"
-            normalized_segment="${normalized_segment// /-}"
+            # Preserve spaces in folder names (don't convert to hyphens)
             normalized_segment="${normalized_segment//--/-}"
             normalized_segment="${normalized_segment//__/_}"
-            normalized_segment="${normalized_segment//[^A-Za-z0-9._-]/}"
+            normalized_segment="${normalized_segment//[^A-Za-z0-9._ -]/}"
             normalized_segment="$(printf '%s' "$normalized_segment" | sed 's/^-\+//;s/-\+$//')"
             if [[ -z "$normalized_segment" || "$normalized_segment" == "." || "$normalized_segment" == ".." ]]; then
                 continue

@@ -1098,9 +1098,7 @@ cleanup_n8n_session() {
     if [[ "$mode" == "force" ]]; then
         if [[ -n "$N8N_SESSION_COOKIE_FILE" && -f "$N8N_SESSION_COOKIE_FILE" ]]; then
             rm -f "$N8N_SESSION_COOKIE_FILE"
-            if [[ "$verbose" == "true" ]]; then
-                log DEBUG "Cleaned up session cookie file"
-            fi
+            log DEBUG "Cleaned up session cookie file (EXIT trap)"
         fi
         N8N_SESSION_COOKIE_FILE=""
         N8N_SESSION_COOKIE_INITIALIZED="false"
@@ -1111,9 +1109,7 @@ cleanup_n8n_session() {
     if [[ "$N8N_SESSION_REUSE_ENABLED" != "true" ]]; then
         if [[ -n "$N8N_SESSION_COOKIE_FILE" && -f "$N8N_SESSION_COOKIE_FILE" ]]; then
             rm -f "$N8N_SESSION_COOKIE_FILE"
-            if [[ "$verbose" == "true" ]]; then
-                log DEBUG "Cleaned up session cookie file"
-            fi
+            log DEBUG "Cleaned up session cookie file"
         fi
         N8N_SESSION_COOKIE_FILE=""
         N8N_SESSION_COOKIE_INITIALIZED="false"
@@ -1172,9 +1168,8 @@ prepare_n8n_api_auth() {
 }
 
 finalize_n8n_api_auth() {
-    if [[ "$N8N_API_AUTH_MODE" == "session" && "$verbose" == "true" ]]; then
-        log DEBUG "Leaving n8n session authentication active for reuse."
-    fi
+    # Session will be cleaned up by EXIT trap if needed
+    # No need to log here as this is called during normal finalization
     N8N_API_AUTH_MODE=""
 }
 

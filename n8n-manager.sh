@@ -805,5 +805,6 @@ main() {
 
 # --- Script Execution ---
 trap 'log ERROR "An unexpected error occurred (Line: $LINENO). Aborting."; exit 1' ERR
+trap 'cleanup_n8n_session force 2>/dev/null || true; exit' EXIT TERM INT
 main "$@"
 exit 0
