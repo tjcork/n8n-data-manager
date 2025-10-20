@@ -299,6 +299,74 @@ ensure_n8n_session_credentials() {
     return 0
 }
 
+validate_credentials_payload() {
+    local credentials_path="$1"
+
+    if [[ ! -f "$credentials_path" ]]; then
+        log ERROR "Credentials file not found for validation: $credentials_path"
+        return 1
+    fi
+
+    local jq_temp_err
+    jq_temp_err=$(mktemp -t n8n-cred-validate-err-XXXXXXXX.log)
+    if ! jq empty "$credentials_path" 2>"$jq_temp_err"; then
+        local jq_error
+        jq_error=$(cat "$jq_temp_err" 2>/dev/null)
+        rm -f "$jq_temp_err"
+        log ERROR "Unable to parse credentials file for validation: $credentials_path"
+        if [[ -n "$jq_error" ]]; then
+            log DEBUG "jq parse error: $jq_error"
+        fi
+        return 1
+    fi
+    rm -f "$jq_temp_err"
+
+    local invalid_entries
+    invalid_entries=$(jq -r '
+        [ .[]
+            | select((has("data") | not) or ((.data | type) != "object"))
+            | (.name // (if has("id") then ("ID:" + (.id|tostring)) else "unknown" end))
+        ]
+        | unique
+        | join(", ")
+    ' "$credentials_path") || invalid_entries=""
+
+    if [[ -n "$invalid_entries" ]]; then
+        log ERROR "Credentials still contain encrypted or invalid data for: $invalid_entries"
+        return 1
+    fi
+
+    local basic_filter_file
+    basic_filter_file=$(mktemp -t n8n-cred-basic-filter-XXXXXXXX.jq)
+    cat <<'JQ_FILTER' > "$basic_filter_file"
+def safe_credential_value($credential; $field):
+    (if ($credential.data // empty) | type == "object" then $credential.data[$field] else empty end) // "";
+
+[ .[]
+    | select((.type // "") == "httpBasicAuth")
+    | select(
+        ((.data // empty) | type) != "object"
+        or (safe_credential_value(.; "user") | tostring | length) == 0
+        or (safe_credential_value(.; "password") | tostring | length) == 0
+    )
+    | (.name // (if has("id") then ("ID:" + (.id|tostring)) else "unknown" end))
+] | unique | join(", ")
+JQ_FILTER
+
+    local basic_missing
+    basic_missing=$(jq -r -f "$basic_filter_file" "$credentials_path") || basic_missing=""
+    rm -f "$basic_filter_file"
+
+    if [[ -n "$basic_missing" ]]; then
+        rm -f "$normalized_json"
+        log ERROR "Basic Auth credentials missing username or password: $basic_missing"
+        return 1
+    fi
+
+    rm -f "$jq_temp_err"
+    return 0
+}
+
 # Comprehensive API validation - tests all available authentication methods
 # Build mapping of workflows to sanitized folder paths
 get_workflow_folder_mapping() {
