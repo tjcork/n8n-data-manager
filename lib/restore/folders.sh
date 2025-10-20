@@ -397,6 +397,7 @@ append_assignment_audit_record() {
     return 0
 }
 
+
 apply_directory_structure_entries() {
     local entries_path="$1"
     local container_id="$2"
@@ -1118,4 +1119,41 @@ apply_directory_structure_entries() {
 
     log DEBUG "Folder structure restored for $moved_count workflow(s)."
     return 0
+}
+
+
+apply_folder_structure_from_directory() {
+    local source_dir="$1"
+    local container_id="$2"
+    local is_dry_run="$3"
+    local container_credentials_path="$4"
+    local staged_manifest_path="${5:-}"
+
+    if [[ "$is_dry_run" == "true" ]]; then
+        log DRYRUN "Would restore folder structure by scanning directory: $source_dir"
+        return 0
+    fi
+
+    if [[ -z "$source_dir" || ! -d "$source_dir" ]]; then
+    log WARN "Workflow directory not found: ${source_dir:-<empty>}"
+        return 0
+    fi
+
+    local entries_tmp
+    entries_tmp=$(mktemp -t n8n-structure-entries-XXXXXXXX.json)
+    if ! collect_directory_structure_entries "$source_dir" "$entries_tmp" "$staged_manifest_path"; then
+        rm -f "$entries_tmp"
+        log WARN "Unable to derive folder layout from directory; skipping folder restoration."
+        return 0
+    fi
+
+    summarize_manifest_assignment_status "$entries_tmp" "folder structure"
+
+    local result=0
+    if ! apply_directory_structure_entries "$entries_tmp" "$container_id" "$is_dry_run" "$container_credentials_path"; then
+        result=1
+    fi
+
+    rm -f "$entries_tmp"
+    return $result
 }

@@ -1,549 +1,6 @@
 #!/usr/bin/env bash
 # Manifest reconciliation and folder assignment helpers for restore workflow
 
-collect_directory_structure_entries() {
-    local source_dir="$1"
-    local output_path="$2"
-    local manifest_path="${3:-}"
-
-    if [[ -z "$source_dir" || ! -d "$source_dir" ]]; then
-        log ERROR "Cannot derive folder structure from directory - missing path: ${source_dir:-<empty>}"
-        return 1
-    fi
-
-    if [[ -z "$output_path" ]]; then
-        log ERROR "Output path not provided for directory-derived folder structure entries"
-        return 1
-    fi
-
-    local entries_file
-    entries_file=$(mktemp -t n8n-directory-entries-XXXXXXXX.json)
-    printf '[]' > "$entries_file"
-
-    local success=true
-    local processed=0
-
-    local manifest_indexed=false
-    declare -A manifest_path_entries=()
-    declare -A manifest_path_scores=()
-    declare -A manifest_path_updates=()
-    declare -A manifest_id_entries=()
-    declare -A manifest_id_scores=()
-    declare -A manifest_id_updates=()
-    declare -A manifest_folder_name_entries=()
-    declare -A manifest_folder_name_scores=()
-    declare -A manifest_folder_name_updates=()
-
-    if [[ -n "$manifest_path" && -f "$manifest_path" ]]; then
-        if [[ "$verbose" == "true" ]]; then
-            log DEBUG "Indexing staged manifest from $manifest_path"
-        fi
-
-        # Process NDJSON manifest line-by-line to build indexes
-        local manifest_line entry_score entry_updated path_key name_key payload
-        while IFS= read -r manifest_line; do
-            [[ -z "$manifest_line" ]] && continue
-
-            # Extract normalized keys using jq
-            entry_score=$(printf '%s' "$manifest_line" | jq -r '
-                if (.actualImportedId // "" | length) > 0 then 400
-                elif (.id // "" | length) > 0 then 300
-                elif (.existingWorkflowId // "" | length) > 0 then 200
-                elif (.originalWorkflowId // "" | length) > 0 then 100
-                else 0 end
-            ' 2>/dev/null || printf '0')
-            
-            entry_updated=$(printf '%s' "$manifest_line" | jq -r '.updatedAt // .metaUpdatedAt // .importedAt // ""' 2>/dev/null)
-            
-            # Compute normalized path key: storagePath/filename
-            path_key=$(printf '%s' "$manifest_line" | jq -r '
-                def norm(v):
-                    (v // "")
-                    | gsub("\\\\\\\\"; "/")
-                    | gsub("[[:space:]]+"; " ")
-                    | ascii_downcase
-                    | gsub("^ "; "")
-                    | gsub(" $"; "")
-                    | gsub("/+"; "/")
-                    | gsub("^/"; "")
-                    | gsub("/$"; "");
-                
-                if (.storagePath // "" | length) > 0 and (.filename // "" | length) > 0 then
-                    norm((.storagePath // "") + "/" + (.filename // ""))
-                elif (.filename // "" | length) > 0 then
-                    norm(.filename)
-                else "" end
-            ' 2>/dev/null)
-            
-            # Compute normalized name key: storagePath|name
-            name_key=$(printf '%s' "$manifest_line" | jq -r '
-                def norm(v):
-                    (v // "")
-                    | gsub("\\\\\\\\"; "/")
-                    | gsub("[[:space:]]+"; " ")
-                    | ascii_downcase
-                    | gsub("^ "; "")
-                    | gsub(" $"; "")
-                    | gsub("/+"; "/")
-                    | gsub("^/"; "")
-                    | gsub("/$"; "");
-                
-                if (.name // "" | length) == 0 then ""
-                else
-                    norm(.name) as $n |
-                    if ($n | length) == 0 then ""
-                    else
-                        norm(.storagePath) as $s |
-                        if ($s | length) > 0 then $s + "|" + $n else $n end
-                    end
-                end
-            ' 2>/dev/null)
-            
-            payload="$manifest_line"
-
-            assign_manifest_lookup_entry manifest_path_entries manifest_path_scores manifest_path_updates "$path_key" "$entry_score" "$entry_updated" "$payload"
-            assign_manifest_lookup_entry manifest_folder_name_entries manifest_folder_name_scores manifest_folder_name_updates "$name_key" "$entry_score" "$entry_updated" "$payload"
-
-            # Extract all ID fields and index by them
-            local -a id_keys=()
-            mapfile -t id_keys < <(printf '%s' "$manifest_line" | jq -r '
-                [.actualImportedId, .id, .existingWorkflowId, .originalWorkflowId] 
-                | map(select(. != null and (. | tostring | length) > 0) | tostring | gsub("[[:space:]]+"; "") | ascii_downcase) 
-                | unique[]
-            ' 2>/dev/null)
-            
-            for id_key in "${id_keys[@]}"; do
-                [[ -z "$id_key" ]] && continue
-                assign_manifest_lookup_entry manifest_id_entries manifest_id_scores manifest_id_updates "$id_key" "$entry_score" "$entry_updated" "$payload"
-            done
-
-            manifest_indexed=true
-        done < "$manifest_path"
-
-        if [[ "$verbose" == "true" ]]; then
-            log DEBUG "Indexed staged manifest entries for folder lookup (path=${#manifest_path_entries[@]}, id=${#manifest_id_entries[@]}, folder-name=${#manifest_folder_name_entries[@]})"
-        fi
-    fi
-
-    while IFS= read -r -d '' workflow_file; do
-        local filename
-        filename=$(basename "$workflow_file")
-
-        local relative
-        relative="${workflow_file#$source_dir/}"
-        if [[ "$relative" == "$workflow_file" ]]; then
-            relative="$filename"
-        fi
-
-        local relative_dir
-        relative_dir="${relative%/*}"
-        if [[ "$relative_dir" == "$relative" ]]; then
-            relative_dir=""
-        fi
-        relative_dir="${relative_dir%/}"
-
-        local canonical_relative_path
-        canonical_relative_path="$(strip_github_path_prefix "$relative")"
-        canonical_relative_path="${canonical_relative_path#/}"
-        canonical_relative_path="${canonical_relative_path%/}"
-
-        local raw_storage_path="$relative_dir"
-        raw_storage_path="${raw_storage_path#/}"
-        raw_storage_path="${raw_storage_path%/}"
-
-        local relative_dir_without_prefix
-        relative_dir_without_prefix="$(strip_github_path_prefix "$raw_storage_path")"
-        relative_dir_without_prefix="${relative_dir_without_prefix#/}"
-        relative_dir_without_prefix="${relative_dir_without_prefix%/}"
-
-        local storage_path
-        storage_path="$(compose_repo_storage_path "$relative_dir_without_prefix")"
-        storage_path="${storage_path#/}"
-        storage_path="${storage_path%/}"
-
-        if [[ -n "$storage_path" ]] && ! path_matches_github_prefix "$storage_path"; then
-            log DEBUG "Skipping workflow outside configured GITHUB_PATH: $workflow_file"
-            continue
-        fi
-
-        local manifest_entry=""
-        local manifest_existing_id=""
-        local manifest_original_id=""
-        local manifest_actual_id=""
-        local manifest_strategy=""
-        local manifest_warning=""
-        local manifest_note=""
-        local manifest_entry_source=""
-    local manifest_target_slug_path=""
-    local manifest_target_display_path=""
-    local manifest_target_project_slug=""
-    local manifest_target_project_name=""
-
-        local workflow_id_from_file=""
-        local workflow_name_from_file=""
-        local workflow_metadata=""
-        if workflow_metadata=$(jq -c '{id: (.id // empty), name: (.name // empty)}' "$workflow_file" 2>/dev/null); then
-            workflow_id_from_file=$(printf '%s' "$workflow_metadata" | jq -r '.id // empty' 2>/dev/null)
-            workflow_name_from_file=$(printf '%s' "$workflow_metadata" | jq -r '.name // empty' 2>/dev/null)
-        fi
-
-        if $manifest_indexed; then
-            local manifest_path_candidate="$filename"
-            if [[ -n "$storage_path" ]]; then
-                manifest_path_candidate="${storage_path%/}/$filename"
-            fi
-            local path_norm
-            path_norm=$(normalize_manifest_lookup_key "$manifest_path_candidate")
-            local id_norm
-            id_norm=$(normalize_manifest_id_key "$workflow_id_from_file")
-            local name_norm
-            name_norm=$(build_manifest_name_key "$storage_path" "$workflow_name_from_file")
-
-            # Perform manifest lookups
-            if [[ -n "$path_norm" && -n "${manifest_path_entries[$path_norm]+set}" ]]; then
-                manifest_entry="${manifest_path_entries[$path_norm]}"
-                manifest_entry_source="path"
-            fi
-            if [[ -z "$manifest_entry" && -n "$id_norm" && -n "${manifest_id_entries[$id_norm]+set}" ]]; then
-                manifest_entry="${manifest_id_entries[$id_norm]}"
-                manifest_entry_source="workflow-id"
-            fi
-            if [[ -z "$manifest_entry" && -n "$name_norm" && -n "${manifest_folder_name_entries[$name_norm]+set}" ]]; then
-                manifest_entry="${manifest_folder_name_entries[$name_norm]}"
-                manifest_entry_source="folder-name"
-            fi
-        fi
-
-        if [[ -n "$manifest_entry" ]]; then
-            manifest_existing_id=$(printf '%s' "$manifest_entry" | jq -r '.existingWorkflowId // empty' 2>/dev/null)
-            manifest_original_id=$(printf '%s' "$manifest_entry" | jq -r '.originalWorkflowId // empty' 2>/dev/null)
-            manifest_actual_id=$(printf '%s' "$manifest_entry" | jq -r '.actualImportedId // empty' 2>/dev/null)
-            manifest_strategy=$(printf '%s' "$manifest_entry" | jq -r '.idResolutionStrategy // empty' 2>/dev/null)
-            manifest_warning=$(printf '%s' "$manifest_entry" | jq -r '.idReconciliationWarning // empty' 2>/dev/null)
-            manifest_note=$(printf '%s' "$manifest_entry" | jq -r '.idResolutionNote // empty' 2>/dev/null)
-            manifest_target_slug_path=$(printf '%s' "$manifest_entry" | jq -r '.targetFolderSlugPath // empty' 2>/dev/null)
-            manifest_target_display_path=$(printf '%s' "$manifest_entry" | jq -r '.targetFolderDisplayPath // empty' 2>/dev/null)
-            manifest_target_project_slug=$(printf '%s' "$manifest_entry" | jq -r '.targetProjectSlug // empty' 2>/dev/null)
-            manifest_target_project_name=$(printf '%s' "$manifest_entry" | jq -r '.targetProjectName // empty' 2>/dev/null)
-            
-            if [[ "$verbose" == "true" ]]; then
-                log DEBUG "Matched manifest entry for '${workflow_name_from_file:-$filename}' via $manifest_entry_source (actualId=${manifest_actual_id:-none}, existingId=${manifest_existing_id:-none})"
-            fi
-        elif $manifest_indexed && [[ "$verbose" == "true" ]]; then
-            log DEBUG "No manifest entry found for '$workflow_file'"
-        fi
-
-        # Sanitize manifest folder/project data
-        if [[ -n "$manifest_target_slug_path" ]]; then
-            manifest_target_slug_path="${manifest_target_slug_path#/}"
-            manifest_target_slug_path="${manifest_target_slug_path%/}"
-        fi
-        if [[ -n "$manifest_target_display_path" ]]; then
-            manifest_target_display_path="${manifest_target_display_path//$'\r'/}"
-            manifest_target_display_path="${manifest_target_display_path//$'\n'/}"
-        fi
-        if [[ -n "$manifest_target_project_slug" ]]; then
-            manifest_target_project_slug="$(sanitize_slug "$manifest_target_project_slug")"
-        fi
-
-        # Note: We don't override storage_path with manifest_target_slug_path here because:
-        # 1. storage_path is used for internal path matching and should match the file system structure
-        # 2. manifest_target_slug_path may contain old slug format (e.g., "Asana_3" instead of "Asana 3")
-        # 3. Folder assignment will use manifest display/project data directly from manifest entries
-
-        # PRIORITY ORDER for workflow ID resolution:
-        # 1. Manifest (staged during import with injected IDs) - MOST RELIABLE
-        # 2. Workflow file on disk (may not have ID if original backup didn't)
-        # 3. Manifest existing ID (fallback for replacements)
-        
-        local workflow_id=""
-        local workflow_id_source="none"
-
-        # Try manifest FIRST (contains IDs after V4 injection)
-        if [[ -n "$manifest_actual_id" ]]; then
-            workflow_id="$manifest_actual_id"
-            workflow_id_source="manifest-actual"
-        elif [[ -n "$manifest_entry" ]]; then
-            workflow_id=$(printf '%s' "$manifest_entry" | jq -r '.id // empty' 2>/dev/null)
-            if [[ -n "$workflow_id" && "$workflow_id" != "null" ]]; then
-                workflow_id_source="manifest-id"
-            else
-                workflow_id=""
-            fi
-        fi
-        
-        # Fallback to file if manifest doesn't have ID
-        if [[ -z "$workflow_id" ]]; then
-            if [[ -n "$workflow_id_from_file" && "$workflow_id_from_file" != "null" ]]; then
-                workflow_id="$workflow_id_from_file"
-                workflow_id_source="file"
-            else
-                workflow_id=""
-            fi
-        fi
-        
-        # Last resort: use existingWorkflowId from manifest
-        if [[ -z "$workflow_id" && -n "$manifest_existing_id" ]]; then
-            workflow_id="$manifest_existing_id"
-            workflow_id_source="manifest_existing"
-        fi
-
-        local workflow_name
-        workflow_name="$workflow_name_from_file"
-        if [[ -z "$workflow_name" && -n "$manifest_entry" ]]; then
-            workflow_name=$(printf '%s' "$manifest_entry" | jq -r '.name // empty' 2>/dev/null)
-        fi
-        if [[ -z "$workflow_name" || "$workflow_name" == "null" ]]; then
-            workflow_name="Unnamed Workflow"
-        fi
-
-        if [[ "$verbose" == "true" && -n "$manifest_entry_source" && -n "$manifest_entry" ]]; then
-            log DEBUG "Matched manifest entry for '$workflow_name' via ${manifest_entry_source} lookup."
-        fi
-
-        if [[ "$verbose" == "true" && -n "$manifest_entry" && -z "$manifest_actual_id" ]]; then
-            local strategy_display="${manifest_strategy:-unresolved}"
-            log DEBUG "Manifest entry for '$workflow_name' lacks reconciled ID (strategy: ${strategy_display})."
-        fi
-
-        if [[ -z "$workflow_id" && -n "$manifest_warning" ]]; then
-            if [[ "$verbose" == "true" ]]; then
-                log DEBUG "Manifest warning for '$workflow_name': $manifest_warning"
-            fi
-        fi
-
-        if [[ -n "$manifest_note" && "$verbose" == "true" ]]; then
-            log DEBUG "Manifest resolution note for '$workflow_name': $manifest_note"
-        fi
-
-        if [[ -z "$workflow_id" ]]; then
-            log WARN "Collecting folder entry without workflow ID for '$workflow_name' (file: $filename, manifest available: $([[ -n "$manifest_entry" ]] && echo "yes" || echo "no"))"
-        elif [[ "$verbose" == "true" ]]; then
-            log DEBUG "Collected folder entry for '$workflow_name' with ID '$workflow_id' (source: $workflow_id_source)"
-        fi
-
-        local entry_project_slug=""
-        local entry_project_display=""
-        local -a folder_slugs=()
-        local -a folder_displays=()
-        local entry_display_path=""
-
-        local folder_context_source="$relative_dir_without_prefix"
-        if [[ -n "$manifest_target_slug_path" ]]; then
-            folder_context_source="$manifest_target_slug_path"
-        fi
-
-        compute_entry_folder_context \
-            "$folder_context_source" \
-            entry_project_slug \
-            entry_project_display \
-            folder_slugs \
-            folder_displays \
-            entry_display_path
-
-        if [[ -z "$entry_project_slug" ]]; then
-            entry_project_slug="personal"
-        fi
-        if [[ -z "$entry_project_display" ]]; then
-            entry_project_display=$(unslug_to_title "$entry_project_slug")
-        fi
-
-        if [[ -n "$manifest_target_project_slug" ]]; then
-            entry_project_slug="$manifest_target_project_slug"
-        fi
-        if [[ -n "$manifest_target_project_name" ]]; then
-            entry_project_display="$manifest_target_project_name"
-        fi
-
-        local relative_path="$canonical_relative_path"
-        local display_path="$entry_display_path"
-        if [[ -z "$display_path" ]]; then
-            display_path="$entry_project_display"
-        fi
-        if [[ -z "$display_path" ]]; then
-            display_path=$(unslug_to_title "$entry_project_slug")
-        fi
-
-        if [[ -n "$manifest_target_display_path" ]]; then
-            display_path="$manifest_target_display_path"
-        fi
-
-        local manifest_project_slug=""
-        local manifest_project_display=""
-        local manifest_display_path=""
-        if [[ -n "$manifest_entry" ]]; then
-            manifest_project_slug=$(printf '%s' "$manifest_entry" | jq -r '.project.slug // empty' 2>/dev/null)
-            manifest_project_display=$(printf '%s' "$manifest_entry" | jq -r '.project.name // empty' 2>/dev/null)
-            manifest_display_path=$(printf '%s' "$manifest_entry" | jq -r '.displayPath // empty' 2>/dev/null)
-        fi
-
-        local folder_changed_note=""
-        if [[ -n "$manifest_project_slug" && "$manifest_project_slug" != "$entry_project_slug" ]]; then
-            local from_display="$manifest_project_display"
-            if [[ -z "$from_display" ]]; then
-                from_display=$(unslug_to_title "$manifest_project_slug")
-            fi
-            local to_display="$entry_project_display"
-            if [[ -z "$to_display" ]]; then
-                to_display=$(unslug_to_title "$entry_project_slug")
-            fi
-            folder_changed_note="Project adjusted to '$to_display' (was '$from_display')"
-        fi
-
-        if [[ -n "$manifest_display_path" && -n "$display_path" && "$manifest_display_path" != "$display_path" ]]; then
-            folder_changed_note=$(append_sanitized_note "$folder_changed_note" "Folder path updated to '$display_path'")
-        fi
-
-        if [[ -n "$folder_changed_note" ]]; then
-            manifest_note=$(append_sanitized_note "$manifest_note" "$folder_changed_note")
-        fi
-
-        local folder_array_file
-        folder_array_file=$(mktemp -t n8n-folder-array-XXXXXXXX.json)
-        printf '[]' > "$folder_array_file"
-        if ((${#folder_slugs[@]} > 0)); then
-            local idx
-            for idx in "${!folder_slugs[@]}"; do
-                local slug="${folder_slugs[$idx]}"
-                [[ -z "$slug" ]] && continue
-                local folder_name="${folder_displays[$idx]}"
-                local folder_entry
-                folder_entry=$(jq -n --arg name "$folder_name" --arg slug "$slug" '{name: $name, slug: $slug}' 2>/dev/null)
-                if [[ -z "$folder_entry" ]]; then
-                    success=false
-                    continue
-                fi
-                local folder_entry_tmp
-                folder_entry_tmp=$(mktemp -t n8n-folder-entry-XXXXXXXX.json)
-                printf '%s\n' "$folder_entry" > "$folder_entry_tmp"
-                if ! jq --slurpfile new "$folder_entry_tmp" '. + $new' "$folder_array_file" > "${folder_array_file}.tmp" 2>/dev/null; then
-                    log WARN "Failed to append folder segment '$folder_name' for workflow '$workflow_name'."
-                    rm -f "${folder_array_file}.tmp"
-                    success=false
-                    rm -f "$folder_entry_tmp"
-                    continue
-                fi
-                mv "${folder_array_file}.tmp" "$folder_array_file"
-                rm -f "$folder_entry_tmp"
-            done
-        fi
-
-        local entry_err
-        entry_err=$(mktemp -t n8n-folder-entry-XXXXXXXX.err)
-        local entry_json
-        entry_json=$(jq -n \
-            --arg id "$workflow_id" \
-            --arg name "$workflow_name" \
-            --arg filename "$filename" \
-            --arg relative "$relative_path" \
-            --arg storage "$storage_path" \
-            --arg display "$display_path" \
-            --arg projectSlug "$entry_project_slug" \
-            --arg projectName "$entry_project_display" \
-            --arg manifestExisting "$manifest_existing_id" \
-            --arg manifestOriginal "$manifest_original_id" \
-            --arg manifestActual "$manifest_actual_id" \
-            --arg manifestStrategy "$manifest_strategy" \
-            --arg manifestWarning "$manifest_warning" \
-            --arg manifestNote "$manifest_note" \
-            --slurpfile folders "$folder_array_file" \
-            'def blanknull($v): if $v == "" then null else $v end;
-            {
-                id: blanknull($id),
-                manifestActualWorkflowId: blanknull($manifestActual),
-                manifestExistingWorkflowId: blanknull($manifestExisting),
-                manifestOriginalWorkflowId: blanknull($manifestOriginal),
-                manifestResolutionStrategy: blanknull($manifestStrategy),
-                manifestResolutionWarning: blanknull($manifestWarning),
-                manifestResolutionNote: blanknull($manifestNote),
-                name: $name,
-                filename: $filename,
-                relativePath: $relative,
-                storagePath: $storage,
-                displayPath: $display,
-                project: {
-                    id: null,
-                    name: $projectName,
-                    slug: $projectSlug
-                },
-                folders: ($folders[0] // [])
-            }
-            | with_entries(
-                if (.key == "project" or .key == "folders") then .
-                elif (.value == null or (.value | type) == "string" and (.value | length) == 0) then empty
-                else . end
-            )' 2>"$entry_err")
-        local entry_status=$?
-
-        if [[ $entry_status -ne 0 || -z "$entry_json" || "$entry_json" == "null" ]]; then
-            if [[ -s "$entry_err" && "$verbose" == "true" ]]; then
-                local entry_error_preview
-                entry_error_preview=$(head -n 5 "$entry_err" 2>/dev/null)
-                if [[ -n "$entry_error_preview" ]]; then
-                    log DEBUG "jq error while building folder entry for '$workflow_name': $entry_error_preview"
-                fi
-            elif [[ "$verbose" == "true" ]]; then
-                log DEBUG "Folder entry builder returned status=$entry_status payload='${entry_json:-<empty>}' for '$workflow_name'"
-            fi
-            log WARN "Unable to build folder entry payload for '$workflow_name'; skipping."
-            rm -f "$entry_err"
-            rm -f "$folder_array_file"
-            success=false
-            continue
-        fi
-        rm -f "$entry_err"
-
-        local entry_temp
-        entry_temp=$(mktemp -t n8n-folder-entry-XXXXXXXX.json)
-        printf '%s\n' "$entry_json" > "$entry_temp"
-
-        if ! jq --slurpfile new "$entry_temp" '. + $new' "$entries_file" > "${entries_file}.tmp" 2>/dev/null; then
-            log ERROR "Failed to append folder entry for '$workflow_name' to manifest payload."
-            rm -f "${entries_file}.tmp"
-            rm -f "$entry_temp"
-            rm -f "$folder_array_file"
-            success=false
-            continue
-        fi
-
-        mv "${entries_file}.tmp" "$entries_file"
-        rm -f "$entry_temp"
-        rm -f "$folder_array_file"
-        processed=$((processed + 1))
-    done < <(find "$source_dir" -type f -name "*.json" \
-        ! -path "*/.credentials/*" \
-        ! -path "*/archive/*" \
-        ! -name "credentials.json" \
-        ! -name "workflows.json" \
-        ! -name ".n8n-folder-structure.json" -print0)
-
-    if (( processed == 0 )); then
-        rm -f "$entries_file"
-        log ERROR "No workflow files found when collecting folder structure entries from $source_dir"
-        return 1
-    fi
-
-    local payload_tmp
-    payload_tmp=$(mktemp -t n8n-folder-payload-XXXXXXXX.json)
-    if ! jq -n --slurpfile workflows "$entries_file" '{workflows: ($workflows[0] // [])}' > "$payload_tmp" 2>/dev/null; then
-        log ERROR "Failed to compose folder structure payload."
-        rm -f "$entries_file"
-        rm -f "$payload_tmp"
-        return 1
-    fi
-
-    mv "$payload_tmp" "$output_path"
-
-    rm -f "$entries_file"
-
-    if ! $success; then
-        log WARN "Collected folder structure entries with warnings. Some workflows may lack folder metadata."
-    fi
-
-    log INFO "Collected folder structure entries from $source_dir"
-    return 0
-}
-
 normalize_manifest_lookup_key() {
     local raw_input="${1:-}"
     if [[ -z "$raw_input" ]]; then
@@ -673,41 +130,6 @@ summarize_manifest_assignment_status() {
     return 0
 }
 
-apply_folder_structure_from_directory() {
-    local source_dir="$1"
-    local container_id="$2"
-    local is_dry_run="$3"
-    local container_credentials_path="$4"
-    local staged_manifest_path="${5:-}"
-
-    if [[ "$is_dry_run" == "true" ]]; then
-        log DRYRUN "Would restore folder structure by scanning directory: $source_dir"
-        return 0
-    fi
-
-    if [[ -z "$source_dir" || ! -d "$source_dir" ]]; then
-    log WARN "Workflow directory not found: ${source_dir:-<empty>}"
-        return 0
-    fi
-
-    local entries_tmp
-    entries_tmp=$(mktemp -t n8n-structure-entries-XXXXXXXX.json)
-    if ! collect_directory_structure_entries "$source_dir" "$entries_tmp" "$staged_manifest_path"; then
-        rm -f "$entries_tmp"
-        log WARN "Unable to derive folder layout from directory; skipping folder restoration."
-        return 0
-    fi
-
-    summarize_manifest_assignment_status "$entries_tmp" "folder structure"
-
-    local result=0
-    if ! apply_directory_structure_entries "$entries_tmp" "$container_id" "$is_dry_run" "$container_credentials_path"; then
-        result=1
-    fi
-
-    rm -f "$entries_tmp"
-    return $result
-}
 
 collect_directory_structure_entries() {
 	local source_dir="$1"
@@ -735,6 +157,9 @@ collect_directory_structure_entries() {
 	declare -A manifest_path_entries=()
 	declare -A manifest_path_scores=()
 	declare -A manifest_path_updates=()
+	declare -A manifest_relative_entries=()
+	declare -A manifest_relative_scores=()
+	declare -A manifest_relative_updates=()
 	declare -A manifest_id_entries=()
 	declare -A manifest_id_scores=()
 	declare -A manifest_id_updates=()
@@ -767,7 +192,7 @@ collect_directory_structure_entries() {
 			path_key=$(printf '%s' "$manifest_line" | jq -r '
 				def norm(v):
 					(v // "")
-					| gsub("\\\\\\\"; "/")
+					| gsub("\\\\"; "/")
 					| gsub("[[:space:]]+"; " ")
 					| ascii_downcase
 					| gsub("^ "; "")
@@ -783,11 +208,23 @@ collect_directory_structure_entries() {
 				else "" end
 			' 2>/dev/null)
 
+			local path_raw
+			path_raw=$(printf '%s' "$manifest_line" | jq -r '
+				if (.storagePath // "" | length) > 0 and (.filename // "" | length) > 0 then
+					(.storagePath // "") + "/" + (.filename // "")
+				elif (.filename // "" | length) > 0 then
+					.filename
+				else "" end
+			' 2>/dev/null)
+			if [[ "$path_raw" == "null" ]]; then
+				path_raw=""
+			fi
+
 			# Compute normalized name key: storagePath|name
 			name_key=$(printf '%s' "$manifest_line" | jq -r '
 				def norm(v):
 					(v // "")
-					| gsub("\\\\\\\"; "/")
+					| gsub("\\\\"; "/")
 					| gsub("[[:space:]]+"; " ")
 					| ascii_downcase
 					| gsub("^ "; "")
@@ -809,7 +246,22 @@ collect_directory_structure_entries() {
 
 			payload="$manifest_line"
 
+			local relative_raw
+			relative_raw=$(printf '%s' "$manifest_line" | jq -r '.relativePath // ""' 2>/dev/null)
+			if [[ -z "$relative_raw" || "$relative_raw" == "null" ]]; then
+				relative_raw="$path_raw"
+			fi
+			local relative_key=""
+			if [[ -n "$relative_raw" && "$relative_raw" != "null" ]]; then
+				local canonical_relative
+				canonical_relative=$(strip_github_path_prefix "$relative_raw")
+				canonical_relative="${canonical_relative#/}"
+				canonical_relative="${canonical_relative%/}"
+				relative_key=$(normalize_manifest_lookup_key "$canonical_relative")
+			fi
+
 			assign_manifest_lookup_entry manifest_path_entries manifest_path_scores manifest_path_updates "$path_key" "$entry_score" "$entry_updated" "$payload"
+			assign_manifest_lookup_entry manifest_relative_entries manifest_relative_scores manifest_relative_updates "$relative_key" "$entry_score" "$entry_updated" "$payload"
 			assign_manifest_lookup_entry manifest_folder_name_entries manifest_folder_name_scores manifest_folder_name_updates "$name_key" "$entry_score" "$entry_updated" "$payload"
 
 			# Extract all ID fields and index by them
@@ -829,7 +281,7 @@ collect_directory_structure_entries() {
 		done < "$manifest_path"
 
 		if [[ "$verbose" == "true" ]]; then
-			log DEBUG "Indexed staged manifest entries for folder lookup (path=${#manifest_path_entries[@]}, id=${#manifest_id_entries[@]}, folder-name=${#manifest_folder_name_entries[@]})"
+			log DEBUG "Indexed staged manifest entries for folder lookup (path=${#manifest_path_entries[@]}, relative=${#manifest_relative_entries[@]}, id=${#manifest_id_entries[@]}, folder-name=${#manifest_folder_name_entries[@]})"
 		fi
 	fi
 
@@ -895,31 +347,37 @@ collect_directory_structure_entries() {
 			workflow_name_from_file=$(printf '%s' "$workflow_metadata" | jq -r '.name // empty' 2>/dev/null)
 		fi
 
-		if $manifest_indexed; then
-			local manifest_path_candidate="$filename"
-			if [[ -n "$storage_path" ]]; then
-				manifest_path_candidate="${storage_path%/}/$filename"
-			fi
-			local path_norm
-			path_norm=$(normalize_manifest_lookup_key "$manifest_path_candidate")
-			local id_norm
-			id_norm=$(normalize_manifest_id_key "$workflow_id_from_file")
-			local name_norm
-			name_norm=$(build_manifest_name_key "$storage_path" "$workflow_name_from_file")
+        if $manifest_indexed; then
+            local manifest_path_candidate="$filename"
+            if [[ -n "$storage_path" ]]; then
+                manifest_path_candidate="${storage_path%/}/$filename"
+            fi
+            local path_norm
+            path_norm=$(normalize_manifest_lookup_key "$manifest_path_candidate")
+            local relative_norm
+            relative_norm=$(normalize_manifest_lookup_key "$canonical_relative_path")
+            local id_norm
+            id_norm=$(normalize_manifest_id_key "$workflow_id_from_file")
+            local name_norm
+            name_norm=$(build_manifest_name_key "$storage_path" "$workflow_name_from_file")
 
-			# Perform manifest lookups
-			if [[ -n "$path_norm" && -n "${manifest_path_entries[$path_norm]+set}" ]]; then
-				manifest_entry="${manifest_path_entries[$path_norm]}"
-				manifest_entry_source="path"
-			fi
-			if [[ -z "$manifest_entry" && -n "$id_norm" && -n "${manifest_id_entries[$id_norm]+set}" ]]; then
-				manifest_entry="${manifest_id_entries[$id_norm]}"
-				manifest_entry_source="workflow-id"
-			fi
-			if [[ -z "$manifest_entry" && -n "$name_norm" && -n "${manifest_folder_name_entries[$name_norm]+set}" ]]; then
-				manifest_entry="${manifest_folder_name_entries[$name_norm]}"
-				manifest_entry_source="folder-name"
-			fi
+            # Perform manifest lookups (prefer canonical relative path, then staged path/id/name)
+            if [[ -n "$relative_norm" && -n "${manifest_relative_entries[$relative_norm]+set}" ]]; then
+                manifest_entry="${manifest_relative_entries[$relative_norm]}"
+                manifest_entry_source="relative-path"
+            fi
+            if [[ -z "$manifest_entry" && -n "$path_norm" && -n "${manifest_path_entries[$path_norm]+set}" ]]; then
+                manifest_entry="${manifest_path_entries[$path_norm]}"
+                manifest_entry_source="path"
+            fi
+            if [[ -z "$manifest_entry" && -n "$id_norm" && -n "${manifest_id_entries[$id_norm]+set}" ]]; then
+                manifest_entry="${manifest_id_entries[$id_norm]}"
+                manifest_entry_source="workflow-id"
+            fi
+            if [[ -z "$manifest_entry" && -n "$name_norm" && -n "${manifest_folder_name_entries[$name_norm]+set}" ]]; then
+                manifest_entry="${manifest_folder_name_entries[$name_norm]}"
+                manifest_entry_source="folder-name"
+            fi
 		fi
 
 		if [[ -n "$manifest_entry" ]]; then
@@ -956,7 +414,7 @@ collect_directory_structure_entries() {
 
 		# Note: We don't override storage_path with manifest_target_slug_path here because:
 		# 1. storage_path is used for internal path matching and should match the file system structure
-		# 2. manifest_target_slug_path may contain old slug format (e.g., "Asana_3" instead of "Asana 3")
+		# 2. manifest_target_slug_path may contain old slug format
 		# 3. Folder assignment will use manifest display/project data directly from manifest entries
 
 		# PRIORITY ORDER for workflow ID resolution:
@@ -967,7 +425,7 @@ collect_directory_structure_entries() {
 		local workflow_id=""
 		local workflow_id_source="none"
 
-		# Try manifest FIRST (contains IDs after V4 injection)
+		# Try manifest first
 		if [[ -n "$manifest_actual_id" ]]; then
 			workflow_id="$manifest_actual_id"
 			workflow_id_source="manifest-actual"
