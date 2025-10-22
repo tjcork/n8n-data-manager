@@ -3,487 +3,204 @@
 # lib/n8n-api.sh - n8n REST API functions for n8n-manager
 # =========================================================
 # All functions for interacting with n8n's REST API to get
-# folder structure and workflow organization data
-
-# Source common utilities
-source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
-
-# Track last HTTP status and response details from n8n API request helper
-N8N_API_LAST_STATUS=""
-N8N_API_LAST_BODY=""
-N8N_API_LAST_ERROR_CATEGORY=""
-
-# Sentinel value the n8n REST API expects when reassigning an entity to the
-# project root folder. Subsequent responses normalize this to a null/empty
-# parent, but the string literal is required for PATCH requests.
-if [[ -z "${N8N_PROJECT_ROOT_ID+x}" ]]; then
-    readonly N8N_PROJECT_ROOT_ID="0"
-fi
-
-# Test n8n API connection using appropriate authentication method
-test_n8n_api_connection() {
-    local base_url="$1"
-    local api_key="$2"
-    
-    log INFO "Testing n8n API connection to: $base_url"
-    
-    # Clean up URL (remove trailing slash)
-    base_url="${base_url%/}"
-    
-    # Test API connection with basic endpoint
-    local response
-    local http_status
-    if ! response=$(curl -s -w "\n%{http_code}" -H "X-N8N-API-KEY: $api_key" "$base_url/rest/workflows?limit=1" 2>/dev/null); then
-        log ERROR "Failed to connect to n8n API at: $base_url"
-        return 1
-    fi
-    
-    http_status=$(echo "$response" | tail -n1)
-    local response_body=$(echo "$response" | head -n -1)
-    
-    if [[ "$http_status" == "401" ]]; then
-        log ERROR "n8n API authentication failed. Please check your API key."
-        return 1
-    elif [[ "$http_status" == "404" ]]; then
-        log ERROR "n8n API endpoint not found. Please check the URL and ensure n8n version supports REST API."
-        return 1
-    elif [[ "$http_status" != "200" ]]; then
-        log ERROR "n8n API connection failed with HTTP status: $http_status"
-        log DEBUG "Response body: $response_body"
-        return 1
-    fi
-    
-    log SUCCESS "n8n API connection successful!"
-    return 0
-}
-
-# Track whether we've already pulled session credentials from n8n
-_n8n_session_credentials_loaded=false
-
-# Remove common anti-XSSI prefixes and leading whitespace from n8n REST responses
+# Comprehensive API validation - tests all available authentication methods
+# Build mapping of workflows to sanitized folder paths
 sanitize_n8n_json_response() {
-    local raw="$1"
+    local raw="${1-}"
+
+    # Treat unset or empty payloads as an empty object to avoid jq errors
+    if [[ -z "$raw" ]]; then
+        printf '{}'
+        return 0
+    fi
+
     local sanitized="$raw"
 
-    # Remove byte order mark if present
-    if [[ "$sanitized" == $'\ufeff'* ]]; then
+    # Strip UTF-8 BOM if present and carriage returns that break jq parsing
+    if [[ "${sanitized:0:1}" == $'\uFEFF' ]]; then
         sanitized="${sanitized:1}"
     fi
-
-    # Normalize line endings
     sanitized="${sanitized//$'\r'/}"
 
-    # Strip anti-XSSI prefix used by the n8n REST UI (e.g. ")]}'")
-    if [[ "$sanitized" == ")]}'"* ]]; then
-        sanitized="${sanitized:4}"
+    # Collapse payloads that are only whitespace or explicit null into empty object
+    if [[ "$sanitized" =~ ^[[:space:]]*$ ]]; then
+        printf '{}'
+        return 0
     fi
 
-    # Remove optional comma immediately following the prefix
-    if [[ "$sanitized" == ,* ]]; then
-        sanitized="${sanitized:1}"
+    if [[ "$sanitized" == "null" ]]; then
+        printf '{}'
+        return 0
     fi
-
-    # Trim leading whitespace/newlines
-    while [[ "$sanitized" == $'\n'* || "$sanitized" == $'\t'* || "$sanitized" == ' '* ]]; do
-        sanitized="${sanitized:1}"
-    done
 
     printf '%s' "$sanitized"
 }
 
-sanitize_slug_value() {
-    local value="${1:-}"
+normalize_identifier() {
+    local value="${1-}"
+
+    # Remove control characters and surrounding whitespace
     value="${value//$'\r'/}"
     value="${value//$'\n'/}"
     value="${value//$'\t'/}"
-    value="${value//\//_}"
-    value="$(printf '%s' "$value" | sed 's/[^A-Za-z0-9._ -]//g')"
-    printf '%s' "$value"
-}
 
-normalize_identifier() {
-    local value="${1:-}"
+    value="$(printf '%s' "$value" | sed -e 's/^[[:space:]]\+//' -e 's/[[:space:]]\+$//')"
+
     if [[ -z "$value" || "$value" == "null" ]]; then
         printf ''
-        return
-    fi
-
-    # Strip common control characters and trim surrounding whitespace so that IDs
-    # coming from Windows-style newlines (\r\n) or padded fields normalize to the
-    # same key that downstream lookup tables expect.
-    value="$(printf '%s' "$value" | tr -d '\r\n\t')"
-    value="$(printf '%s' "$value" | sed 's/^[[:space:]]\+//;s/[[:space:]]\+$//')"
-
-    case "$value" in
-        0)
-            printf ''
-            return
-            ;;
-    esac
-
-    local lowered
-    lowered=$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')
-    if [[ "$lowered" == "root" || "$lowered" == "undefined" ]]; then
-        printf ''
-        return
-    fi
-
-    printf '%s' "$value"
-}
-
-build_folder_chain_json() {
-    local starting_folder_id="${1:-}"
-    local -n _folder_name_map="$2"
-    local -n _folder_slug_map="$3"
-    local -n _folder_parent_map="$4"
-    local __chain_var="$5"
-    local __relative_var="$6"
-    local __display_var="$7"
-
-    local -a names=()
-    local -a slugs=()
-    declare -A visited=()
-    local current="$(normalize_identifier "$starting_folder_id")"
-
-    while [[ -n "$current" ]]; do
-        if [[ -n "${visited[$current]+set}" ]]; then
-            log WARN "Detected folder hierarchy loop involving folder ID $current"
-            break
-        fi
-        visited["$current"]=1
-
-        local name="${_folder_name_map[$current]:-Folder}"
-        local slug="${_folder_slug_map[$current]:-}"
-        if [[ -z "$slug" ]]; then
-            slug="$(sanitize_slug_value "$name")"
-            _folder_slug_map["$current"]="$slug"
-        fi
-
-        names+=("$name")
-        slugs+=("$slug")
-
-        local parent="${_folder_parent_map[$current]:-}"
-        current="$(normalize_identifier "$parent")"
-    done
-
-    local -a rev_names=()
-    local -a rev_slugs=()
-    for (( idx=${#names[@]}-1; idx>=0; idx-- )); do
-        rev_names+=("${names[$idx]}")
-        rev_slugs+=("${slugs[$idx]}")
-    done
-
-    local folder_chain_json='[]'
-    if ((${#rev_names[@]} > 0)); then
-        local -a folder_items=()
-        for idx in "${!rev_names[@]}"; do
-            local item
-            item=$(jq -n -c --arg name "${rev_names[$idx]}" --arg slug "${rev_slugs[$idx]}" '{name: $name, slug: $slug}')
-            folder_items+=("$item")
-        done
-        folder_chain_json=$(printf '%s\n' "${folder_items[@]}" | jq -s '.')
-    fi
-
-    local relative_join=""
-    local display_join=""
-    if ((${#rev_slugs[@]} > 0)); then
-        relative_join=$(IFS=/; printf '%s' "${rev_slugs[*]}")
-    fi
-    if ((${#rev_names[@]} > 0)); then
-        display_join=$(IFS=/; printf '%s' "${rev_names[*]}")
-    fi
-
-    printf -v "$__chain_var" '%s' "$folder_chain_json"
-    printf -v "$__relative_var" '%s' "$relative_join"
-    printf -v "$__display_var" '%s' "$display_join"
-}
-
-# Ensure session authentication credentials are available by loading them from
-# the configured n8n credential inside the Docker container when needed.
-#
-# Arguments:
-#   $1 - Docker container ID/name running n8n
-#   $2 - Credential name inside n8n (e.g. "N8N REST BACKUP")
-#   $3 - Optional existing credentials JSON path inside the container
-ensure_n8n_session_credentials() {
-    local container_id="$1"
-    local credential_name="$2"
-    local container_credentials_path="${3:-}"
-
-    if [[ -n "${n8n_email:-}" && -n "${n8n_password:-}" ]]; then
-        _n8n_session_credentials_loaded=true
         return 0
     fi
 
-    if [[ -z "$credential_name" ]]; then
-        log ERROR "Session credential name not configured. Set N8N_LOGIN_CREDENTIAL_NAME."
-        return 1
-    fi
+    # Retain only safe identifier characters (alphanumeric, underscore, hyphen)
+    value="$(printf '%s' "$value" | tr -dc '[:alnum:]_-')"
 
-    if [[ -z "$container_id" ]]; then
-        log ERROR "Container ID required to load n8n session credential '$credential_name'."
-        return 1
-    fi
-
-    local credential_payload=""
-    local credential_entry=""
-
-    if [[ -n "$container_credentials_path" ]]; then
-        if docker exec "$container_id" sh -c "[ -f '$container_credentials_path' ]" 2>/dev/null; then
-            credential_payload=$(docker exec "$container_id" sh -c "cat $container_credentials_path" 2>/dev/null || printf '')
-            if [[ -n "$credential_payload" ]]; then
-                if ! credential_entry=$(printf '%s' "$credential_payload" | jq -c --arg name "$credential_name" '
-                    (if type == "object" and has("data") then .data else . end)
-                    | (if type == "array" then . else [] end)
-                    | map(select((.name // "") == $name))
-                    | first // empty
-                ' 2>/dev/null); then
-                    log WARN "Failed to parse provided credential bundle while locating '$credential_name'; will export from container instead."
-                    credential_entry=""
-                fi
-
-                if [[ -z "$credential_entry" || "$credential_entry" == "null" ]]; then
-                    log DEBUG "Credential '$credential_name' not present in imported bundle; exporting from n8n instance."
-                    credential_entry=""
-                fi
-            fi
-        fi
-        credential_payload=""
-    fi
-
-    if [[ -z "$credential_entry" ]]; then
-        local temp_path="/tmp/n8n-session-credential-$$.json"
-        if ! docker exec "$container_id" sh -c "n8n export:credentials --all --decrypted --output=$temp_path >/dev/null 2>&1"; then
-            log ERROR "Failed to export credentials from n8n container to locate '$credential_name'."
-            return 1
-        fi
-
-        credential_payload=$(docker exec "$container_id" sh -c "cat $temp_path" 2>/dev/null || printf '')
-        docker exec "$container_id" sh -c "rm -f $temp_path" >/dev/null 2>&1 || true
-
-        if [[ -z "$credential_payload" ]]; then
-            log ERROR "Unable to read exported credentials when searching for '$credential_name'."
-            return 1
-        fi
-
-        if ! credential_entry=$(printf '%s' "$credential_payload" | jq -c --arg name "$credential_name" '
-            (if type == "object" and has("data") then .data else . end)
-            | (if type == "array" then . else [] end)
-            | map(select((.name // "") == $name))
-            | first // empty
-        ' 2>/dev/null); then
-            log ERROR "Failed to parse credentials JSON while locating '$credential_name'."
-            return 1
-        fi
-    fi
-
-    if [[ -z "$credential_entry" || "$credential_entry" == "null" ]]; then
-        log ERROR "Credential named '$credential_name' not found in n8n instance."
-        return 1
-    fi
-
-    local session_user
-    local session_password
-    session_user=$(printf '%s' "$credential_entry" | jq -r '.data.user // .data.email // empty' 2>/dev/null)
-    session_password=$(printf '%s' "$credential_entry" | jq -r '.data.password // empty' 2>/dev/null)
-
-    if [[ -z "$session_user" || -z "$session_password" || "$session_user" == "null" || "$session_password" == "null" ]]; then
-        log ERROR "Credential '$credential_name' is missing required Basic Auth fields (user/password)."
-        return 1
-    fi
-
-    n8n_email="$session_user"
-    n8n_password="$session_password"
-    _n8n_session_credentials_loaded=true
-    log DEBUG "Loaded session credentials from n8n credential '$credential_name'"
-    return 0
+    printf '%s' "$value"
 }
 
-validate_credentials_payload() {
-    local credentials_path="$1"
+sanitize_slug_value() {
+    local raw="${1-}"
 
-    if [[ ! -f "$credentials_path" ]]; then
-        log ERROR "Credentials file not found for validation: $credentials_path"
-        return 1
+    raw="$(printf '%s' "$raw" | tr -d '\r\n\t')"
+    raw="$(printf '%s' "$raw" | sed 's/^[[:space:]]\+//;s/[[:space:]]\+$//')"
+
+    if [[ -z "$raw" ]]; then
+        raw="folder"
     fi
 
-    local jq_temp_err
-    jq_temp_err=$(mktemp -t n8n-cred-validate-err-XXXXXXXX.log)
-    if ! jq empty "$credentials_path" 2>"$jq_temp_err"; then
-        local jq_error
-        jq_error=$(cat "$jq_temp_err" 2>/dev/null)
-        rm -f "$jq_temp_err"
-        log ERROR "Unable to parse credentials file for validation: $credentials_path"
-        if [[ -n "$jq_error" ]]; then
-            log DEBUG "jq parse error: $jq_error"
-        fi
-        return 1
-    fi
-    rm -f "$jq_temp_err"
+    local lower
+    lower="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
+    lower="$(printf '%s' "$lower" | sed 's/[^[:alnum:]]\+/-/g')"
+    lower="$(printf '%s' "$lower" | sed 's/-\{2,\}/-/g; s/^-*//; s/-*$//')"
 
-    local invalid_entries
-    invalid_entries=$(jq -r '
-        [ .[]
-            | select((has("data") | not) or ((.data | type) != "object"))
-            | (.name // (if has("id") then ("ID:" + (.id|tostring)) else "unknown" end))
-        ]
-        | unique
-        | join(", ")
-    ' "$credentials_path") || invalid_entries=""
-
-    if [[ -n "$invalid_entries" ]]; then
-        log ERROR "Credentials still contain encrypted or invalid data for: $invalid_entries"
-        return 1
+    if (( ${#lower} > 96 )); then
+        lower="${lower:0:96}"
+        lower="$(printf '%s' "$lower" | sed 's/-\{2,\}/-/g; s/^-*//; s/-*$//')"
     fi
 
-    local basic_filter_file
-    basic_filter_file=$(mktemp -t n8n-cred-basic-filter-XXXXXXXX.jq)
-    cat <<'JQ_FILTER' > "$basic_filter_file"
-def safe_credential_value($credential; $field):
-    (if ($credential.data // empty) | type == "object" then $credential.data[$field] else empty end) // "";
-
-[ .[]
-    | select((.type // "") == "httpBasicAuth")
-    | select(
-        ((.data // empty) | type) != "object"
-        or (safe_credential_value(.; "user") | tostring | length) == 0
-        or (safe_credential_value(.; "password") | tostring | length) == 0
-    )
-    | (.name // (if has("id") then ("ID:" + (.id|tostring)) else "unknown" end))
-] | unique | join(", ")
-JQ_FILTER
-
-    local basic_missing
-    basic_missing=$(jq -r -f "$basic_filter_file" "$credentials_path") || basic_missing=""
-    rm -f "$basic_filter_file"
-
-    if [[ -n "$basic_missing" ]]; then
-        rm -f "$normalized_json"
-        log ERROR "Basic Auth credentials missing username or password: $basic_missing"
-        return 1
+    if [[ -z "$lower" ]]; then
+        lower="folder"
     fi
 
-    rm -f "$jq_temp_err"
-    return 0
+    printf '%s' "$lower"
 }
 
-# Comprehensive API validation - tests all available authentication methods
-# Build mapping of workflows to sanitized folder paths
+build_folder_chain_json() {
+    local start_id="${1:-}"
+    declare -n __names_ref="$2"
+    declare -n __slugs_ref="$3"
+    declare -n __parent_ref="$4"
+    local __chain_ref="$5"
+    local __relative_ref="$6"
+    local __display_ref="$7"
+
+    local -a ancestry=()
+    local current="$start_id"
+    local guard=0
+
+    while [[ -n "$current" ]]; do
+        ancestry+=("$current")
+        local next_parent="${__parent_ref[$current]:-}"
+        if [[ -z "$next_parent" || "$next_parent" == "$current" ]]; then
+            break
+        fi
+
+        current="$next_parent"
+        guard=$((guard + 1))
+        if (( guard > 128 )); then
+            log WARN "Detected potential folder hierarchy loop while resolving chain for ${start_id:-unknown}"
+            break
+        fi
+    done
+
+    local -a chain_entries=()
+    local -a relative_segments=()
+    local -a display_segments=()
+
+    for (( idx=${#ancestry[@]}-1; idx>=0; idx-- )); do
+        local folder_id="${ancestry[idx]}"
+        [[ -z "$folder_id" ]] && continue
+
+        local folder_name="${__names_ref[$folder_id]:-Folder}"
+        if [[ -z "$folder_name" || "$folder_name" == "null" ]]; then
+            folder_name="Folder"
+        fi
+
+        local folder_slug="${__slugs_ref[$folder_id]:-}"
+        if [[ -z "$folder_slug" || "$folder_slug" == "null" ]]; then
+            folder_slug="$(sanitize_slug_value "$folder_name")"
+        fi
+
+        local entry_json
+        if ! entry_json=$(jq -n -c --arg id "$folder_id" --arg name "$folder_name" --arg slug "$folder_slug" '{id:$id,name:$name,slug:$slug}'); then
+            continue
+        fi
+
+        chain_entries+=("$entry_json")
+        relative_segments+=("$folder_slug")
+        display_segments+=("$folder_name")
+    done
+
+    local chain_json="[]"
+    if ((${#chain_entries[@]} > 0)); then
+        chain_json="$(printf '%s\n' "${chain_entries[@]}" | jq -s '.')"
+    fi
+
+    local relative_path=""
+    if ((${#relative_segments[@]} > 0)); then
+        local IFS='/'
+        relative_path="${relative_segments[*]}"
+    fi
+
+    local display_path=""
+    if ((${#display_segments[@]} > 0)); then
+        local IFS='/'
+        display_path="${display_segments[*]}"
+    fi
+
+    printf -v "$__chain_ref" '%s' "$chain_json"
+    printf -v "$__relative_ref" '%s' "$relative_path"
+    printf -v "$__display_ref" '%s' "$display_path"
+}
+
 get_workflow_folder_mapping() {
     local container_id="$1"
     local container_credentials_path="${2:-}"
-    local base_url="$n8n_base_url"
-    local api_key="$n8n_api_key"
-    local email="$n8n_email"
-    local password="$n8n_password"
 
-    if [[ -z "$base_url" ]]; then
+    if [[ -z "${n8n_base_url:-}" ]]; then
         log ERROR "n8n API URL not configured. Please set N8N_BASE_URL"
         return 1
     fi
 
-    base_url="${base_url%/}"
+    if ! prepare_n8n_api_auth "$container_id" "$container_credentials_path"; then
+        log ERROR "Unable to prepare n8n API authentication for workflow mapping"
+        return 1
+    fi
 
     local projects_response=""
     local workflows_response=""
-    local using_session=false
-    local responses_ready="false"
-    local used_api_key="false"
 
-    # Prefer API key if supplied
-    if [[ -n "$api_key" ]]; then
-        log DEBUG "Fetching workflow metadata using API key authentication"
-        local api_projects=""
-        local api_workflows=""
-          if api_projects=$(fetch_n8n_projects "$base_url" "$api_key") && \
-              api_workflows=$(fetch_workflows_with_folders "$base_url" "$api_key"); then
-                log SUCCESS "Retrieved workflow metadata via API key" >&2
-            projects_response="$api_projects"
-            workflows_response="$api_workflows"
-            responses_ready="true"
-            used_api_key="true"
-        else
-            log WARN "API key request failed (see above). Will retry using session authentication"
-        fi
-    fi
-
-    # Fall back to session auth if API key not usable
-    if [[ "$responses_ready" != "true" ]]; then
-        if [[ -z "$email" || -z "$password" ]]; then
-            if [[ -n "${n8n_session_credential:-}" ]]; then
-                if ! ensure_n8n_session_credentials "$container_id" "$n8n_session_credential" "$container_credentials_path"; then
-                    return 1
-                fi
-                email="$n8n_email"
-                password="$n8n_password"
-            else
-                log ERROR "Session credentials not configured. Set N8N_LOGIN_CREDENTIAL_NAME or provide email/password."
-                return 1
-            fi
-        fi
-
-        log DEBUG "Fetching workflow metadata using session authentication"
-        if ! authenticate_n8n_session "$base_url" "$email" "$password" 1; then
-            log ERROR "Session authentication failed"
-            return 1
-        fi
-
-        using_session=true
-
-        local session_projects=""
-        local session_workflows=""
-
-        if ! session_projects=$(fetch_n8n_projects_session "$base_url"); then
-            cleanup_n8n_session
-            return 1
-        fi
-        if ! session_workflows=$(fetch_workflows_with_folders_session "$base_url" ""); then
-            cleanup_n8n_session
-            return 1
-        fi
-
-        projects_response="$session_projects"
-        workflows_response="$session_workflows"
-        responses_ready="true"
-    fi
-
-    if [[ "$responses_ready" != "true" ]]; then
-        log ERROR "Unable to retrieve workflow metadata via API key or session authentication"
+    if ! projects_response=$(n8n_api_get_projects); then
+        finalize_n8n_api_auth
         return 1
     fi
 
-    # Normalize responses when using API key
-    if [[ "$used_api_key" == "true" && "$using_session" == "false" ]]; then
-        projects_response="$(echo "$projects_response" | jq 'if type == "object" then . else {data: .} end' 2>/dev/null)"
-        workflows_response="$(echo "$workflows_response" | jq 'if type == "object" then . else {data: .} end' 2>/dev/null)"
-    fi
-
-    if [[ -z "$projects_response" || -z "$workflows_response" ]]; then
-        log ERROR "Failed to retrieve workflow metadata from n8n"
-        if $using_session; then
-            cleanup_n8n_session
-        fi
+    if ! workflows_response=$(n8n_api_get_workflows); then
+        finalize_n8n_api_auth
         return 1
     fi
 
-    # Strip Windows-style carriage returns to avoid jq parsing issues
     projects_response="$(printf '%s' "$projects_response" | tr -d '\r')"
     workflows_response="$(printf '%s' "$workflows_response" | tr -d '\r')"
 
     log DEBUG "get_workflow_folder_mapping verbose flag: ${verbose:-unset}"
 
-    if [ "$verbose" = "true" ]; then
+    if [[ "$verbose" == "true" ]]; then
         local projects_preview
         local workflows_preview
         projects_preview="$(printf '%s' "$projects_response" | tr '\n' ' ' | head -c 200)"
         workflows_preview="$(printf '%s' "$workflows_response" | tr '\n' ' ' | head -c 200)"
         log DEBUG "Projects response preview: ${projects_preview}$( [ $(printf '%s' "$projects_response" | wc -c) -gt 200 ] && echo '…')"
         log DEBUG "Workflows response preview: ${workflows_preview}$( [ $(printf '%s' "$workflows_response" | wc -c) -gt 200 ] && echo '…')"
-        local debug_dir
-        debug_dir=$(mktemp -d -t n8n-api-debug-XXXXXXXX)
-        printf '%s' "$projects_response" > "$debug_dir/projects.json"
-        printf '%s' "$workflows_response" > "$debug_dir/workflows.json"
-        log DEBUG "Saved API debug payloads to $debug_dir"
     fi
 
     if [[ "$verbose" == "true" ]]; then
@@ -494,9 +211,7 @@ get_workflow_folder_mapping() {
         local sample
         sample="$(printf '%s' "$projects_response" | tr '\n' ' ' | head -c 200)"
         log ERROR "Projects response is not valid JSON (sample: ${sample}...)"
-        if $using_session; then
-            cleanup_n8n_session
-        fi
+        finalize_n8n_api_auth
         return 1
     fi
 
@@ -508,9 +223,7 @@ get_workflow_folder_mapping() {
         local sample
         sample="$(printf '%s' "$workflows_response" | tr '\n' ' ' | head -c 200)"
         log ERROR "Workflows response is not valid JSON (sample: ${sample}...)"
-        if $using_session; then
-            cleanup_n8n_session
-        fi
+        finalize_n8n_api_auth
         return 1
     fi
 
@@ -532,66 +245,52 @@ get_workflow_folder_mapping() {
         (if type == "array" then . else (.data // []) end)
         | map([
             ((.id // "") | tostring),
-            (.name // ""),
-            (.type // "")
+            (.name // "Personal"),
+            (.type // ""),
+            ((.defaultSlug // "") | tostring)
           ] | @tsv)
         | .[]
     ' "$projects_tmp"); then
-        log ERROR "Unable to parse projects payload while building workflow mapping"
+        log ERROR "Unable to parse projects while building workflow mapping"
         rm -f "$projects_tmp" "$workflows_tmp"
         trap - RETURN
-        if $using_session; then
-            cleanup_n8n_session
-        fi
+        finalize_n8n_api_auth
         return 1
     fi
 
     if [[ -n "$project_rows" ]]; then
-        while IFS=$'\t' read -r raw_id raw_name raw_type; do
+        while IFS=$'\t' read -r raw_id raw_name raw_type raw_slug; do
             local pid
             pid="$(normalize_identifier "$raw_id")"
-            if [[ -z "$pid" ]]; then
-                pid="default"
-            fi
+            [[ -z "$pid" ]] && continue
 
-            local ptype="${raw_type:-}"
-            local pname="${raw_name:-}"
-            if [[ "$ptype" == "personal" ]]; then
+            local pname="${raw_name:-Personal}"
+            if [[ -z "$pname" || "$pname" == "null" ]]; then
                 pname="Personal"
             fi
-            if [[ -z "$pname" || "$pname" == "null" ]]; then
-                pname="Project"
+            local slug="${raw_slug:-}"
+            if [[ -z "$slug" || "$slug" == "null" ]]; then
+                slug="$(sanitize_slug_value "$pname")"
             fi
 
-            local slug
-            slug="$(sanitize_slug_value "$pname")"
             project_name_by_id["$pid"]="$pname"
             project_slug_by_id["$pid"]="$slug"
 
             if [[ -z "$default_project_id" ]]; then
                 default_project_id="$pid"
             fi
-
-            if [[ -z "$personal_project_id" ]]; then
-                local pname_lower
-                pname_lower="${pname,,}"
-                if [[ "$ptype" == "personal" || "$pname_lower" == "personal" ]]; then
-                    personal_project_id="$pid"
-                fi
+            if [[ "$raw_type" == "personal" ]]; then
+                personal_project_id="$pid"
             fi
         done <<<"$project_rows"
     fi
 
     if [[ -z "$default_project_id" ]]; then
-        default_project_id="default"
-    fi
-
-    if [[ -z "${project_name_by_id[$default_project_id]+set}" ]]; then
+        default_project_id="personal-default"
         local default_name="Personal"
-        local default_slug
-        default_slug="$(sanitize_slug_value "$default_name")"
+        local default_slug_local="personal"
         project_name_by_id["$default_project_id"]="$default_name"
-        project_slug_by_id["$default_project_id"]="$default_slug"
+        project_slug_by_id["$default_project_id"]="$default_slug_local"
     fi
 
     if [[ -n "$personal_project_id" ]]; then
@@ -616,9 +315,7 @@ get_workflow_folder_mapping() {
         log ERROR "Unable to parse folder entries while building workflow mapping"
         rm -f "$projects_tmp" "$workflows_tmp"
         trap - RETURN
-        if $using_session; then
-            cleanup_n8n_session
-        fi
+        finalize_n8n_api_auth
         return 1
     fi
 
@@ -646,30 +343,28 @@ get_workflow_folder_mapping() {
     fi
 
     local workflow_rows
-        if ! workflow_rows=$(jq -r '
-                (if type == "array" then . else (.data // []) end)
-                | map(select(.resource != "folder"))
-                | map([
-                        ((.id // "") | tostring),
-                        (.name // "Unnamed Workflow"),
-                        ((.homeProject.id // .homeProjectId // "") | tostring),
-                        ((.parentFolderId // (.parentFolder.id // "")) | tostring),
-                        (.updatedAt // "")
-                    ] | @tsv)
-                | .[]
-        ' "$workflows_tmp"); then
+    if ! workflow_rows=$(jq -r '
+        (if type == "array" then . else (.data // []) end)
+        | map(select(.resource != "folder"))
+        | map([
+                ((.id // "") | tostring),
+                (.name // "Unnamed Workflow"),
+                ((.homeProject.id // .homeProjectId // "") | tostring),
+                ((.parentFolderId // (.parentFolder.id // "")) | tostring),
+                (.updatedAt // "")
+            ] | @tsv)
+        | .[]
+    ' "$workflows_tmp"); then
         log ERROR "Unable to parse workflows while building workflow mapping"
         rm -f "$projects_tmp" "$workflows_tmp"
         trap - RETURN
-        if $using_session; then
-            cleanup_n8n_session
-        fi
+        finalize_n8n_api_auth
         return 1
     fi
 
     local -a workflow_entries=()
     if [[ -n "$workflow_rows" ]]; then
-    while IFS=$'\t' read -r raw_id raw_name raw_project raw_parent raw_updated_at; do
+        while IFS=$'\t' read -r raw_id raw_name raw_project raw_parent raw_updated_at; do
             local wid
             wid="$(normalize_identifier "$raw_id")"
             if [[ -z "$wid" ]]; then
@@ -760,9 +455,7 @@ get_workflow_folder_mapping() {
             log ERROR "Failed to construct workflow mapping JSON"
             rm -f "$projects_tmp" "$workflows_tmp"
             trap - RETURN
-            if $using_session; then
-                cleanup_n8n_session
-            fi
+            finalize_n8n_api_auth
             return 1
         fi
     else
@@ -776,16 +469,14 @@ get_workflow_folder_mapping() {
     rm -f "$projects_tmp" "$workflows_tmp"
     trap - RETURN
 
-    if $using_session; then
-        cleanup_n8n_session
-    fi
+    finalize_n8n_api_auth
 
     if ! printf '%s' "$mapping_json" | jq -e '.workflowsById | type == "object"' >/dev/null 2>&1; then
         log ERROR "Constructed mapping missing workflowsById object"
         local mapping_preview mapping_length
         mapping_preview=$(printf '%s' "$mapping_json" | head -c 500)
-    mapping_length=$(printf '%s' "$mapping_json" | wc -c | tr -d ' \n')
-    mapping_length=${mapping_length:-0}
+        mapping_length=$(printf '%s' "$mapping_json" | wc -c | tr -d ' \n')
+        mapping_length=${mapping_length:-0}
         log DEBUG "Mapping preview (first 500 chars): ${mapping_preview}$( [ "$mapping_length" -gt 500 ] && echo '…')"
         return 1
     fi
@@ -916,6 +607,115 @@ N8N_SESSION_COOKIE_INITIALIZED="false"
 N8N_SESSION_COOKIE_READY="false"
 N8N_SESSION_REUSE_ENABLED="true"
 N8N_API_AUTH_MODE=""
+
+ensure_n8n_session_credentials() {
+    local container_id="$1"
+    local credential_name="$2"
+    local container_credentials_path="${3:-}"
+
+    if [[ -n "${n8n_email:-}" && -n "${n8n_password:-}" ]]; then
+        if [[ "${verbose:-false}" == "true" ]]; then
+            log DEBUG "Using existing n8n session credentials from configuration"
+        fi
+        return 0
+    fi
+
+    if [[ -z "$credential_name" ]]; then
+        log ERROR "Session credential name is required to load n8n session access credentials."
+        return 1
+    fi
+
+    if [[ -z "$container_id" ]]; then
+        log ERROR "Docker container ID is required to discover n8n session credentials."
+        return 1
+    fi
+
+    local container_export_path="$container_credentials_path"
+    local remove_container_file="false"
+    if [[ -z "$container_export_path" ]]; then
+        container_export_path="/tmp/n8n-session-credentials-$$.json"
+        remove_container_file="true"
+    fi
+
+    local host_tmp_dir
+    host_tmp_dir=$(mktemp -d -t n8n-session-credentials-XXXXXXXX)
+    local host_tmp_file="$host_tmp_dir/credentials.json"
+
+    if ! dockExec "$container_id" "n8n export:credentials --all --decrypted --output='$container_export_path'" false; then
+        cleanup_temp_path "$host_tmp_dir"
+        if [[ "$remove_container_file" == "true" ]]; then
+            dockExec "$container_id" "rm -f '$container_export_path'" false >/dev/null 2>&1 || true
+        fi
+        log ERROR "Failed to export credentials from n8n container to locate '$credential_name'."
+        return 1
+    fi
+
+    if ! docker cp "${container_id}:${container_export_path}" "$host_tmp_file" >/dev/null 2>&1; then
+        cleanup_temp_path "$host_tmp_dir"
+        if [[ "$remove_container_file" == "true" ]]; then
+            dockExec "$container_id" "rm -f '$container_export_path'" false >/dev/null 2>&1 || true
+        fi
+        log ERROR "Unable to copy exported credentials from n8n container."
+        return 1
+    fi
+
+    if [[ "$remove_container_file" == "true" ]]; then
+        dockExec "$container_id" "rm -f '$container_export_path'" false >/dev/null 2>&1 || true
+    fi
+
+    if ! jq empty "$host_tmp_file" >/dev/null 2>&1; then
+        cleanup_temp_path "$host_tmp_dir"
+        log ERROR "Exported credentials payload is not valid JSON; cannot locate '$credential_name'."
+        return 1
+    fi
+
+    local credential_json
+    credential_json=$(jq -c --arg name "$credential_name" '
+        (if type == "array" then . else (.data // []) end)
+        | map(select(((.name // "") | ascii_downcase) == ($name | ascii_downcase) or ((.displayName // "") | ascii_downcase) == ($name | ascii_downcase)))
+        | first // empty
+    ' "$host_tmp_file" 2>/dev/null || true)
+
+    if [[ -z "$credential_json" || "$credential_json" == "null" ]]; then
+        cleanup_temp_path "$host_tmp_dir"
+        log ERROR "Credential '$credential_name' not found in exported credentials."
+        return 1
+    fi
+
+    local resolved_user
+    local resolved_password
+    resolved_user=$(jq -r '
+        .data // {} |
+        (.user // .username // .email // .login // .accountId // empty)
+    ' <<<"$credential_json")
+    resolved_password=$(jq -r '
+        .data // {} |
+        (.password // .pass // .userPassword // .apiKey // .token // empty)
+    ' <<<"$credential_json")
+
+    if [[ -z "$resolved_user" ]]; then
+        cleanup_temp_path "$host_tmp_dir"
+        log ERROR "Credential '$credential_name' does not contain a username or email field."
+        return 1
+    fi
+
+    if [[ -z "$resolved_password" ]]; then
+        cleanup_temp_path "$host_tmp_dir"
+        log ERROR "Credential '$credential_name' does not contain a password or token field."
+        return 1
+    fi
+
+    n8n_email="$(printf '%s' "$resolved_user" | tr -d '\r\n')"
+    n8n_password="$(printf '%s' "$resolved_password" | tr -d '\r\n')"
+
+    cleanup_temp_path "$host_tmp_dir"
+
+    if [[ "${verbose:-false}" == "true" ]]; then
+        log DEBUG "Loaded n8n session credential '$credential_name' (user: $n8n_email)"
+    fi
+
+    return 0
+}
 
 ensure_n8n_session_cookie_file() {
     if [[ "$N8N_SESSION_COOKIE_INITIALIZED" != "true" || -z "$N8N_SESSION_COOKIE_FILE" ]]; then

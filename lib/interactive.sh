@@ -63,15 +63,15 @@ show_config_summary() {
 
     if [[ "${n8n_path_source:-default}" != "default" && "${n8n_path_source:-unset}" != "unset" ]]; then
         if [[ -n "$n8n_path" ]]; then
-            log INFO "   🧭 N8N path hint: $n8n_path (source: $n8n_path_source)"
+            log INFO "   🧭 N8N path: $n8n_path (source: $n8n_path_source)"
         else
-            log INFO "   🧭 N8N path hint: <repository root> (source: $n8n_path_source)"
+            log INFO "   🧭 N8N path: <repository root> (source: $n8n_path_source)"
         fi
     elif [[ -n "$github_path" && "${github_path_source:-default}" != "default" ]]; then
         : # explicit GitHub path already shown above
     elif [[ -z "$github_path" && -n "$n8n_path" ]]; then
-        # maintain visibility of default hint when explicitly set but treated as default
-        log INFO "   🧭 N8N path hint: $n8n_path"
+        # maintain visibility of default path when explicitly set but treated as default
+        log INFO "   🧭 N8N path: $n8n_path"
     fi
     
     if [[ -n "$github_repo" ]]; then
@@ -475,18 +475,18 @@ prompt_project_scope() {
         project_name_source="interactive"
     fi
 
-    local current_hint="${n8n_path:-}"
-    if [[ -z "$current_hint" ]]; then
+    local current_path="${n8n_path:-}"
+    if [[ -z "$current_path" ]]; then
         printf "Optional n8n folder path within project (leave blank for project root): "
     else
-        printf "Optional n8n folder path within project [%s]: " "$current_hint"
+        printf "Optional n8n folder path within project [%s]: " "$current_path"
     fi
     local path_input
     read -r path_input
     if [[ -n "$path_input" ]]; then
-        set_n8n_path_hint "$path_input" "interactive"
+        set_n8n_path "$path_input" "interactive"
     elif [[ "$force_reprompt" == "true" ]]; then
-        set_n8n_path_hint "$current_hint" "interactive"
+        set_n8n_path "$current_path" "interactive"
     fi
 }
 
@@ -1072,23 +1072,23 @@ prompt_github_path_prefix() {
     fi
 
     while true; do
-        local hint_prefix=""
+        local path_prefix=""
         if [[ "$github_path_source" == "default" || "$github_path_source" == "unset" ]]; then
             if [[ -n "$n8n_path" ]]; then
-                hint_prefix="$n8n_path"
+                path_prefix="$n8n_path"
             elif [[ "${n8n_path_source:-default}" != "default" && "${n8n_path_source:-unset}" != "unset" ]]; then
-                hint_prefix="/"
+                path_prefix="/"
             else
-                hint_prefix="$project_slug"
+                path_prefix="$project_slug"
             fi
         else
-            hint_prefix="$effective_prefix"
+            path_prefix="$effective_prefix"
         fi
 
-        if [[ "$hint_prefix" == "/" || -z "$hint_prefix" ]]; then
+        if [[ "$path_prefix" == "/" || -z "$path_prefix" ]]; then
             printf "GitHub path prefix (press Enter to keep repository root, '/' for repository root): "
         else
-            printf "GitHub path prefix (press Enter for %s, '/' for repository root): " "$hint_prefix"
+            printf "GitHub path prefix (press Enter for %s, '/' for repository root): " "$path_prefix"
         fi
 
         local path_input

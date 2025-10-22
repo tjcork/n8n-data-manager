@@ -8,33 +8,11 @@
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/n8n-api.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/restore/utils.sh"
-source "$(dirname "${BASH_SOURCE[0]}")/restore/manifest.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/restore/staging.sh"
-source "$(dirname "${BASH_SOURCE[0]}")/restore/folders.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/restore/folder_state.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/restore/folder_sync.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/restore/folder_assignment.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/restore/validate.sh"
-
-
-SNAPSHOT_EXISTING_WORKFLOWS_PATH=""
-
-readonly WORKFLOW_COUNT_FILTER=$(cat <<'JQ'
-def to_array:
-    if type == "array" then .
-    elif type == "object" then
-        if (has("data") and (.data | type == "array")) then .data
-        elif (has("workflows") and (.workflows | type == "array")) then .workflows
-        elif (has("items") and (.items | type == "array")) then .items
-        else [.] end
-    else [] end;
-to_array
-| map(select(
-        (type == "object") and (
-            (((.resource // .type // "") | tostring | ascii_downcase) == "workflow")
-            or (.nodes? | type == "array")
-        )
-    ))
-| length
-JQ
-)
 
 restore() {
     local container_id="$1"
@@ -60,18 +38,14 @@ restore() {
     local keep_api_session_alive="false"
     local selected_backup=""
     local dated_backup_found=false
-    preserve_ids=$(printf '%s' "$preserve_ids" | tr '[:upper:]' '[:lower:]')
-    if [[ "$preserve_ids" != "true" ]]; then
-        preserve_ids="false"
-    fi
+    preserve_ids="$(normalize_boolean_option "$preserve_ids")"
     local preserve_ids_requested="$preserve_ids"
 
-    no_overwrite=$(printf '%s' "$no_overwrite" | tr '[:upper:]' '[:lower:]')
+    invalidate_n8n_state_cache
+
+    no_overwrite="$(normalize_boolean_option "$no_overwrite")"
     if [[ "$no_overwrite" == "true" ]]; then
-        no_overwrite="true"
         preserve_ids="false"
-    else
-        no_overwrite="false"
     fi
 
     if [[ "$workflows_mode" != "0" ]]; then
@@ -88,7 +62,6 @@ restore() {
     fi
 
     local local_backup_dir="$HOME/n8n-backup"
-    local local_workflows_file="$local_backup_dir/workflows.json"
     local local_credentials_file="$local_backup_dir/credentials.json"
     local requires_remote=false
 
@@ -156,7 +129,7 @@ restore() {
         log DEBUG "Running: git clone ${clone_args_display}"
         if ! git clone "${git_clone_args[@]}" "$git_repo_url" "$download_dir"; then
             log ERROR "Failed to clone repository. Check URL, token, branch, and permissions."
-            rm -rf "$download_dir"
+            cleanup_temp_path "$download_dir"
             return 1
         fi
 
@@ -164,7 +137,7 @@ restore() {
 
         cd "$download_dir" || {
             log ERROR "Failed to change to download directory"
-            rm -rf "$download_dir"
+            cleanup_temp_path "$download_dir"
             return 1
         }
 
@@ -250,79 +223,23 @@ restore() {
         fi
 
         if [[ "$workflows_mode" == "2" ]]; then
-            if [ -f "$selected_base_dir/.n8n-folder-structure.json" ]; then
+            locate_workflow_artifacts "$selected_base_dir" "$download_dir" "$project_storage_relative" repo_workflows structured_workflows_dir
+
+            if [[ -n "$structured_workflows_dir" ]]; then
                 folder_structure_backup=true
-                structured_workflows_dir="$(dirname "$selected_base_dir/.n8n-folder-structure.json")"
-                log INFO "Detected workflow directory via legacy manifest: $structured_workflows_dir"
+                log INFO "Detected workflow directory: $structured_workflows_dir"
+            elif [[ -n "$repo_workflows" ]]; then
+                log SUCCESS "Found workflows.json in remote backup: $repo_workflows"
             else
-                local legacy_manifest
-                legacy_manifest=$(find "$selected_base_dir" -maxdepth 5 -type f -name ".n8n-folder-structure.json" | head -n 1)
-                if [[ -n "$legacy_manifest" ]]; then
-                    folder_structure_backup=true
-                    structured_workflows_dir="$(dirname "$legacy_manifest")"
-                    log INFO "Detected workflow directory via legacy manifest: $structured_workflows_dir"
-                fi
-            fi
-
-            if [ -f "$selected_base_dir/workflows.json" ]; then
-                repo_workflows="$selected_base_dir/workflows.json"
-                log SUCCESS "Found workflows.json in selected backup"
-            elif [ -f "$download_dir/workflows.json" ]; then
-                repo_workflows="$download_dir/workflows.json"
-                log SUCCESS "Found workflows.json in repository root"
-            fi
-
-            if [[ -z "$repo_workflows" ]]; then
-                local candidate_struct_dir=""
-                local -a structure_candidates=()
-                if [[ -n "$project_storage_relative" ]]; then
-                    structure_candidates+=("$selected_base_dir/$project_storage_relative")
-                    structure_candidates+=("$download_dir/$project_storage_relative")
-                fi
-                structure_candidates+=("$selected_base_dir")
-                structure_candidates+=("$download_dir")
-
-                for candidate_dir in "${structure_candidates[@]}"; do
-                    if [[ -z "$candidate_dir" || ! -d "$candidate_dir" ]]; then
-                        continue
-                    fi
-                    if find "$candidate_dir" -type f -name "*.json" \
-                        ! -path "*/.credentials/*" \
-                        ! -path "*/archive/*" \
-                        ! -name "credentials.json" \
-                        ! -name "workflows.json" \
-                        -print -quit >/dev/null 2>&1; then
-                        candidate_struct_dir="$candidate_dir"
-                        break
-                    fi
-                done
-
-                if [[ -n "$candidate_struct_dir" ]]; then
-                    folder_structure_backup=true
-                    structured_workflows_dir="$candidate_struct_dir"
-                    log INFO "Detected workflow directory: $candidate_struct_dir"
-                fi
+                log DEBUG "No workflow directory or workflows.json found in remote backup scope."
             fi
         fi
 
         if [[ "$credentials_mode" == "2" ]]; then
-            local credential_candidates=()
-            credential_candidates+=("$selected_base_dir/$credentials_subpath")
-            credential_candidates+=("$selected_base_dir/credentials.json")
-            credential_candidates+=("$download_dir/$credentials_subpath")
-            credential_candidates+=("$download_dir/credentials.json")
-
-            for candidate in "${credential_candidates[@]}"; do
-                if [[ -n "$candidate" && -f "$candidate" ]]; then
-                    repo_credentials="$candidate"
-                    if [[ "$candidate" == *"/$credentials_subpath" ]]; then
-                        log SUCCESS "Found credentials.json in configured folder: $candidate"
-                    else
-                        log WARN "Using legacy credentials.json location: $candidate"
-                    fi
-                    break
-                fi
-            done
+            locate_credentials_artifact "$selected_base_dir" "$download_dir" "$credentials_subpath" repo_credentials
+            if [[ -n "$repo_credentials" ]]; then
+                log SUCCESS "Found credentials file: $repo_credentials"
+            fi
         fi
 
         if [[ "$credentials_mode" != "0" && ( -z "$repo_credentials" || ! -f "$repo_credentials" ) ]]; then
@@ -336,40 +253,23 @@ restore() {
     fi
 
     if [[ "$workflows_mode" == "1" ]]; then
-        if [ -f "$local_backup_dir/.n8n-folder-structure.json" ]; then
+        local detected_local_workflows=""
+        local detected_local_directory=""
+        locate_workflow_artifacts "$local_backup_dir" "$local_backup_dir" "$project_storage_relative" detected_local_workflows detected_local_directory
+
+        if [[ -n "$detected_local_directory" ]]; then
             folder_structure_backup=true
-            structured_workflows_dir="$(dirname "$local_backup_dir/.n8n-folder-structure.json")"
-            log INFO "Detected local workflow directory via legacy manifest: $structured_workflows_dir"
+            structured_workflows_dir="$detected_local_directory"
+            log INFO "Using workflow directory from local backup: $structured_workflows_dir"
         fi
 
-        if [[ -z "$repo_workflows" && -f "$local_workflows_file" ]]; then
-            repo_workflows="$local_workflows_file"
+        if [[ -z "$repo_workflows" && -n "$detected_local_workflows" ]]; then
+            repo_workflows="$detected_local_workflows"
             log INFO "Selected local workflows backup: $repo_workflows"
         fi
 
-        if [[ -z "$repo_workflows" ]]; then
-            local local_struct_dir=""
-            if [[ -n "$project_storage_relative" ]]; then
-                local candidate="$local_backup_dir/$project_storage_relative"
-                if [[ -d "$candidate" ]]; then
-                    local_struct_dir="$candidate"
-                fi
-            fi
-            if [[ -z "$local_struct_dir" && -d "$local_backup_dir" ]]; then
-                local_struct_dir="$local_backup_dir"
-            fi
-
-            if [[ -n "$local_struct_dir" ]] && find "$local_struct_dir" -type f -name "*.json" \
-                ! -path "*/.credentials/*" \
-                ! -path "*/archive/*" \
-                ! -name "credentials.json" \
-                ! -name "workflows.json" -print -quit >/dev/null 2>&1; then
-                folder_structure_backup=true
-                structured_workflows_dir="$local_struct_dir"
-                log INFO "Using workflow directory from local backup: $local_struct_dir"
-            else
-                log WARN "No workflows.json or workflow files detected in $local_backup_dir"
-            fi
+        if [[ -z "$repo_workflows" && -z "$structured_workflows_dir" ]]; then
+            log WARN "No workflows.json or workflow files detected in $local_backup_dir"
         fi
     fi
 
@@ -431,9 +331,6 @@ restore() {
             local cred_source_desc="local secure storage"
             if [[ "$repo_credentials" != "$local_credentials_file" ]]; then
                 cred_source_desc="Git repository ($credentials_git_relative_dir)"
-                if [[ "$repo_credentials" != *"/$credentials_subpath" ]]; then
-                    cred_source_desc="Git repository (legacy layout)"
-                fi
             fi
             log SUCCESS "Credentials file validated for import from $cred_source_desc"
         fi
@@ -456,7 +353,7 @@ restore() {
     if [ "$file_validation_passed" != "true" ]; then
         log ERROR "File validation failed. Cannot proceed with restore."
         if [[ -n "$download_dir" ]]; then
-            if rm -rf "$download_dir"; then
+            if cleanup_temp_path "$download_dir"; then
                 log INFO "Cleaned up temporary download directory after validation failure: $download_dir"
             else
                 log WARN "Unable to remove temporary download directory after validation failure: $download_dir"
@@ -467,41 +364,27 @@ restore() {
     
     # --- 2. Import Data ---
     log HEADER "Step 2: Importing Data into n8n"
-    
+
+    local existing_workflow_snapshot=""
+    local existing_workflow_mapping=""
+    existing_workflow_snapshot_source=""
+
     local pre_import_workflow_count=0
     if [[ "$workflows_mode" != "0" ]] && [ "$is_dry_run" != "true" ]; then
-        local count_output=""
-        if count_output=$(docker exec "$container_id" sh -c "n8n export:workflow --all --output=/tmp/pre_count.json" 2>&1); then
-            if [[ -n "$count_output" ]] && echo "$count_output" | grep -qi "Error\|No workflows"; then
-                local snapshot_notice="${count_output//$'\n'/ }"
-                if [[ ${#snapshot_notice} -gt 300 ]]; then
-                    snapshot_notice="${snapshot_notice:0:297}..."
+        existing_workflow_snapshot="$(capture_existing_workflow_snapshot "$container_id" "$keep_api_session_alive" "$existing_workflow_snapshot" "$is_dry_run")"
+        if [[ -n "$existing_workflow_snapshot" && -f "$existing_workflow_snapshot" ]]; then
+            local counted_value
+            if counted_value=$(jq -r "$WORKFLOW_COUNT_FILTER" "$existing_workflow_snapshot" 2>/dev/null); then
+                if [[ -n "$counted_value" && "$counted_value" != "null" ]]; then
+                    pre_import_workflow_count="$counted_value"
                 fi
-                log DEBUG "Pre-import workflow snapshot reported: $snapshot_notice"
-            else
-                local pre_snapshot_tmp=""
-                if pre_snapshot_tmp=$(mktemp -t n8n-pre-count-XXXXXXXX.json); then
-                    if docker cp "${container_id}:/tmp/pre_count.json" "$pre_snapshot_tmp" >/dev/null 2>&1; then
-                        local counted_value
-                        if counted_value=$(jq -r "$WORKFLOW_COUNT_FILTER" "$pre_snapshot_tmp" 2>/dev/null); then
-                            if [[ -n "$counted_value" && "$counted_value" != "null" ]]; then
-                                pre_import_workflow_count="$counted_value"
-                            fi
-                        fi
-                    fi
-                    rm -f "$pre_snapshot_tmp"
-                fi
+            fi
+            if [[ "$verbose" == "true" ]]; then
+                log DEBUG "Pre-import workflow snapshot captured via ${existing_workflow_snapshot_source:-unknown} source"
             fi
         else
-            if [[ -n "$count_output" ]]; then
-                local snapshot_error="${count_output//$'\n'/ }"
-                if [[ ${#snapshot_error} -gt 300 ]]; then
-                    snapshot_error="${snapshot_error:0:297}..."
-                fi
-                log DEBUG "Failed to capture pre-import workflow snapshot: $snapshot_error"
-            fi
+            log DEBUG "Pre-import workflow snapshot unavailable; assuming 0 existing workflows"
         fi
-        docker exec "$container_id" sh -c "rm -f /tmp/pre_count.json" 2>/dev/null || true
         log DEBUG "Pre-import workflow count: $pre_import_workflow_count"
     fi
 
@@ -530,7 +413,7 @@ restore() {
                 if [[ ! -f "$decrypt_lib" ]]; then
                     log ERROR "Decrypt helper not found at $decrypt_lib"
                     if [[ -n "$download_dir" ]]; then
-                        rm -rf "$download_dir"
+                        cleanup_temp_path "$download_dir"
                     fi
                     return 1
                 fi
@@ -615,7 +498,7 @@ restore() {
                 rm -f "$decrypt_tmpfile"
             fi
             if [[ -n "$download_dir" ]]; then
-                rm -rf "$download_dir"
+                cleanup_temp_path "$download_dir"
             fi
             return 1
         fi
@@ -623,9 +506,6 @@ restore() {
 
     log INFO "Copying files to container..."
     local copy_status="success"
-    local existing_workflow_snapshot=""
-    local existing_workflow_mapping=""
-    existing_workflow_snapshot_source=""
 
     # Copy workflow file if needed
     if [[ "$workflows_mode" != "0" ]]; then
@@ -650,10 +530,9 @@ restore() {
                     log ERROR "Failed to prepare container directory for workflow import."
                     copy_status="failed"
                 else
-                    if [[ "$is_dry_run" != "true" && -z "$existing_workflow_snapshot" ]]; then
-                        SNAPSHOT_EXISTING_WORKFLOWS_PATH=""
-                        if snapshot_existing_workflows "$container_id" "" "$keep_api_session_alive"; then
-                            existing_workflow_snapshot="$SNAPSHOT_EXISTING_WORKFLOWS_PATH"
+                    if [[ "$is_dry_run" != "true" ]]; then
+                        existing_workflow_snapshot="$(capture_existing_workflow_snapshot "$container_id" "$keep_api_session_alive" "$existing_workflow_snapshot" "$is_dry_run")"
+                        if [[ -n "$existing_workflow_snapshot" ]]; then
                             log DEBUG "Captured existing workflow snapshot from ${existing_workflow_snapshot_source:-unknown} source for duplicate detection."
                         fi
                     fi
@@ -664,7 +543,7 @@ restore() {
                             if mapping_json=$(get_workflow_folder_mapping "$container_id"); then
                                 existing_workflow_mapping=$(mktemp -t n8n-workflow-map-XXXXXXXX.json)
                                 printf '%s' "$mapping_json" > "$existing_workflow_mapping"
-                                log DEBUG "Captured workflow folder mapping for scoped duplicate detection."
+                                log DEBUG "Captured workflow folder mapping for duplicate detection."
                             else
                                 log WARN "Unable to retrieve workflow folder mapping; duplicate matching will fall back to snapshot data."
                             fi
@@ -674,13 +553,12 @@ restore() {
                     fi
 
                     staged_manifest_file=$(mktemp -t n8n-staged-workflows-XXXXXXXX.json)
-                    if ! stage_directory_workflows_to_container "$stage_source_dir" "$container_id" "$container_import_workflows" "$staged_manifest_file" "$existing_workflow_snapshot" "$preserve_ids" "$no_overwrite" "$existing_workflow_mapping"; then
+                    if ! stage_directory_workflows_to_container "$stage_source_dir" "$container_id" "$container_import_workflows" "$staged_manifest_file" "$existing_workflow_snapshot" "$preserve_ids" "$no_overwrite" "$existing_workflow_mapping" "$n8n_path"; then
                         rm -f "$staged_manifest_file"
                         log ERROR "Failed to copy workflow files into container."
                         copy_status="failed"
                     else
                         resolved_structured_dir="$stage_source_dir"
-                        log SUCCESS "Workflow files prepared in container directory $container_import_workflows"
                     fi
                 fi
             fi
@@ -698,23 +576,16 @@ restore() {
         fi
 
         if [[ "$copy_status" == "success" ]]; then
-            if [[ -z "$existing_workflow_snapshot" && "$is_dry_run" != "true" ]]; then
-                SNAPSHOT_EXISTING_WORKFLOWS_PATH=""
-                if snapshot_existing_workflows "$container_id" "" "$keep_api_session_alive"; then
-                    existing_workflow_snapshot="$SNAPSHOT_EXISTING_WORKFLOWS_PATH"
-                    log DEBUG "Captured existing workflow snapshot from ${existing_workflow_snapshot_source:-unknown} source for duplicate detection."
+            if [[ "$is_dry_run" != "true" ]]; then
+                existing_workflow_snapshot="$(capture_existing_workflow_snapshot "$container_id" "$keep_api_session_alive" "$existing_workflow_snapshot" "$is_dry_run")"
+                if [[ -n "$existing_workflow_snapshot" ]]; then
+                    log DEBUG "Captured pre-import workflows snapshot for post-import ID detection."
                 fi
             fi
 
             # Preserve staged manifest for in-place updates during reconciliation
             if [[ -n "$staged_manifest_file" && -f "$staged_manifest_file" ]]; then
-                if [[ -n "${RESTORE_MANIFEST_STAGE_DEBUG_PATH:-}" ]]; then
-                    if ! cp "$staged_manifest_file" "${RESTORE_MANIFEST_STAGE_DEBUG_PATH}" 2>/dev/null; then
-                        log DEBUG "Unable to persist staged manifest to ${RESTORE_MANIFEST_STAGE_DEBUG_PATH}"
-                    else
-                        log DEBUG "Persisted staged manifest to ${RESTORE_MANIFEST_STAGE_DEBUG_PATH}"
-                    fi
-                fi
+                persist_manifest_debug_copy "$staged_manifest_file" "${RESTORE_MANIFEST_STAGE_DEBUG_PATH:-}" "staged manifest"
                 # Keep staged_manifest_file for in-place reconciliation (no copy needed)
             fi
         fi
@@ -742,7 +613,7 @@ restore() {
     if [ "$copy_status" = "failed" ]; then
         log ERROR "Failed to copy files to container - cannot proceed with restore"
         if [[ -n "$download_dir" ]]; then
-            rm -rf "$download_dir"
+            cleanup_temp_path "$download_dir"
         fi
         return 1
     fi
@@ -802,8 +673,7 @@ restore() {
                     else
                         log SUCCESS "Imported $imported_count workflow file(s)"
                         
-                        # CRITICAL: Capture post-import snapshot to identify newly created workflow IDs
-                        # This handles cases where n8n rejects invalid IDs (like '47') and creates new ones
+                        # Capture post-import snapshot to identify newly created workflow IDs
                         if [[ -n "$existing_workflow_snapshot" && -f "$existing_workflow_snapshot" && -n "$staged_manifest_file" && -f "$staged_manifest_file" ]]; then
                             local post_import_snapshot=""
                             SNAPSHOT_EXISTING_WORKFLOWS_PATH=""
@@ -812,18 +682,12 @@ restore() {
                                 log DEBUG "Captured post-import workflow snapshot for ID reconciliation"
                                 
                                 # Update manifest with actual imported workflow IDs by comparing snapshots
-                                # The reconcile function now exports metrics directly
                                 local updated_manifest
                                 updated_manifest=$(mktemp -t n8n-updated-manifest-XXXXXXXX.ndjson)
                                 if reconcile_imported_workflow_ids "$existing_workflow_snapshot" "$post_import_snapshot" "$staged_manifest_file" "$updated_manifest"; then
                                     mv "$updated_manifest" "$staged_manifest_file"
                                     log INFO "Reconciled manifest with actual imported workflow IDs from n8n"
                                     summarize_manifest_assignment_status "$staged_manifest_file" "post-import"
-                                    
-                                    # Metrics already exported by reconcile_imported_workflow_ids:
-                                    # - RESTORE_WORKFLOWS_CREATED
-                                    # - RESTORE_WORKFLOWS_UPDATED
-                                    # - RESTORE_POST_IMPORT_COUNT
                                 else
                                     rm -f "$updated_manifest"
                                     log WARN "Unable to reconcile workflow IDs from post-import snapshot; folder assignment may be affected"
@@ -889,7 +753,7 @@ restore() {
                 log WARN "Workflow directory unavailable for folder restoration; skipping folder assignment."
             fi
         else
-            if ! apply_folder_structure_from_directory "$folder_source_dir" "$container_id" "$is_dry_run" "" "$staged_manifest_file"; then
+            if ! apply_folder_structure_from_directory "$folder_source_dir" "$container_id" "$is_dry_run" "" "$staged_manifest_file" "$n8n_path" true; then
                 log WARN "Folder structure restoration encountered issues; workflows may require manual reorganization."
             fi
         fi
@@ -897,20 +761,14 @@ restore() {
 
     # Clean up manifest and snapshot files
     if [[ -n "$staged_manifest_file" && -f "$staged_manifest_file" ]]; then
-        if [[ -n "${RESTORE_MANIFEST_DEBUG_PATH:-}" ]]; then
-            if ! cp "$staged_manifest_file" "${RESTORE_MANIFEST_DEBUG_PATH}" 2>/dev/null; then
-                log DEBUG "Unable to persist restore manifest to ${RESTORE_MANIFEST_DEBUG_PATH}"
-            else
-                log DEBUG "Persisted restore manifest to ${RESTORE_MANIFEST_DEBUG_PATH}"
-            fi
-        fi
-        rm -f "$staged_manifest_file"
+        persist_manifest_debug_copy "$staged_manifest_file" "${RESTORE_MANIFEST_DEBUG_PATH:-}" "restore manifest"
+        cleanup_temp_path "$staged_manifest_file"
     fi
     if [[ -n "$existing_workflow_snapshot" && -f "$existing_workflow_snapshot" ]]; then
-        rm -f "$existing_workflow_snapshot"
+        cleanup_temp_path "$existing_workflow_snapshot"
     fi
     if [[ -n "$existing_workflow_mapping" && -f "$existing_workflow_mapping" ]]; then
-        rm -f "$existing_workflow_mapping"
+        cleanup_temp_path "$existing_workflow_mapping"
     fi
 
     # Clean up temporary files in container
@@ -921,21 +779,10 @@ restore() {
     
     # Clean up downloaded repository
     if [[ -n "$download_dir" ]]; then
-        rm -rf "$download_dir" 2>/dev/null || true
+        cleanup_temp_path "$download_dir"
     fi
 
-    # Clean up n8n API session BEFORE the summary
-    if [[ "$keep_api_session_alive" == "true" && -n "${N8N_API_AUTH_MODE:-}" ]]; then
-        finalize_n8n_api_auth
-        keep_api_session_alive="false"
-    fi
-    
-    # Clean up session cookie file explicitly (prevents EXIT trap message)
-    if [[ -n "${N8N_SESSION_COOKIE_FILE:-}" && -f "${N8N_SESSION_COOKIE_FILE}" ]]; then
-        rm -f "$N8N_SESSION_COOKIE_FILE" 2>/dev/null || true
-        log DEBUG "Cleaned up session cookie file"
-        N8N_SESSION_COOKIE_FILE=""
-    fi
+    # DO NOT clean up session yet - needed for folder structure sync and summary queries
     
     # Handle restore result
     if [ "$import_status" = "failed" ]; then
@@ -1013,9 +860,22 @@ restore() {
     
     # Final status message
     if [[ $had_workflow_activity == true ]] || [[ $workflows_repositioned -gt 0 ]] || [[ "$credentials_mode" != "0" ]]; then
-        log SUCCESS "✅ Restore completed successfully!"
+        log SUCCESS "Restore successful!"
     else
         log INFO "Restore completed with no changes (all content already up to date)."
+    fi
+    
+    # NOW clean up n8n API session AFTER all operations complete
+    if [[ "$keep_api_session_alive" == "true" && -n "${N8N_API_AUTH_MODE:-}" ]]; then
+        finalize_n8n_api_auth
+        keep_api_session_alive="false"
+    fi
+    
+    # Clean up session cookie file explicitly (prevents EXIT trap message)
+    if [[ -n "${N8N_SESSION_COOKIE_FILE:-}" && -f "${N8N_SESSION_COOKIE_FILE}" ]]; then
+        rm -f "$N8N_SESSION_COOKIE_FILE" 2>/dev/null || true
+        log DEBUG "Cleaned up session cookie file"
+        N8N_SESSION_COOKIE_FILE=""
     fi
     
     return 0

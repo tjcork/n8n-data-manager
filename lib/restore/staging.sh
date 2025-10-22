@@ -1,15 +1,205 @@
 #!/usr/bin/env bash
-# Workflow and credential staging helpers for restore pipeline
+# Simplified workflow staging for restore - creates manifest from directory structure
 
+# Generate manifest from directory structure
+# Args: source_dir, output_manifest_path
+# Returns: 0 on success, 1 on failure
+generate_workflow_manifest() {
+    local source_dir="$1"
+    local output_manifest_path="$2"
+    
+    if [[ -z "$source_dir" || ! -d "$source_dir" ]]; then
+        log ERROR "Invalid source directory for manifest generation: ${source_dir:-<empty>}"
+        return 1
+    fi
+    
+    if [[ -z "$output_manifest_path" ]]; then
+        log ERROR "Output manifest path required"
+        return 1
+    fi
+    
+    # Clear/create output file
+    : > "$output_manifest_path"
+    
+    local workflow_count=0
+    
+    # Find all workflow JSON files
+    while IFS= read -r -d '' workflow_file; do
+        # Read workflow JSON
+        local workflow_json
+        if ! workflow_json=$(cat "$workflow_file" 2>/dev/null); then
+            log WARN "Failed to read workflow file: $workflow_file"
+            continue
+        fi
+        
+        # Validate JSON
+        if ! printf '%s' "$workflow_json" | jq empty 2>/dev/null; then
+            log WARN "Invalid JSON in workflow file: $workflow_file"
+            continue
+        fi
+        
+        # Extract basic fields
+        local workflow_id workflow_name
+        workflow_id=$(printf '%s' "$workflow_json" | jq -r '.id // ""' 2>/dev/null)
+        workflow_name=$(printf '%s' "$workflow_json" | jq -r '.name // ""' 2>/dev/null)
+        
+        # Compute relative path from source_dir
+        local relative_path="${workflow_file#${source_dir}/}"
+        
+        # Create manifest entry (simple NDJSON)
+        local manifest_entry
+        manifest_entry=$(jq -n \
+            --arg id "$workflow_id" \
+            --arg name "$workflow_name" \
+            --arg path "$relative_path" \
+            '{
+                id: $id,
+                name: $name,
+                storagePath: $path
+            }')
+        
+        printf '%s\n' "$manifest_entry" >> "$output_manifest_path"
+        workflow_count=$((workflow_count + 1))
+        
+    done < <(find "$source_dir" -type f -name "*.json" -print0 2>/dev/null)
+    
+    log INFO "Generated manifest with $workflow_count workflow(s)"
+    
+    if [[ "$workflow_count" -eq 0 ]]; then
+        log WARN "No workflows found in $source_dir"
+        return 1
+    fi
+    
+    return 0
+}
+
+sanitize_log_value() {
+    printf '%s' "$1" | tr -d '\r' | tr '\n' ' ' | sed 's/[[:cntrl:]]//g'
+}
+
+# Update manifest with post-import workflow IDs
+# This reconciles the manifest after import to track what IDs were actually assigned
+# Args: manifest_path, post_import_snapshot, output_path
+# Returns: 0 on success
+reconcile_manifest_ids() {
+    local manifest_path="$1"
+    local post_import_snapshot="$2"
+    local output_path="$3"
+    
+    if [[ -z "$manifest_path" || ! -f "$manifest_path" ]]; then
+        log ERROR "Manifest file required for reconciliation"
+        return 1
+    fi
+    
+    if [[ -z "$post_import_snapshot" || ! -f "$post_import_snapshot" ]]; then
+        log ERROR "Post-import snapshot required for reconciliation"
+        return 1
+    fi
+    
+    # Build lookup: workflow by name (for newly created workflows without stable IDs)
+    declare -A workflow_by_name=()
+    
+    while IFS=$'\t' read -r wf_id wf_name wf_instance; do
+        [[ -z "$wf_id" ]] && continue
+        
+        local name_key
+        name_key=$(printf '%s' "$wf_name" | tr '[:upper:]' '[:lower:]')
+        
+        # Store last seen ID for this name (handles duplicates)
+        workflow_by_name["$name_key"]="$wf_id"
+        
+    done < <(printf '%s' "$(cat "$post_import_snapshot")" | jq -r '
+        (if type == "array" then . else (.data // []) end)
+        | .[]
+        | [.id, .name, (.meta.instanceId // "")] 
+        | @tsv
+    ' 2>/dev/null | tr -d '\r')
+    
+    # Update manifest entries
+    : > "$output_path"
+    
+    local reconciled=0
+    local unreconciled=0
+    
+    while IFS= read -r manifest_line; do
+        [[ -z "$manifest_line" ]] && continue
+        
+        local manifest_id manifest_name
+        manifest_id=$(printf '%s' "$manifest_line" | jq -r '.id // ""' 2>/dev/null)
+        manifest_name=$(printf '%s' "$manifest_line" | jq -r '.name // ""' 2>/dev/null)
+        
+        # Try to find actual imported ID
+        local actual_id=""
+        
+        # Strategy 1: ID from manifest still exists
+        if [[ -n "$manifest_id" ]]; then
+            if printf '%s' "$(cat "$post_import_snapshot")" | jq -e --arg id "$manifest_id" '
+                (if type == "array" then . else (.data // []) end)
+                | any(.id == $id)
+            ' >/dev/null 2>&1; then
+                actual_id="$manifest_id"
+            fi
+        fi
+        
+        # Strategy 2: Match by name
+        if [[ -z "$actual_id" && -n "$manifest_name" ]]; then
+            local name_key
+            name_key=$(printf '%s' "$manifest_name" | tr '[:upper:]' '[:lower:]')
+            actual_id="${workflow_by_name[$name_key]:-}"
+        fi
+        
+        # Update manifest entry with reconciliation info
+        local updated_entry
+        if [[ -n "$actual_id" ]]; then
+            updated_entry=$(printf '%s' "$manifest_line" | jq \
+                --arg actualId "$actual_id" \
+                '. + {actualImportedId: $actualId, idReconciled: true}')
+            reconciled=$((reconciled + 1))
+        else
+            updated_entry=$(printf '%s' "$manifest_line" | jq \
+                '. + {idReconciled: false, idReconciliationWarning: "workflow not found after import"}')
+            unreconciled=$((unreconciled + 1))
+        fi
+        
+        printf '%s\n' "$updated_entry" >> "$output_path"
+        
+    done < "$manifest_path"
+    
+    log INFO "Manifest reconciliation: $reconciled resolved, $unreconciled unresolved"
+    
+    return 0
+}
+
+# Validate workflow ID format (must be exactly 16 alphanumeric characters or empty)
+# Args: workflow_id
+# Returns: 0 if valid, 1 if invalid
+is_valid_workflow_id() {
+    local workflow_id="$1"
+    
+    # Empty is valid (will be assigned by n8n)
+    [[ -z "$workflow_id" ]] && return 0
+    
+    # Must be exactly 16 alphanumeric characters
+    if [[ "$workflow_id" =~ ^[A-Za-z0-9]{16}$ ]]; then
+        return 0
+    fi
+    
+    return 1
+}
+
+# Snapshot existing workflows from n8n instance
+# Args: container_id, container_credentials_path (optional), keep_session_alive
+# Returns: 0 on success, sets SNAPSHOT_EXISTING_WORKFLOWS_PATH
+# Global: Sets existing_workflow_snapshot_source to "api" or "container"
 snapshot_existing_workflows() {
     local container_id="$1"
     local container_credentials_path="${2:-}"
     local keep_session_alive="${3:-false}"
     local snapshot_path=""
-    existing_workflow_snapshot_source=""
     SNAPSHOT_EXISTING_WORKFLOWS_PATH=""
     local session_initialized=false
 
+    # Try API method first if n8n base URL is configured
     if [[ -n "${n8n_base_url:-}" ]]; then
         if prepare_n8n_api_auth "$container_id" "$container_credentials_path"; then
             session_initialized=true
@@ -17,1006 +207,466 @@ snapshot_existing_workflows() {
             if api_payload=$(n8n_api_get_workflows); then
                 local normalized_tmp
                 normalized_tmp=$(mktemp -t n8n-existing-workflows-XXXXXXXX.json)
+                # Normalize to array format for compatibility with reconciliation logic
                 if printf '%s' "$api_payload" | jq -c 'if type == "array" then . else (.data // []) end' > "$normalized_tmp" 2>/dev/null; then
                     snapshot_path="$normalized_tmp"
-                    existing_workflow_snapshot_source="api"
+                    export existing_workflow_snapshot_source="api"
                 else
                     rm -f "$normalized_tmp"
-                    log WARN "Unable to normalize workflow list from n8n API; falling back to other methods."
+                    log WARN "Unable to normalize workflow list from n8n API; falling back to CLI export."
                 fi
             else
-                log WARN "Failed to retrieve workflow list via n8n API; attempting fallback methods."
+                log WARN "Failed to retrieve workflow list via n8n API; attempting CLI export fallback."
             fi
+            
+            # Cleanup session if not needed
             if [[ "$session_initialized" == "true" && "$keep_session_alive" != "true" ]]; then
                 finalize_n8n_api_auth
                 session_initialized=false
             fi
         else
-            log DEBUG "n8n API authentication unavailable; attempting workflow snapshot fallback."
+            log DEBUG "n8n API authentication unavailable; attempting CLI export fallback."
         fi
     fi
 
+    # Fallback to CLI export if API method didn't work
     if [[ -z "$snapshot_path" && -n "$container_id" ]]; then
+        log DEBUG "Attempting CLI workflow snapshot"
         local container_tmp="/tmp/n8n-existing-workflows-$$.json"
         if dockExec "$container_id" "n8n export:workflow --all --output=$container_tmp" false; then
             local host_tmp
             host_tmp=$(mktemp -t n8n-existing-workflows-XXXXXXXX.json)
             if docker cp "${container_id}:${container_tmp}" "$host_tmp" >/dev/null 2>&1; then
                 snapshot_path="$host_tmp"
-                existing_workflow_snapshot_source="container"
+                export existing_workflow_snapshot_source="container"
+                log DEBUG "Captured workflow snapshot via CLI export"
             else
                 rm -f "$host_tmp"
                 log WARN "Unable to copy workflow snapshot from container; duplicate detection may be limited."
             fi
             dockExec "$container_id" "rm -f $container_tmp" false || true
         else
-            log WARN "Failed to export workflows from container; proceeding without container snapshot."
+            log WARN "Failed to export workflows from container; proceeding without snapshot."
         fi
     fi
 
+    # Set result
     if [[ -n "$snapshot_path" ]]; then
         SNAPSHOT_EXISTING_WORKFLOWS_PATH="$snapshot_path"
         return 0
     fi
 
     log INFO "Workflow snapshot unavailable; proceeding without pre-import existence checks."
+    
+    # Final session cleanup
     if [[ "$session_initialized" == "true" && "$keep_session_alive" != "true" ]]; then
         finalize_n8n_api_auth
     elif [[ "$session_initialized" == "true" && "$keep_session_alive" == "true" ]]; then
         SNAPSHOT_EXISTING_WORKFLOWS_PATH=""
     fi
+    
     return 1
 }
 
-match_existing_workflow() {
-    local snapshot_path="$1"
-    local staged_id="$2"
-    local staged_instance="$3"
-    local staged_name="$4"
-    local staged_description="$5"
-    local staged_storage_path="$6"
-    local mapping_path="$7"
-
-    local mapping_match_json=""
-    if [[ -n "$mapping_path" && -f "$mapping_path" ]]; then
-        mapping_match_json=$(jq -n \
-            --arg path "$staged_storage_path" \
-            --arg id "$staged_id" \
-            --arg name "$staged_name" \
-            --slurpfile mapping "$mapping_path" '
-                def norm(v): (v // "") | ascii_downcase;
-                ($mapping[0].workflows // []) as $workflows
-                | (if ($path | length) > 0 then
-                    $workflows | map(select(norm(.relativePath) == norm($path)))
-                  else
-                    $workflows
-                  end) as $candidates
-                | if ($id | length) > 0 then
-                    ($candidates | map(select((.id // "") == $id)) | first // empty) as $id_hit
-                    | if ($id_hit | type) == "object" and ($id_hit | length) > 0 then
-                        {matchType: "id", workflow: $id_hit, storagePath: ($id_hit.relativePath // "")}
-                      else empty end
-                elif ($name | length) > 0 then
-                    ($candidates | map(select(norm(.name) == norm($name))) | first // empty) as $name_hit
-                    | if ($name_hit | type) == "object" and ($name_hit | length) > 0 then
-                        {matchType: "name", workflow: $name_hit, storagePath: ($name_hit.relativePath // "")}
-                      else empty end
-                else empty end
-            ' 2>/dev/null)
-
-        if [[ -n "$mapping_match_json" && "$mapping_match_json" != "null" ]]; then
-            printf '%s\n' "$mapping_match_json"
-            return 0
-        fi
-    fi
-
-    if [[ -z "$snapshot_path" || ! -f "$snapshot_path" ]]; then
-        return 1
-    fi
-
-    local match_json=""
-    if [[ -n "$staged_id" ]]; then
-        match_json=$(jq -c --arg id "$staged_id" '
-            (if type == "array" then . else [] end)
-            | map(select(((.id // empty) | tostring) == $id))
-            | first // empty
-        ' "$snapshot_path" 2>/dev/null)
-        if [[ -n "$match_json" && "$match_json" != "null" ]]; then
-            jq -n --arg matchType "id" --argjson workflow "$match_json" --arg storage "${staged_storage_path:-}" '{matchType: $matchType, workflow: $workflow, storagePath: $storage}'
-            return 0
-        fi
-    fi
-
-    if [[ -n "$staged_instance" ]]; then
-        match_json=$(jq -c --arg instance "$staged_instance" '
-            (if type == "array" then . else [] end)
-            | map(select((((.meta.instanceId // .meta.instanceID // empty) | tostring) == $instance)))
-            | first // empty
-        ' "$snapshot_path" 2>/dev/null)
-        if [[ -n "$match_json" && "$match_json" != "null" ]]; then
-            jq -n --arg matchType "instanceId" --argjson workflow "$match_json" --arg storage "${staged_storage_path:-}" '{matchType: $matchType, workflow: $workflow, storagePath: $storage}'
-            return 0
-        fi
-    fi
-
-    if [[ -n "$staged_name" ]]; then
-        match_json=$(jq -c --arg name "$staged_name" '
-            (if type == "array" then . else [] end)
-            | map(select((.name // "") | ascii_downcase == ($name | ascii_downcase)))
-            | first // empty
-        ' "$snapshot_path" 2>/dev/null)
-        if [[ -n "$match_json" && "$match_json" != "null" ]]; then
-            jq -n --arg matchType "name" --argjson workflow "$match_json" --arg storage "${staged_storage_path:-}" '{matchType: $matchType, workflow: $workflow, storagePath: $storage}'
-            return 0
-        fi
-    fi
-
-    return 1
-}
-
-lookup_workflow_in_mapping() {
-    local mapping_path="$1"
-    local storage_path="$2"
-    local workflow_name="$3"
-
-    if [[ -z "$mapping_path" || ! -f "$mapping_path" ]]; then
-        return 1
-    fi
-
-    jq -n \
-        --arg path "${storage_path:-}" \
-        --arg name "${workflow_name:-}" \
-        --slurpfile mapping "$mapping_path" '
-            def norm(v): (v // "" | ascii_downcase);
-            def arr(x): if (x | type) == "array" then x else [] end;
-            def as_entry(e; matchType; note): {
-                matchType: matchType,
-                workflow: {
-                    id: (e.id // ""),
-                    name: (e.name // ""),
-                    relativePath: (e.relativePath // ""),
-                    displayPath: (e.displayPath // ""),
-                    project: (if ((e.project // null) | type) == "object" then e.project else null end),
-                    folders: (if ((e.folders // []) | type) == "array" then e.folders else [] end),
-                    updatedAt: (e.updatedAt // "")
-                },
-                storagePath: (e.relativePath // ""),
-                displayPath: (e.displayPath // ""),
-                resolutionNote: (note // null)
-            };
-
-            ($mapping[0].workflows // []) as $workflows
-            | arr($workflows) as $entries
-            | ($entries | map(select((.name // "") | length > 0))) as $named
-            | ($entries | map(select((.relativePath // "") | length > 0))) as $pathable
-            | ($path | length) as $pathLen
-            | ($name | length) as $nameLen
-
-            | (if $pathLen > 0 then
-                    $pathable
-                    | map(select(norm(.relativePath) == norm($path)))
-                    | sort_by(.updatedAt // "")
-                else [] end) as $pathMatches
-            | (if $nameLen > 0 then
-                    $named
-                    | map(select(norm(.name) == norm($name)))
-                else [] end) as $nameMatches
-
-            | if ($pathMatches | length) == 1 then
-                as_entry($pathMatches[0]; "path"; null)
-            elif ($pathMatches | length) > 1 then
-                as_entry((($pathMatches | sort_by(.updatedAt // "")) | last); "path-newest"; "multiple path matches resolved via newest updatedAt")
-            elif ($nameMatches | length) == 1 then
-                as_entry($nameMatches[0]; "name"; null)
-            elif ($nameMatches | length) > 1 then
-                ($nameMatches
-                 | group_by(norm(.relativePath // ""))
-                 | map(select(length > 0))
-                 | map({path: (.[0].relativePath // ""), entries: .})) as $byPath
-                | ($byPath | length) as $distinctPaths
-                | if $distinctPaths == 1 then
-                    as_entry((($nameMatches | sort_by(.updatedAt // "")) | last); "name-newest"; "multiple name matches sharing relativePath resolved via newest updatedAt")
-                  else empty end
-            else empty end
-    ' 2>/dev/null
-}
-
-lookup_workflow_path_by_id() {
-    local mapping_path="$1"
-    local workflow_id="$2"
-
-    if [[ -z "$mapping_path" || ! -f "$mapping_path" || -z "$workflow_id" ]]; then
-        return 1
-    fi
-
-    local lookup_json
-    lookup_json=$(jq -n \
-        --arg id "$workflow_id" \
-        --slurpfile mapping "$mapping_path" '
-            ($mapping[0].workflows // [])
-            | map(select((.id // "") == $id))
-            | first // empty
-            | if (type == "object") then
-                {found: true, path: ((.relativePath // .storagePath // "") | tostring)}
-              else {found: false, path: ""} end
-        ' 2>/dev/null)
-
-    if [[ -z "$lookup_json" ]]; then
-        return 1
-    fi
-
-    local found_flag
-    found_flag=$(printf '%s' "$lookup_json" | jq -r '.found // false' 2>/dev/null)
-    if [[ "$found_flag" != "true" ]]; then
-        return 1
-    fi
-
-    local relpath
-    relpath=$(printf '%s' "$lookup_json" | jq -r '.path // ""' 2>/dev/null)
-    if [[ "$relpath" == "null" ]]; then
-        relpath=""
-    fi
-
-    printf '%s\n' "$relpath"
-    return 0
-}
-
+# Stage workflow directory to container with ID sanitization and conflict resolution
+# This is the main entry point for workflow staging during restore operations
+# 
+# Args:
+#   $1 source_dir - Local directory containing workflow JSON files
+#   $2 container_id - Docker container ID
+#   $3 container_target_dir - Path in container where files will be copied
+#   $4 output_manifest_path - Where to write the staging manifest
+#   $5 existing_snapshot_path - Path to pre-import workflow snapshot (optional)
+#   $6 preserve_ids - "true" to keep original IDs when possible, "false" to always reassign
+#   $7 no_overwrite - "true" to always generate new IDs, "false" to allow ID reuse
+#   $8 workflow_mapping_path - Path to workflow-folder mapping JSON (optional)
+#
+# Returns: 0 on success, 1 on failure
+#
+# ID Handling Logic:
+# 1. If preserve_ids=false → check for existing workflow with same name in target folder (PRIORITY)
+#    - If match found → use existing workflow's ID (enables update instead of duplicate)
+# 2. If ID is not 16 alphanumeric chars → remove ID (n8n will assign new)
+# 3. If no_overwrite=true → always remove ID (force new workflow creation)
+# 4. If ID conflicts with different workflow name → remove ID (prevent wrong workflow update)
+# 5. If preserve_ids=true → keep original ID (unless conflicts detected in step 4)
 stage_directory_workflows_to_container() {
     local source_dir="$1"
     local container_id="$2"
     local container_target_dir="$3"
-    local manifest_output="${4:-}"
-    local existing_snapshot="${5:-}"
+    local output_manifest_path="$4"
+    local existing_snapshot_path="${5:-}"
     local preserve_ids="${6:-false}"
     local no_overwrite="${7:-false}"
-    local existing_mapping="${8:-}"
-
-    if [[ "$preserve_ids" != "true" ]]; then
-        preserve_ids=false
-    fi
-
-    no_overwrite=$(printf '%s' "$no_overwrite" | tr '[:upper:]' '[:lower:]')
-    if [[ "$no_overwrite" == "true" ]]; then
-        no_overwrite=true
-        preserve_ids=false
-        if [[ "$verbose" == "true" ]]; then
-            log DEBUG "no-overwrite enabled: workflow IDs will be cleared prior to import."
-        fi
-    else
-        no_overwrite=false
-    fi
-
+    local workflow_mapping_path="${8:-}"
+    local target_folder="${9:-}"
+    
     if [[ -z "$source_dir" || ! -d "$source_dir" ]]; then
-        log ERROR "Workflow directory not found: ${source_dir:-<empty>}"
+        log ERROR "Invalid source directory: ${source_dir:-<empty>}"
         return 1
     fi
-
-    local staging_dir
-    local staging_dir
-    staging_dir=$(mktemp -d -t n8n-structured-import-XXXXXXXXXX)
-    local copy_success=true
-    local staged_count=0
-    local jq_sanitize_script
-    jq_sanitize_script=$(cat <<'JQ'
-def normalize_tag:
-  if type == "object" then
-    (.name // .label // .value // (if has("id") and ((.id|tostring)|length > 0) then ("tag-" + (.id|tostring)) else empty end))
-  else
-    .
-  end;
-
-def ensure_array:
-  if type == "array" then .
-  elif . == null then []
-  else [.] end;
-
-.active = (if (.active | type) == "boolean" then .active else false end)
-| .tags = (
-    (.tags // []
-      | ensure_array
-      | map(
-          normalize_tag
-          | select(. != null)
-          | tostring
-          | gsub("^\\s+|\\s+$"; "")
-          | select(length > 0)
-          | {name: .}
-        )
-      | unique_by(.name)
-    )
-  )
-JQ
-)
-    local manifest_entries_file=""
-    if [[ -n "$manifest_output" ]]; then
-        manifest_entries_file=$(mktemp -t n8n-staged-manifest-XXXXXXXX.ndjson)
+    
+    if [[ -z "$container_id" ]]; then
+        log ERROR "Container ID required for staging"
+        return 1
     fi
-
-    declare -A staged_workflow_ids=()
-
-    while IFS= read -r -d '' workflow_file; do
-        local filename
-        filename=$(basename "$workflow_file")
-
-        if [[ -z "$filename" || "$filename" == ".json" ]]; then
-            filename="workflow_${staged_count}.json"
-        fi
-
-        local relative_path="${workflow_file#$source_dir/}"
-        if [[ "$relative_path" == "$workflow_file" ]]; then
-            relative_path="$filename"
-        fi
-
-        local relative_dir="${relative_path%/*}"
-        if [[ "$relative_dir" == "$relative_path" ]]; then
-            relative_dir=""
-        fi
-        relative_dir="${relative_dir#/}"
-        relative_dir="${relative_dir%/}"
-
-        local relative_dir_without_prefix
-        relative_dir_without_prefix="$(strip_github_path_prefix "$relative_dir")"
-        relative_dir_without_prefix="${relative_dir_without_prefix#/}"
-        relative_dir_without_prefix="${relative_dir_without_prefix%/}"
-
-        local canonical_relative_path
-        canonical_relative_path="$(strip_github_path_prefix "$relative_path")"
-        canonical_relative_path="${canonical_relative_path#/}"
-        canonical_relative_path="${canonical_relative_path%/}"
-
-        local repo_entry_path
-        repo_entry_path="$(compose_repo_storage_path "$canonical_relative_path")"
-        repo_entry_path="${repo_entry_path#/}"
-        repo_entry_path="${repo_entry_path%/}"
-
-        local canonical_storage_path
-        canonical_storage_path="$(compose_repo_storage_path "$relative_dir_without_prefix")"
-        canonical_storage_path="${canonical_storage_path#/}"
-        canonical_storage_path="${canonical_storage_path%/}"
-
-    local expected_project_slug=""
-    local expected_project_slug_norm=""
-        local expected_project_display=""
-        local -a expected_folder_slugs=()
-        local -a expected_folder_displays=()
-        local expected_display_path=""
-
-        compute_entry_folder_context \
-            "$relative_dir_without_prefix" \
-            expected_project_slug \
-            expected_project_display \
-            expected_folder_slugs \
-            expected_folder_displays \
-            expected_display_path
-
-        if [[ -n "$expected_project_slug" ]]; then
-            expected_project_slug_norm=$(normalize_manifest_lookup_key "$expected_project_slug")
-        fi
-
-        local expected_folder_slug_path=""
-        if ((${#expected_folder_slugs[@]} > 0)); then
-            expected_folder_slug_path=$(IFS=/; printf '%s' "${expected_folder_slugs[*]}")
-        fi
-
-        local expected_folder_display_path=""
-        if ((${#expected_folder_displays[@]} > 0)); then
-            expected_folder_display_path=$(IFS=/; printf '%s' "${expected_folder_displays[*]}")
-        fi
-
-        local expected_project_and_slug_path=""
-        if [[ -n "$expected_project_slug" ]]; then
-            expected_project_and_slug_path="$expected_project_slug"
-            if [[ -n "$expected_folder_slug_path" ]]; then
-                expected_project_and_slug_path+="/$expected_folder_slug_path"
+    
+    log DEBUG "Staging workflows from $source_dir to container $container_id"
+    log DEBUG "ID handling: preserve_ids=$preserve_ids, no_overwrite=$no_overwrite"
+    [[ -n "$target_folder" ]] && log DEBUG "Target folder for matching: $target_folder"
+    
+    # Create temp staging directory
+    local staging_dir
+    staging_dir=$(mktemp -d -t n8n-staging-XXXXXXXX)
+    
+    # Build existing workflow lookup
+    declare -A existing_workflows_by_id=()
+    declare -A existing_workflows_by_name=()
+    declare -A existing_workflows_by_name_and_folder=()
+    declare -A staged_workflows_by_id=()  # Track IDs in current import batch
+    
+    # Load folder assignments from workflow mapping if available
+    declare -A workflow_folder_assignments=()  # workflow_id -> folder_path
+    if [[ -n "$workflow_mapping_path" && -f "$workflow_mapping_path" ]]; then
+        log DEBUG "Reading workflow-folder paths from mapping file: $workflow_mapping_path"
+        local wf_count
+        wf_count=$(jq -r '.workflows | length' "$workflow_mapping_path" 2>/dev/null || echo "0")
+        log DEBUG "Mapping file lists $wf_count workflow record(s)"
+        
+        while IFS=$'\t' read -r wf_id folder_path_raw; do
+            [[ -z "$wf_id" ]] && continue
+            # Normalize folder path using mapping metadata
+            local folder_path
+            folder_path=$(printf '%s' "$folder_path_raw" | tr -d '\r\n')
+            if [[ "$folder_path" == "Folder" ]]; then
+                folder_path=""
             fi
-        elif [[ -n "$expected_folder_slug_path" ]]; then
-            expected_project_and_slug_path="$expected_folder_slug_path"
+            folder_path=$(printf '%s' "$folder_path" | sed 's:^/*::;s:/*$::')
+            workflow_folder_assignments["$wf_id"]="$folder_path"
+        done < <(jq -r '
+            .workflows[]? |
+            select(.id) |
+            [
+                .id,
+                (if (.folders // []) | length > 0 then
+                    (.folders | map(.name // "") | join("/"))
+                 elif (.displayPath // "") != "" then
+                    (.displayPath
+                        | (split("/") | if length > 1 then (.[1:] | join("/")) else "" end)
+                        | gsub("^Folder/?"; ""))
+                 else
+                    ""
+                 end)
+            ] |
+            @tsv
+        ' "$workflow_mapping_path" 2>/dev/null | tr -d '\r')
+        if [[ "$verbose" == "true" ]]; then
+            log DEBUG "Workflow-folder paths available for ${#workflow_folder_assignments[@]} workflow(s)"
         fi
+    fi
+    
+    if [[ -n "$existing_snapshot_path" && -f "$existing_snapshot_path" ]]; then
+    log DEBUG "Building existing workflow index from snapshot"
+        
+        while IFS=$'\t' read -r wf_id wf_name wf_folder_path; do
+            [[ -z "$wf_id" ]] && continue
+            
+            # Index by ID
+            existing_workflows_by_id["$wf_id"]="$wf_name"
 
-        local expected_relative_path="$expected_project_and_slug_path"
-        if [[ -z "$expected_relative_path" && -n "$expected_project_slug" ]]; then
-            expected_relative_path="$expected_project_slug"
-        fi
-
-        if [[ -n "$repo_entry_path" ]] && ! path_matches_github_prefix "$repo_entry_path"; then
-            log DEBUG "Skipping workflow outside configured GITHUB_PATH: $workflow_file"
+            # Index by name (case sensitive) when unique
+            if [[ -z "${existing_workflows_by_name[$wf_name]:-}" ]]; then
+                existing_workflows_by_name["$wf_name"]="$wf_id"
+            else
+                existing_workflows_by_name["$wf_name"]="__multiple__"
+            fi
+            
+            # Use folder path from mapping file if available, otherwise from snapshot
+            local mapped_folder="${workflow_folder_assignments[$wf_id]:-}"
+            local effective_folder_path="${mapped_folder:-$wf_folder_path}"
+            
+            # Index by name+folder for scoped conflict detection (CASE SENSITIVE for both folder AND name)
+            if [[ -n "$effective_folder_path" ]]; then
+                # Keep both folder path AND workflow name case-sensitive
+                # Trim slashes from folder path
+                local normalized_folder
+                normalized_folder=$(printf '%s' "$effective_folder_path" | sed 's:^/*::;s:/*$::')
+                local folder_key="${normalized_folder}/${wf_name}"
+                existing_workflows_by_name_and_folder["$folder_key"]="$wf_id"
+            fi
+            
+        done < <(printf '%s' "$(cat "$existing_snapshot_path")" | jq -r '
+            (if type == "array" then . else (.data // []) end)
+            | map(select(.resource != "folder"))
+            | .[]
+            | [
+                .id,
+                .name,
+                (if .homeProject.path then .homeProject.path elif .parentFolderId then .parentFolderId else "" end)
+            ]
+            | @tsv
+        ' 2>/dev/null | tr -d '\r')
+        
+    log DEBUG "Existing workflow index prepared for ${#existing_workflows_by_id[@]} workflow(s)"
+    fi
+    
+    # Clear/create output manifest
+    : > "$output_manifest_path"
+    
+    local processed=0
+    local ids_reset=0
+    local ids_reused=0
+    
+    # Process each workflow file
+    while IFS= read -r -d '' workflow_file; do
+        local workflow_json
+        if ! workflow_json=$(cat "$workflow_file" 2>/dev/null); then
+            log WARN "Failed to read workflow: $workflow_file"
             continue
         fi
-
-        local dest_filename="$filename"
-        local base_name="${filename%.json}"
-        local suffix=1
-        while [[ -e "$staging_dir/$dest_filename" ]]; do
-            dest_filename="${base_name}_${suffix}.json"
-            suffix=$((suffix + 1))
-        done
-
-        local staged_path="$staging_dir/$dest_filename"
-        if ! jq "$jq_sanitize_script" "$workflow_file" > "$staged_path"; then
-            rm -f "$staged_path"
-            log WARN "Failed to normalize workflow file: $workflow_file"
-            if ! cp "$workflow_file" "$staging_dir/$dest_filename"; then
-                log WARN "Failed to stage workflow file: $workflow_file"
-                copy_success=false
-                continue
-            fi
+        
+        # Validate JSON
+        if ! printf '%s' "$workflow_json" | jq empty 2>/dev/null; then
+            log WARN "Invalid JSON: $workflow_file"
+            continue
         fi
-
-        # Extract workflow metadata BEFORE modifying the file
-    local staged_id staged_name staged_instance staged_description staged_id_valid="false" id_sanitized_note=""
-    staged_id=$(jq -r '.id // empty' "$staged_path" 2>/dev/null || printf '')
-        staged_name=$(jq -r '.name // empty' "$staged_path" 2>/dev/null || printf '')
-        staged_instance=$(jq -r '.meta.instanceId // empty' "$staged_path" 2>/dev/null || printf '')
-        staged_description=$(jq -r '.description // empty' "$staged_path" 2>/dev/null || printf '')
-        local original_staged_id="$staged_id"
-        local resolved_id_source=""
-        local mapping_match_json=""
-    local duplicate_match_json=""
-    local existing_storage_path=""
-    local existing_display_path=""
-    local existing_workflow_id=""
-    local name_match_json=""
-    local name_match_id=""
-    local name_match_relpath=""
-    local name_match_type=""
-    local name_match_allowed="false"
-    local id_conflict_resolved_via_name="false"
-    local name_match_candidate_path=""
-        local folder_match_applied="false"
-        local folder_name_match_entry=""
-        local folder_name_match_count=0
-
-        if [[ -n "$staged_id" ]]; then
-            if [[ "$staged_id" =~ ^[A-Za-z0-9]{16}$ ]]; then
-                staged_id_valid="true"
-            else
-                if jq 'del(.id)' "$staged_path" > "${staged_path}.tmp" 2>/dev/null; then
-                    mv "${staged_path}.tmp" "$staged_path"
-                    staged_id=""
-                    id_sanitized_note="sanitized-invalid-format"
-                    if [[ "$verbose" == "true" ]]; then
-                        log DEBUG "Removed invalid workflow ID '$original_staged_id' (expected 16-char alphanumeric)."
-                    fi
-                else
-                    rm -f "${staged_path}.tmp"
-                    log WARN "Unable to sanitize invalid workflow ID '$staged_id' for '${staged_name:-$dest_filename}'."
-                fi
+        
+        # Extract workflow metadata
+        local original_id workflow_name
+        original_id=$(printf '%s' "$workflow_json" | jq -r '.id // ""' 2>/dev/null)
+        workflow_name=$(printf '%s' "$workflow_json" | jq -r '.name // ""' 2>/dev/null)
+        workflow_name=$(printf '%s' "$workflow_name" | tr -d '\r\n')
+        
+        # Compute target folder path from directory structure
+        local relative_path="${workflow_file#${source_dir}/}"
+        local folder_path
+        folder_path=$(dirname "$relative_path")
+        [[ "$folder_path" == "." ]] && folder_path=""
+        
+        # Determine final workflow ID based on policy
+    local final_id="$original_id"
+    local sanitization_note=""
+    local matched_existing_id=""
+    local match_strategy=""
+    local manifest_action="create"
+        
+        # Step 1: Check for name-based matching FIRST (if preserve_ids=false)
+        # This gives priority to existing workflows with matching names in the target folder
+        if [[ "$preserve_ids" == "false" ]]; then
+            # Construct full folder path for matching (CASE SENSITIVE for both folder AND name)
+            local full_folder_path="$folder_path"
+            if [[ -n "$target_folder" && -n "$folder_path" ]]; then
+                full_folder_path="${target_folder}/${folder_path}"
+            elif [[ -n "$target_folder" ]]; then
+                full_folder_path="$target_folder"
             fi
-        fi
-
-        if [[ "$folder_match_applied" != "true" ]]; then
-            if [[ -n "$existing_mapping" && -f "$existing_mapping" && -n "$staged_name" ]]; then
-                mapping_match_json=$(lookup_workflow_in_mapping "$existing_mapping" "$canonical_storage_path" "$staged_name") || mapping_match_json=""
-                if [[ "$mapping_match_json" == "null" ]]; then
-                    mapping_match_json=""
-                fi
-            fi
-
-            if [[ -n "$mapping_match_json" ]]; then
-                duplicate_match_json="$mapping_match_json"
-                resolved_id_source=$(printf '%s' "$mapping_match_json" | jq -r '.matchType // empty' 2>/dev/null)
-            fi
-
-            if [[ -z "$duplicate_match_json" ]]; then
-                if [[ -n "$existing_snapshot" && -f "$existing_snapshot" ]]; then
-                    duplicate_match_json=$(match_existing_workflow "$existing_snapshot" "$staged_id" "$staged_instance" "$staged_name" "$staged_description" "$repo_entry_path" "$existing_mapping") || duplicate_match_json=""
-                elif [[ -n "$existing_mapping" && -f "$existing_mapping" ]]; then
-                    duplicate_match_json=$(match_existing_workflow "" "$staged_id" "$staged_instance" "$staged_name" "$staged_description" "$repo_entry_path" "$existing_mapping") || duplicate_match_json=""
-                fi
-            fi
-        fi
-
-        local duplicate_match_type=""
-        if [[ -n "$duplicate_match_json" ]]; then
-            duplicate_match_type=$(printf '%s' "$duplicate_match_json" | jq -r '.matchType // empty' 2>/dev/null)
-            local duplicate_existing_id
-            duplicate_existing_id=$(printf '%s' "$duplicate_match_json" | jq -r '.workflow.id // empty' 2>/dev/null)
-            if [[ "$folder_match_applied" != "true" || -z "$existing_workflow_id" ]]; then
-                existing_workflow_id="$duplicate_existing_id"
-            fi
-            if [[ -z "$existing_storage_path" ]]; then
-                existing_storage_path=$(printf '%s' "$duplicate_match_json" | jq -r '.storagePath // .workflow.relativePath // empty' 2>/dev/null)
-            fi
-            if [[ -z "$existing_display_path" ]]; then
-                existing_display_path=$(printf '%s' "$duplicate_match_json" | jq -r '.displayPath // .workflow.displayPath // empty' 2>/dev/null)
-            fi
-            if [[ -z "$resolved_id_source" && -n "$duplicate_match_type" ]]; then
-                resolved_id_source="$duplicate_match_type"
-            fi
-            # Verbose duplicate detection logging removed - final ID will be logged after all resolution steps
-        fi
-
-        if [[ "$folder_match_applied" != "true" && -n "$staged_name" ]]; then
-            name_match_json=$(match_existing_workflow "$existing_snapshot" "" "$staged_instance" "$staged_name" "$staged_description" "$repo_entry_path" "$existing_mapping") || name_match_json=""
-            if [[ "$name_match_json" == "null" ]]; then
-                name_match_json=""
-            fi
-            if [[ -n "$name_match_json" ]]; then
-                name_match_type=$(printf '%s' "$name_match_json" | jq -r '.matchType // empty' 2>/dev/null)
-                name_match_id=$(printf '%s' "$name_match_json" | jq -r '.workflow.id // empty' 2>/dev/null)
-                name_match_relpath=$(printf '%s' "$name_match_json" | jq -r '.workflow.relativePath // empty' 2>/dev/null)
-
-                local mapping_candidate=""
-                local mapping_candidate_found="false"
-                if [[ -n "$existing_mapping" && -f "$existing_mapping" && -n "$name_match_id" ]]; then
-                    if mapping_candidate=$(lookup_workflow_path_by_id "$existing_mapping" "$name_match_id"); then
-                        mapping_candidate_found="true"
-                        name_match_candidate_path="$mapping_candidate"
-                    fi
-                fi
-
-                if [[ "$mapping_candidate_found" != "true" ]]; then
-                    if [[ -n "$name_match_relpath" ]]; then
-                        name_match_candidate_path="$name_match_relpath"
-                    else
-                        name_match_candidate_path=""
-                    fi
-                else
-                    if [[ -z "$name_match_relpath" ]]; then
-                        name_match_relpath="$name_match_candidate_path"
-                    fi
-                fi
-
-                local candidate_folder_display=""
-                candidate_folder_display=$(printf '%s' "$name_match_json" | jq -r '.workflow.folders | (map(.name) | join("/")) // empty' 2>/dev/null)
-
-                local candidate_folder_path_raw=""
-                if [[ -n "$name_match_candidate_path" ]]; then
-                    candidate_folder_path_raw="$name_match_candidate_path"
-                fi
-
-                local candidate_folder_path=""
-                if [[ -n "$candidate_folder_path_raw" ]]; then
-                    local candidate_extension
-                    candidate_extension=$(printf '%s' "${candidate_folder_path_raw##*.}" | tr '[:upper:]' '[:lower:]')
-                    if [[ "$candidate_extension" == "json" ]]; then
-                        candidate_folder_path="${candidate_folder_path_raw%/*}"
-                        if [[ "$candidate_folder_path" == "$candidate_folder_path_raw" ]]; then
-                            candidate_folder_path=""
-                        fi
-                    else
-                        candidate_folder_path="$candidate_folder_path_raw"
-                    fi
-                fi
-
-                candidate_folder_path="${candidate_folder_path#/}"
-                candidate_folder_path="${candidate_folder_path%/}"
-
-                if [[ -z "$candidate_folder_display" && -n "$candidate_folder_path" ]]; then
-                    candidate_folder_display="$candidate_folder_path"
-                fi
-
-                local expected_folder_display="$expected_folder_display_path"
-                if [[ -z "$expected_folder_display" ]]; then
-                    expected_folder_display="$expected_display_path"
-                fi
-                local expected_folder_path="$canonical_storage_path"
-
-                local candidate_storage_norm=""
-                local expected_storage_norm=""
-                if [[ -n "$candidate_folder_path" ]]; then
-                    candidate_storage_norm=$(normalize_manifest_lookup_key "$candidate_folder_path")
-                fi
-                if [[ -n "$expected_folder_path" ]]; then
-                    expected_storage_norm=$(normalize_manifest_lookup_key "$expected_folder_path")
-                fi
-
-                local candidate_path_norm=""
-                if [[ -n "$name_match_candidate_path" ]]; then
-                    candidate_path_norm=$(normalize_manifest_lookup_key "$name_match_candidate_path")
-                fi
-                local expected_path_norm=""
-                if [[ -n "$repo_entry_path" ]]; then
-                    expected_path_norm=$(normalize_manifest_lookup_key "$repo_entry_path")
-                fi
-
-                local candidate_display_norm
-                candidate_display_norm=$(normalize_manifest_lookup_key "$candidate_folder_display")
-                local expected_display_norm
-                expected_display_norm=$(normalize_manifest_lookup_key "$expected_folder_display")
-
-                local candidate_matches_expected="false"
-                if [[ -n "$candidate_path_norm" && -n "$expected_path_norm" ]]; then
-                    if manifest_lookup_path_matches "$candidate_path_norm" "$expected_path_norm" "$expected_project_slug_norm"; then
-                        candidate_matches_expected="true"
-                    fi
-                fi
-
-                if [[ "$candidate_matches_expected" != "true" && -n "$candidate_storage_norm" && -n "$expected_storage_norm" ]]; then
-                    if manifest_lookup_path_matches "$candidate_storage_norm" "$expected_storage_norm" "$expected_project_slug_norm"; then
-                        candidate_matches_expected="true"
-                    fi
-                fi
-
-                if [[ "$candidate_matches_expected" != "true" && -n "$candidate_display_norm" && -n "$expected_display_norm" ]]; then
-                    if manifest_lookup_path_matches "$candidate_display_norm" "$expected_display_norm" "$expected_project_slug_norm"; then
-                        candidate_matches_expected="true"
-                    fi
-                fi
-
-                if [[ "$candidate_matches_expected" != "true" && -z "$candidate_storage_norm" && -z "$expected_storage_norm" && -z "$candidate_display_norm" && -z "$expected_display_norm" ]]; then
-                    candidate_matches_expected="true"
-                fi
-
-                if [[ "$candidate_matches_expected" == "true" ]]; then
-                    name_match_allowed="true"
-                elif [[ -n "$name_match_id" && -z "$name_match_candidate_path" ]]; then
-                    name_match_allowed="true"
-                    if [[ "$verbose" == "true" ]]; then
-                        log DEBUG "Allowing name-based duplicate alignment for '${staged_name:-$dest_filename}' (ID ${name_match_id}) despite missing folder metadata."
-                    fi
-                elif [[ "$verbose" == "true" ]]; then
-                    log DEBUG "Skipping name-based duplicate alignment for '${staged_name:-$dest_filename}' due to folder mismatch (candidate='${candidate_folder_display:-<empty>}', expected='${expected_folder_display:-<empty>}')."
-                fi
-
-                if [[ "$name_match_allowed" == "true" ]]; then
-                    if [[ -z "$existing_storage_path" && -n "$name_match_candidate_path" ]]; then
-                        existing_storage_path="$name_match_candidate_path"
-                    fi
-                    if [[ -z "$existing_display_path" && -n "$expected_display_path" ]]; then
-                        existing_display_path="$expected_display_path"
-                    fi
-                    if [[ -z "$duplicate_match_json" ]]; then
-                        duplicate_match_json="$name_match_json"
-                        duplicate_match_type="$name_match_type"
-                        if [[ -z "$existing_workflow_id" ]]; then
-                            existing_workflow_id="$name_match_id"
-                        fi
-                        if [[ -z "$resolved_id_source" && -n "$name_match_type" ]]; then
-                            resolved_id_source="$name_match_type"
-                        fi
-                    fi
-                fi
-            fi
-        fi
-
-        if [[ "$preserve_ids" != "true" && "$no_overwrite" != "true" && "$name_match_allowed" == "true" && -n "$name_match_id" ]]; then
-            if [[ "$staged_id" != "$name_match_id" || -z "$staged_id" ]]; then
-                if [[ "$name_match_id" =~ ^[A-Za-z0-9]{16}$ ]]; then
-                    if jq --arg id "$name_match_id" '.id = $id' "$staged_path" > "${staged_path}.tmp" 2>/dev/null; then
-                        mv "${staged_path}.tmp" "$staged_path"
-                        staged_id="$name_match_id"
-                        staged_id_valid="true"
-                        existing_workflow_id="$name_match_id"
-                        resolved_id_source="name-match"
-                        id_conflict_resolved_via_name="true"
-                        # ID alignment logging moved to final preparation step for clarity
-                    else
-                        rm -f "${staged_path}.tmp"
-                        log WARN "Failed to apply name-matched workflow ID '$name_match_id' for '${staged_name:-$dest_filename}'."
-                    fi
-                elif [[ "$verbose" == "true" ]]; then
-                    log DEBUG "Name-matched workflow ID '$name_match_id' for '${staged_name:-$dest_filename}' is invalid; leaving staged ID unchanged."
-                fi
-            fi
-        fi
-
-        local id_exists_in_target="false"
-        if [[ -n "$staged_id" ]]; then
-            if [[ -n "$existing_workflow_id" && "$existing_workflow_id" == "$staged_id" ]]; then
-                id_exists_in_target="true"
-            elif [[ "$duplicate_match_type" == "id" ]]; then
-                id_exists_in_target="true"
-            elif [[ -n "$existing_snapshot" && -f "$existing_snapshot" ]]; then
-                if jq -e --arg id "$staged_id" '
-                        (if type == "array" then . else [])
-                        | map(select(((.id // empty) | tostring) == $id))
-                        | length > 0
-                    ' "$existing_snapshot" >/dev/null 2>&1; then
-                    id_exists_in_target="true"
-                fi
-            fi
-        fi
-
-        if [[ "$preserve_ids" == "true" && -n "$existing_workflow_id" ]]; then
-            if [[ "$staged_id" != "$existing_workflow_id" ]]; then
-                if jq --arg id "$existing_workflow_id" '.id = $id' "$staged_path" > "${staged_path}.tmp"; then
-                    mv "${staged_path}.tmp" "$staged_path"
-                    staged_id="$existing_workflow_id"
-                    staged_id_valid=$([[ "$staged_id" =~ ^[A-Za-z0-9]{16}$ ]] && printf 'true' || printf 'false')
-                    if [[ "$staged_id_valid" != "true" ]]; then
-                        if jq 'del(.id)' "$staged_path" > "${staged_path}.tmp" 2>/dev/null; then
-                            mv "${staged_path}.tmp" "$staged_path"
-                            id_sanitized_note="sanitized-existing-invalid"
-                            staged_id=""
-                            if [[ "$verbose" == "true" ]]; then
-                                log DEBUG "Existing workflow ID '$existing_workflow_id' failed validation and was removed prior to import."
-                            fi
-                        else
-                            rm -f "${staged_path}.tmp"
-                            log WARN "Unable to sanitize invalid existing workflow ID '$existing_workflow_id' for '${staged_name:-$dest_filename}'."
-                        fi
-                    fi
-                    # ID alignment logging consolidated into final import preparation step
-                else
-                    rm -f "${staged_path}.tmp"
-                    log WARN "Failed to apply resolved workflow ID '${existing_workflow_id}' for '${staged_name:-$dest_filename}'."
-                fi
-            fi
-        fi
-
-        if [[ "$preserve_ids" != "true" && -n "$staged_id" ]]; then
-            local clear_reason=""
-            if [[ -n "$name_match_id" && "$name_match_allowed" != "true" ]]; then
-                clear_reason="folder-name-mismatch"
-            elif [[ "$no_overwrite" == "true" ]]; then
-                clear_reason="no-overwrite"
-            elif [[ "$id_exists_in_target" == "true" ]]; then
-                if [[ "$id_conflict_resolved_via_name" == "true" ]]; then
-                    clear_reason=""
-                else
-                    clear_reason="id-conflict"
-                fi
-            fi
-
-            if [[ -n "$clear_reason" ]]; then
-                if jq 'del(.id)' "$staged_path" > "${staged_path}.tmp" 2>/dev/null; then
-                    mv "${staged_path}.tmp" "$staged_path"
-                    if [[ "$verbose" == "true" ]]; then
-                        if [[ "$clear_reason" == "no-overwrite" ]]; then
-                            log DEBUG "Cleared workflow ID '${staged_id}' for '${staged_name:-$dest_filename}' because --no-overwrite is enabled."
-                        elif [[ "$clear_reason" == "folder-name-mismatch" ]]; then
-                            log DEBUG "Cleared workflow ID '${staged_id}' for '${staged_name:-$dest_filename}' because no matching workflow exists in the target folder."
-                        else
-                            log DEBUG "Cleared workflow ID '${staged_id}' for '${staged_name:-$dest_filename}' due to existing ID conflict in target instance."
-                        fi
-                    fi
-                    staged_id=""
-                    if [[ "$clear_reason" == "no-overwrite" ]]; then
-                        id_sanitized_note=$(append_sanitized_note "$id_sanitized_note" "no-overwrite")
-                    elif [[ "$clear_reason" == "folder-name-mismatch" ]]; then
-                        id_sanitized_note=$(append_sanitized_note "$id_sanitized_note" "folder-name-mismatch")
-                    else
-                        id_sanitized_note=$(append_sanitized_note "$id_sanitized_note" "id-conflict")
-                    fi
-                else
-                    rm -f "${staged_path}.tmp"
-                    log WARN "Unable to clear workflow ID '${staged_id}' for '${staged_name:-$dest_filename}' (${clear_reason})."
-                fi
-            else
-                local staged_folder_norm
-                staged_folder_norm=$(normalize_manifest_lookup_key "$canonical_storage_path")
-                local prior_folder=""
-                if [[ -n "${staged_workflow_ids[$staged_id]+x}" ]]; then
-                    prior_folder="${staged_workflow_ids[$staged_id]}"
-                fi
-
-                local duplicate_within_stage="false"
-                if [[ -n "$prior_folder" ]]; then
-                    local prior_folder_norm
-                    prior_folder_norm=$(normalize_manifest_lookup_key "$prior_folder")
-                    if [[ -z "$prior_folder_norm" && -z "$staged_folder_norm" ]]; then
-                        duplicate_within_stage="true"
-                    elif [[ -n "$prior_folder_norm" && "$prior_folder_norm" == "$staged_folder_norm" ]]; then
-                        duplicate_within_stage="true"
-                    fi
-                fi
-
-                if [[ -n "$prior_folder" && "$duplicate_within_stage" != "true" ]]; then
-                    if jq 'del(.id)' "$staged_path" > "${staged_path}.tmp" 2>/dev/null; then
-                        mv "${staged_path}.tmp" "$staged_path"
-                        if [[ "$verbose" == "true" ]]; then
-                            log DEBUG "Cleared workflow ID '${staged_id}' for '${staged_name:-$dest_filename}' due to duplicate ID conflict with staged workflow in a different folder."
-                        fi
-                        id_sanitized_note=$(append_sanitized_note "$id_sanitized_note" "staged-duplicate-conflict")
-                        staged_id=""
-                    else
-                        rm -f "${staged_path}.tmp"
-                        log WARN "Unable to clear staged duplicate workflow ID '${staged_id}' for '${staged_name:-$dest_filename}'."
-                    fi
-                else
-                    staged_workflow_ids[$staged_id]="$canonical_storage_path"
-                    # ID retention logged in final import preparation step
-                fi
-            fi
-        fi
-
-        if [[ "$preserve_ids" == "true" && -z "$existing_workflow_id" && -n "$staged_id" ]]; then
-            if [[ "$id_exists_in_target" != "true" ]]; then
-                if [[ "$staged_id_valid" == "true" ]]; then
-                    if [[ "$verbose" == "true" ]]; then
-                        log DEBUG "Retained user-provided workflow ID '${staged_id}' for '${staged_name:-$dest_filename}' (no conflicts detected)."
-                    fi
-                else
-                    if jq 'del(.id)' "$staged_path" > "${staged_path}.tmp"; then
-                        mv "${staged_path}.tmp" "$staged_path"
-                        if [[ "$verbose" == "true" ]]; then
-                            log DEBUG "Cleared orphan workflow ID '${staged_id}' for '${staged_name:-$dest_filename}' (no matching workflow found)."
-                        fi
-                        if [[ -z "$id_sanitized_note" ]]; then
-                            id_sanitized_note="sanitized-orphan-invalid"
-                        fi
-                        staged_id=""
-                    else
-                        rm -f "${staged_path}.tmp"
-                        log WARN "Unable to clear orphan workflow ID '${staged_id}' for '${staged_name:-$dest_filename}'."
-                    fi
-                fi
-            elif [[ "$staged_id_valid" != "true" ]]; then
-                # ID was invalid but matched a known workflow; ensure file does not contain bad ID
-                if jq 'del(.id)' "$staged_path" > "${staged_path}.tmp" 2>/dev/null; then
-                    mv "${staged_path}.tmp" "$staged_path"
-                    id_sanitized_note="sanitized-orphan-invalid"
-                    staged_id=""
-                    if [[ "$verbose" == "true" ]]; then
-                        log DEBUG "Removed invalid workflow ID '${original_staged_id}' lacking known matches for '${staged_name:-$dest_filename}'."
-                    fi
-                else
-                    rm -f "${staged_path}.tmp"
-                    log WARN "Unable to remove invalid workflow ID '${original_staged_id}' for '${staged_name:-$dest_filename}'."
-                fi
-            fi
-        fi
-
-        # Log final ID resolution decision
-        if [[ "$verbose" == "true" ]]; then
-            if [[ -n "$staged_id" ]]; then
-                local resolution_reason=""
-                if [[ -n "$existing_workflow_id" && "$existing_workflow_id" == "$staged_id" ]]; then
-                    resolution_reason=" (reusing existing workflow ID)"
-                elif [[ "$id_conflict_resolved_via_name" == "true" ]]; then
-                    resolution_reason=" (matched by name to existing workflow)"
-                elif [[ -n "$original_staged_id" && "$original_staged_id" != "$staged_id" ]]; then
-                    resolution_reason=" (sanitized from '$original_staged_id')"
-                fi
-                log DEBUG "Importing '${staged_name:-$dest_filename}' with ID '${staged_id}'${resolution_reason}"
-            else
-                log DEBUG "Importing '${staged_name:-$dest_filename}' with new n8n-assigned ID"
-            fi
-        fi
-
-        # Build manifest entry - Store workflow ID for post-import folder assignment
-        if [[ -n "$manifest_entries_file" ]]; then
-            local manifest_entry match_type_field=""
             
-            if [[ -n "$duplicate_match_json" ]]; then
-                match_type_field=$(printf '%s' "$duplicate_match_json" | jq -r '.matchType // empty' 2>/dev/null)
-                if [[ -z "$existing_storage_path" ]]; then
-                    existing_storage_path=$(printf '%s' "$duplicate_match_json" | jq -r '.storagePath // empty' 2>/dev/null)
-                fi
-                if [[ -z "$existing_display_path" ]]; then
-                    existing_display_path=$(printf '%s' "$duplicate_match_json" | jq -r '.displayPath // .workflow.displayPath // empty' 2>/dev/null)
-                fi
+            # Trim slashes from folder path (keep case)
+            local normalized_folder_path
+            normalized_folder_path=$(printf '%s' "$full_folder_path" | sed 's:^/*::;s:/*$::')
+            
+            # Build folder key (CASE SENSITIVE for both folder and workflow name)
+            local folder_key="${normalized_folder_path}/${workflow_name}"
+            [[ -z "$normalized_folder_path" ]] && folder_key="$workflow_name"
+            
+            log DEBUG "Searching folder \"$(sanitize_log_value "$normalized_folder_path")\" for name match: \"$(sanitize_log_value "$workflow_name")\""
+            if [[ -n "${existing_workflows_by_name_and_folder[$folder_key]:-}" ]]; then
+                local existing_id="${existing_workflows_by_name_and_folder[$folder_key]}"
+                log DEBUG "Matched existing workflow ID $existing_id for \"$(sanitize_log_value "$workflow_name")\" (ID: \"$(sanitize_log_value "$original_id")\")"
+                final_id="$existing_id"
+                matched_existing_id="$existing_id"
+                match_strategy="name+folder"
+                manifest_action="update"
+            else
+                log DEBUG "No existing workflow named \"$(sanitize_log_value "$workflow_name")\" found in folder \"$(sanitize_log_value "$normalized_folder_path")\""
             fi
-
-            # Manifest entry contains:
-            # - id: The workflow ID that will exist after import (from file or n8n-assigned)
-            # - name: Backup identifier for name-based lookup if ID lookup fails
-            # - storagePath: Determines folder structure
-            # - existingWorkflowId: The ID that existed before (for tracking replacements)
-            local manifest_entry
-            manifest_entry=$(jq -nc \
-                --arg filename "$dest_filename" \
-                --arg id "$staged_id" \
-                --arg name "$staged_name" \
-                --arg description "$staged_description" \
-                --arg instanceId "$staged_instance" \
-                --arg matchType "$match_type_field" \
-                --arg existingId "$existing_workflow_id" \
-                --arg originalId "$original_staged_id" \
-                --arg relative "$relative_path" \
-                --arg storage "$canonical_storage_path" \
-                --arg existingStorage "$existing_storage_path" \
-                --arg existingDisplay "$existing_display_path" \
-                --arg idSource "$resolved_id_source" \
-                --arg sanitizeNote "$id_sanitized_note" \
-                --arg preserveMode "$preserve_ids" \
-                --arg noOverwrite "$no_overwrite" \
-                --arg nameMatchId "$name_match_id" \
-                --arg nameMatchPath "$name_match_relpath" \
-                --arg nameMatchType "$name_match_type" \
-                --arg alignedByName "$id_conflict_resolved_via_name" \
-                --arg targetProjectSlug "$expected_project_slug" \
-                --arg targetProjectName "$expected_project_display" \
-                --arg targetDisplayPath "$expected_display_path" \
-                --arg targetFolderSlugPath "$expected_folder_slug_path" \
-                --arg targetFolderDisplayPath "$expected_folder_display_path" \
-                                '{
-                                    filename: $filename,
-                                    id: $id,
-                                    name: $name,
-                                    description: $description,
-                                    metaInstanceId: $instanceId,
-                                    duplicateMatchType: $matchType,
-                                    existingWorkflowId: $existingId,
-                                    originalWorkflowId: $originalId,
-                                    relativePath: $relative,
-                                    storagePath: $storage,
-                                    existingStoragePath: $existingStorage,
-                                    existingDisplayPath: (if ($existingDisplay | length) > 0 then $existingDisplay else null end),
-                                    idResolutionSource: $idSource,
-                                    sanitizedIdNote: $sanitizeNote,
-                                    preserveIds: ($preserveMode == "true"),
-                                    noOverwrite: ($noOverwrite == "true"),
-                                    nameMatchWorkflowId: (if ($nameMatchId | length) > 0 then $nameMatchId else null end),
-                                    nameMatchRelativePath: (if ($nameMatchPath | length) > 0 then $nameMatchPath else null end),
-                                    nameMatchType: (if ($nameMatchType | length) > 0 then $nameMatchType else null end),
-                                    idAlignedByNameMatch: ($alignedByName == "true"),
-                                    targetProjectSlug: (if ($targetProjectSlug | length) > 0 then $targetProjectSlug else null end),
-                                    targetProjectName: (if ($targetProjectName | length) > 0 then $targetProjectName else null end),
-                                    targetDisplayPath: (if ($targetDisplayPath | length) > 0 then $targetDisplayPath else null end),
-                                    targetFolderSlugPath: (if ($targetFolderSlugPath | length) > 0 then $targetFolderSlugPath else null end),
-                                    targetFolderDisplayPath: (if ($targetFolderDisplayPath | length) > 0 then $targetFolderDisplayPath else null end)
-                                }
-                                | with_entries(
-                                        if (.value == null or (.value | tostring) == "") then empty else . end
-                                    )') ||  {
-                log ERROR "Failed to create manifest entry for '$dest_filename'"
-                continue
-            }
-            printf '%s\n' "$manifest_entry" >> "$manifest_entries_file"
         fi
 
-        staged_count=$((staged_count + 1))
+        # Step 1b: If folder scoped lookup failed, try global name match when unique
+        if [[ -z "$matched_existing_id" && "$preserve_ids" == "false" ]]; then
+            if [[ -n "${existing_workflows_by_name[$workflow_name]:-}" && "${existing_workflows_by_name[$workflow_name]}" != "__multiple__" ]]; then
+                local existing_id_global="${existing_workflows_by_name[$workflow_name]}"
+                log DEBUG "Matched unique workflow name \"$(sanitize_log_value "$workflow_name")\" globally (ID: $existing_id_global)"
+                final_id="$existing_id_global"
+                matched_existing_id="$existing_id_global"
+                match_strategy="name-only"
+                manifest_action="update"
+            fi
+        fi
+        
+        # Step 2: Validate ID format (if not already matched by name)
+        if [[ -z "$sanitization_note" ]] && ! is_valid_workflow_id "$original_id"; then
+            if [[ -n "$original_id" ]]; then
+                sanitization_note="invalid_id_format"
+                log DEBUG "Manifest supplied invalid ID \"$(sanitize_log_value "$original_id")\" for \"$(sanitize_log_value "$workflow_name")\" — clearing before import"
+            fi
+            final_id=""
+        fi
+        
+        # Step 3: Apply no_overwrite policy (always generate new IDs)
+        if [[ "$no_overwrite" == "true" && -n "$final_id" && -z "$sanitization_note" ]]; then
+            sanitization_note="no_overwrite_policy"
+            log DEBUG "Removing existing ID for \"$(sanitize_log_value "$workflow_name")\" due to --no-overwrite flag"
+            final_id=""
+        fi
+        
+        # Step 4: Check for ID conflicts (duplicate ID with different name or within batch)
+        if [[ -n "$final_id" && -z "$sanitization_note" ]]; then
+            # Check existing n8n workflows
+            if [[ -n "${existing_workflows_by_id[$final_id]:-}" ]]; then
+                local existing_name="${existing_workflows_by_id[$final_id]}"
+                
+                # ANY ID conflict means we must remove the ID to force creation of a new workflow
+                # Otherwise n8n import will UPDATE the existing workflow with that ID
+                if [[ "$existing_name" != "$workflow_name" ]]; then
+                    sanitization_note="id_conflict_different_workflow"
+                    log DEBUG "Manifest ID $final_id for \"$(sanitize_log_value "$workflow_name")\" conflicts with existing workflow \"$(sanitize_log_value "$existing_name")\" — clearing to avoid overwrite"
+                    final_id=""
+                else
+                    # Same name + same ID = legitimate update, allow it
+                    log DEBUG "Manifest ID $final_id confirms update-in-place for \"$(sanitize_log_value "$workflow_name")\""
+                    matched_existing_id="$final_id"
+                    [[ -z "$match_strategy" ]] && match_strategy="manifest-id"
+                    manifest_action="update"
+                fi
+            # Check current import batch for duplicate IDs
+            elif [[ -n "${staged_workflows_by_id[$final_id]:-}" ]]; then
+                local staged_name="${staged_workflows_by_id[$final_id]}"
+                sanitization_note="id_conflict_in_batch"
+                log DEBUG "Manifest ID $final_id for \"$(sanitize_log_value "$workflow_name")\" duplicates staged workflow \"$(sanitize_log_value "$staged_name")\" — clearing to avoid collision"
+                final_id=""
+            fi
+        fi
+
+        if [[ -n "$final_id" && -z "$matched_existing_id" ]]; then
+            if [[ -n "${existing_workflows_by_id[$final_id]:-}" ]]; then
+                matched_existing_id="$final_id"
+                [[ -z "$match_strategy" ]] && match_strategy="manifest-id"
+                manifest_action="update"
+            fi
+        fi
+
+        if [[ -z "$final_id" ]]; then
+            ids_reset=$((ids_reset + 1))
+        else
+            if [[ -n "$matched_existing_id" ]]; then
+                ids_reused=$((ids_reused + 1))
+            fi
+        fi
+        
+        # Create sanitized workflow JSON with tag normalization
+        # Set or remove .id based on finalId, normalize tags and active consistently
+        local sanitized_json
+        sanitized_json=$(printf '%s' "$workflow_json" | jq --arg finalId "$final_id" '
+            # Normalize tags to proper format (single definition)
+            def normalize_tag:
+              if type == "object" then
+                (.name // .label // .value // (if has("id") and ((.id|tostring)|length > 0) then ("tag-" + (.id|tostring)) else empty end))
+              else
+                .
+              end;
+
+            def ensure_array:
+              if type == "array" then .
+              elif . == null then []
+              else [.] end;
+
+            # Apply id policy: either assign finalId or remove id
+            if $finalId == "" then del(.id) else .id = $finalId end
+            | .active = (if (.active | type) == "boolean" then .active else false end)
+            | .tags = (
+                (.tags // []
+                  | ensure_array
+                  | map(
+                      normalize_tag
+                      | select(. != null)
+                      | tostring
+                      | gsub("^\\s+|\\s+$"; "")
+                      | select(length > 0)
+                      | {name: .}
+                    )
+                  | unique_by(.name)
+                )
+              )
+        ' 2>/dev/null) || {
+            log WARN "Failed to sanitize workflow JSON for $workflow_file"
+            sanitized_json="$workflow_json"
+        }
+        
+        # Write to staging directory (preserve directory structure)
+        local staged_file="$staging_dir/$relative_path"
+        mkdir -p "$(dirname "$staged_file")"
+        printf '%s' "$sanitized_json" > "$staged_file"
+        chmod 600 "$staged_file"
+        
+        # Record in manifest (NDJSON format - one JSON object per line)
+        local manifest_entry
+        manifest_entry=$(jq -nc \
+            --arg originalId "$original_id" \
+            --arg finalId "$final_id" \
+            --arg name "$workflow_name" \
+            --arg path "$relative_path" \
+            --arg folder "$folder_path" \
+            --arg note "$sanitization_note" \
+            --arg existingId "$matched_existing_id" \
+            --arg matchStrategy "$match_strategy" \
+            --arg intent "$manifest_action" \
+            '{
+                id: (if $finalId == "" then null else $finalId end),
+                originalWorkflowId: $originalId,
+                assignedWorkflowId: (if $finalId == "" then null else $finalId end),
+                existingWorkflowId: (if $existingId == "" then null else $existingId end),
+                name: $name,
+                storagePath: $path,
+                targetFolder: $folder,
+                sanitizedIdNote: (if $note == "" then null else $note end),
+                intendedImportAction: (if $intent == "" then null else $intent end),
+                matchStrategy: (if $matchStrategy == "" then null else $matchStrategy end)
+            }')
+        
+        printf '%s\n' "$manifest_entry" >> "$output_manifest_path"
+        processed=$((processed + 1))
+        
+        # Track this workflow ID in the current batch to detect duplicates
+        if [[ -n "$final_id" ]]; then
+            staged_workflows_by_id["$final_id"]="$workflow_name"
+        fi
+        
     done < <(find "$source_dir" -type f -name "*.json" \
         ! -path "*/.credentials/*" \
-        ! -path "*/archive/*" \
         ! -name "credentials.json" \
-        ! -name ".n8n-folder-structure.json" -print0)
-
-    if [[ "$staged_count" -eq 0 ]]; then
-        if [[ -n "$manifest_entries_file" ]]; then
-            if [[ -s "$manifest_entries_file" ]]; then
-                if [[ -n "$manifest_output" ]]; then
-                    # Keep NDJSON format - just copy
-                    if ! cp "$manifest_entries_file" "$manifest_output" 2>/dev/null; then
-                        log WARN "Unable to generate staging manifest for workflows; duplicate detection may be limited."
-                        : > "$manifest_output" 2>/dev/null || true
-                    fi
-                fi
-            elif [[ -n "$manifest_output" ]]; then
-                : > "$manifest_output" 2>/dev/null || true
-            fi
-            rm -f "$manifest_entries_file"
-        fi
+        -print0 2>/dev/null)
+    
+    if [[ "$processed" -gt 0 ]]; then
+        # Report counts: use ids_reused to indicate how many workflows will reuse existing IDs
+        log INFO "$processed workflow(s) processed: $ids_reused will reuse existing IDs, $ids_reset will receive new IDs"
+    fi
+    
+    if [[ "$processed" -eq 0 ]]; then
+        log WARN "No workflows found in $source_dir"
         rm -rf "$staging_dir"
-        log ERROR "No workflow JSON files found in directory: $source_dir"
         return 1
     fi
-
-    if ! $copy_success; then
+    
+    # Create target directory in container
+    local create_cmd="rm -rf $container_target_dir && mkdir -p $container_target_dir"
+    if ! dockExec "$container_id" "$create_cmd" false; then
+        log ERROR "Failed to create container directory: $container_target_dir"
         rm -rf "$staging_dir"
-        if [[ -n "$manifest_entries_file" ]]; then
-            rm -f "$manifest_entries_file"
-        fi
         return 1
     fi
-
-    if [[ -z "$container_target_dir" ]]; then
+    
+    # Copy staged files to container
+    log DEBUG "Copying staged workflows to container"
+    if ! docker cp "$staging_dir/." "${container_id}:${container_target_dir}/" 2>/dev/null; then
+        log ERROR "Failed to copy workflows to container"
         rm -rf "$staging_dir"
-        log ERROR "Container target directory not provided for workflow import"
         return 1
     fi
-
-    if ! docker cp "$staging_dir/." "${container_id}:${container_target_dir}/"; then
-        rm -rf "$staging_dir"
-        if [[ -n "$manifest_entries_file" ]]; then
-            rm -f "$manifest_entries_file"
-        fi
-        log ERROR "Failed to copy workflows into container directory: $container_target_dir"
-        return 1
-    fi
-
+    
+    # Cleanup
     rm -rf "$staging_dir"
-    if [[ -n "$manifest_entries_file" ]]; then
-        if [[ -n "${RESTORE_MANIFEST_RAW_DEBUG_PATH:-}" && -f "$manifest_entries_file" ]]; then
-            if ! cp "$manifest_entries_file" "${RESTORE_MANIFEST_RAW_DEBUG_PATH}" 2>/dev/null; then
-                log DEBUG "Unable to persist raw staging manifest to ${RESTORE_MANIFEST_RAW_DEBUG_PATH}"
-            else
-                log DEBUG "Persisted raw staging manifest to ${RESTORE_MANIFEST_RAW_DEBUG_PATH}"
-            fi
-        fi
-        if [[ -s "$manifest_entries_file" ]]; then
-            # Keep NDJSON format - just move to output
-            if ! mv "$manifest_entries_file" "$manifest_output" 2>/dev/null; then
-                log WARN "Unable to generate staging manifest for workflows; duplicate detection may be limited."
-                : > "$manifest_output"
-            fi
-        else
-            : > "$manifest_output"
-            rm -f "$manifest_entries_file"
-        fi
-    fi
-    log SUCCESS "Prepared $staged_count workflow file(s) from directory $source_dir for import"
+    
+    log SUCCESS "Successfully staged $processed workflow(s) in container directory: $container_target_dir"
     return 0
 }

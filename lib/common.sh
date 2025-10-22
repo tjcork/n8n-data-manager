@@ -84,6 +84,31 @@ format_storage_value() {
     esac
 }
 
+normalize_boolean_option() {
+    local raw_value="${1:-false}"
+    raw_value=$(printf '%s' "$raw_value" | tr '[:upper:]' '[:lower:]')
+    case "$raw_value" in
+        true|1|yes|y|on)
+            printf 'true'
+            ;;
+        *)
+            printf 'false'
+            ;;
+    esac
+}
+
+cleanup_temp_path() {
+    local target="${1:-}"
+    [[ -z "$target" ]] && return 0
+
+    if [[ -d "$target" || -f "$target" ]]; then
+        rm -rf "$target" 2>/dev/null
+        return $?
+    fi
+
+    return 0
+}
+
 # --- Debug/Trace Function ---
 trace_cmd() {
     if $DEBUG_TRACE; then
@@ -230,7 +255,7 @@ set_project_from_path() {
     update_project_slug
 }
 
-set_n8n_path_hint() {
+set_n8n_path() {
     local raw_input="$1"
     local source_label="$2"
 
@@ -825,7 +850,7 @@ load_config() {
 
         if [[ "${n8n_path_source:-unset}" == "unset" || "${n8n_path_source:-unset}" == "default" ]]; then
             if [[ -n "${N8N_PATH:-}" ]]; then
-                set_n8n_path_hint "$N8N_PATH" "config"
+                set_n8n_path "$N8N_PATH" "config"
             fi
         fi
 
@@ -1043,9 +1068,9 @@ load_config() {
 
     if [[ "${n8n_path_source:-default}" != "default" && "${n8n_path_source:-unset}" != "unset" ]]; then
         if [[ -n "$n8n_path" ]]; then
-            log DEBUG "Default GitHub path hint (N8N_PATH): $n8n_path"
+            log DEBUG "Default GitHub path (N8N_PATH): $n8n_path"
         else
-            log DEBUG "Default GitHub path hint (N8N_PATH): <repository root>"
+            log DEBUG "Default GitHub path (N8N_PATH): <repository root>"
         fi
     fi
 }

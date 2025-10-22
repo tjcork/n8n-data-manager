@@ -26,7 +26,6 @@ reconcile_imported_workflow_ids() {
     # Create indexes of workflows for fast lookup
     local pre_workflows_by_id=$(mktemp -t n8n-pre-ids-XXXXXX.json)
     local post_workflows_by_id=$(mktemp -t n8n-post-ids-XXXXXX.json)
-    local post_workflows_by_meta=$(mktemp -t n8n-post-meta-XXXXXX.json)
     local new_workflows_by_name=$(mktemp -t n8n-new-names-XXXXXX.json)
     
     # Build pre-import ID index
@@ -40,11 +39,6 @@ reconcile_imported_workflow_ids() {
     # Build post-import ID index
     jq -r '.[] | select(.id != null) | {key: .id, value: .} | @json' "$post_import_snapshot" 2>/dev/null | \
         jq -s 'from_entries' > "$post_workflows_by_id"
-    
-    # Build post-import meta index
-    jq -r '.[] | select(.meta.instanceId != null) | 
-        {key: (.meta.instanceId | ascii_downcase), value: .} | @json' "$post_import_snapshot" 2>/dev/null | \
-        jq -s 'group_by(.key) | map({key: .[0].key, value: map(.value)}) | from_entries' > "$post_workflows_by_meta"
     
     # Build new workflows by name index (workflows in post but not in pre)
     jq -n --slurpfile pre "$pre_workflows_by_id" --slurpfile post "$post_import_snapshot" '
@@ -76,9 +70,9 @@ reconcile_imported_workflow_ids() {
         
         # Extract key fields from manifest entry
         local manifest_id=$(printf '%s' "$entry_line" | jq -r '.id // ""')
-        local existing_id=$(printf '%s' "$entry_line" | jq -r '.existingWorkflowId // ""')
-        local original_id=$(printf '%s' "$entry_line" | jq -r '.originalWorkflowId // ""')
-        local meta_id=$(printf '%s' "$entry_line" | jq -r '.metaInstanceId // "" | ascii_downcase')
+    local existing_id=$(printf '%s' "$entry_line" | jq -r '.existingWorkflowId // ""')
+    local original_id=$(printf '%s' "$entry_line" | jq -r '.originalWorkflowId // ""')
+    local assigned_id=$(printf '%s' "$entry_line" | jq -r '.assignedWorkflowId // ""')
         local entry_name=$(printf '%s' "$entry_line" | jq -r '.name // "" | ascii_downcase')
         local sanitize_note=$(printf '%s' "$entry_line" | jq -r '.sanitizedIdNote // ""')
         
@@ -93,7 +87,7 @@ reconcile_imported_workflow_ids() {
         fi
         
         # Strategy 2: existing-workflow-id - Check if existingWorkflowId is in post-import
-        if [[ -z "$resolved_id" && -n "$existing_id" && -z "$sanitize_note" ]]; then
+        if [[ -z "$resolved_id" && -n "$existing_id" ]]; then
             if jq -e --arg id "$existing_id" '.[$id] != null' "$post_workflows_by_id" &>/dev/null; then
                 resolved_id="$existing_id"
                 resolution_strategy="existing-workflow-id"
@@ -101,25 +95,22 @@ reconcile_imported_workflow_ids() {
         fi
         
         # Strategy 3: original-workflow-id - Check if originalWorkflowId is in post-import
-        if [[ -z "$resolved_id" && -n "$original_id" && -z "$sanitize_note" ]]; then
+        if [[ -z "$resolved_id" && -n "$original_id" ]]; then
             if jq -e --arg id "$original_id" '.[$id] != null' "$post_workflows_by_id" &>/dev/null; then
                 resolved_id="$original_id"
                 resolution_strategy="original-workflow-id"
             fi
         fi
-        
-        # Strategy 4: meta-instance - Check if there's exactly one workflow with this instanceId
-        if [[ -z "$resolved_id" && -n "$meta_id" ]]; then
-            local meta_matches=$(jq --arg meta "$meta_id" '.[$meta] // [] | length' "$post_workflows_by_meta")
-            if [[ "$meta_matches" == "1" ]]; then
-                resolved_id=$(jq -r --arg meta "$meta_id" '.[$meta][0].id // ""' "$post_workflows_by_meta")
-                resolution_strategy="meta-instance"
-            elif [[ "$meta_matches" -gt 1 ]]; then
-                resolution_note="Multiple workflows share instanceId"
+
+        # Strategy 3b: assigned-workflow-id - fall back to the ID we attempted to assign
+        if [[ -z "$resolved_id" && -n "$assigned_id" ]]; then
+            if jq -e --arg id "$assigned_id" '.[$id] != null' "$post_workflows_by_id" &>/dev/null; then
+                resolved_id="$assigned_id"
+                resolution_strategy="assigned-workflow-id"
             fi
         fi
         
-        # Strategy 5: name-only - Check if there's exactly one new workflow with this name
+        # Strategy 4: name-only - Check if there's exactly one new workflow with this name
         if [[ -z "$resolved_id" && -n "$entry_name" ]]; then
             local name_matches=$(jq --arg name "$entry_name" '.[$name] // [] | length' "$new_workflows_by_name")
             if [[ "$name_matches" == "1" ]]; then
@@ -136,22 +127,34 @@ reconcile_imported_workflow_ids() {
         
         # Update entry with reconciliation results
         if [[ -n "$resolved_id" ]]; then
+            local existed_pre="false"
+            if jq -e --arg id "$resolved_id" '.[$id] != null' "$pre_workflows_by_id" &>/dev/null; then
+                existed_pre="true"
+            fi
+
+            local import_outcome="created"
+            if [[ "$existed_pre" == "true" ]]; then
+                import_outcome="updated"
+            fi
+
             # Successfully resolved - add reconciliation metadata
             local updated_entry=$(printf '%s' "$entry_line" | jq -c \
                 --arg id "$resolved_id" \
                 --arg strategy "$resolution_strategy" \
+                --arg outcome "$import_outcome" \
                 --arg note "${sanitize_note:+$sanitize_note}" \
                 '.id = $id | 
                  .actualImportedId = $id | 
                  .idReconciled = true | 
                  .idResolutionStrategy = $strategy |
+                 .importOutcome = $outcome |
                  (if ($note != "") then .idResolutionNote = $note else . end) |
                  del(.idReconciliationWarning)')
             
             printf '%s\n' "$updated_entry" >> "$reconciled_tmp"
             
             # Count as created or updated
-            if [[ -n "$existing_id" ]]; then
+            if [[ "$existed_pre" == "true" ]]; then
                 updated=$((updated + 1))
             else
                 created=$((created + 1))
@@ -180,7 +183,7 @@ reconcile_imported_workflow_ids() {
     fi
     
     # Cleanup temp files
-    rm -f "$pre_workflows_by_id" "$post_workflows_by_id" "$post_workflows_by_meta" "$new_workflows_by_name"
+    rm -f "$pre_workflows_by_id" "$post_workflows_by_id" "$new_workflows_by_name"
     
     # Validate counts
     local processed_total=$((created + updated + unresolved))
@@ -200,9 +203,10 @@ reconcile_imported_workflow_ids() {
     export RESTORE_WORKFLOWS_CREATED="$created"
     export RESTORE_WORKFLOWS_UPDATED="$updated"
     export RESTORE_POST_IMPORT_COUNT="$post_count"
+    export RESTORE_WORKFLOWS_TOTAL="$line_count"
     
     if [[ "$verbose" == "true" ]]; then
-        log DEBUG "Reconciliation complete: processed=$line_count, created=$created, updated=$updated, unresolved=$unresolved, total=$total_workflows, post_count=$post_count"
+        log DEBUG "Reconciliation complete: $line_count workflows, $created created, $updated updated, $unresolved unresolved"
     fi
     
     if [[ "$unresolved" -gt 0 ]]; then

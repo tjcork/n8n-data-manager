@@ -529,16 +529,16 @@ main() {
             collect_backup_preferences "$reconfigure_mode" "false"
             log INFO "Project scope: ${project_name:-Personal}"
             if [[ -n "$n8n_path" ]]; then
-                log INFO "n8n path hint: $n8n_path"
+                log INFO "n8n path: $n8n_path"
             else
-                log INFO "n8n path hint: <project root>"
+                log INFO "n8n path: <project root>"
             fi
             log INFO "Selected: Workflows=($workflows) $(format_storage_value $workflows), Credentials=($credentials) $(format_storage_value $credentials), Environment=($environment) $(format_storage_value $environment)"
         else
             prompt_project_scope "$reconfigure_mode"
             log INFO "Project scope: ${project_name:-Personal}"
             if [[ -n "$n8n_path" ]]; then
-                log INFO "n8n path hint: $n8n_path"
+                log INFO "n8n path: $n8n_path"
             fi
         fi
 
@@ -788,7 +788,7 @@ main() {
             ;;
         restore)
     if restore "$container" "$github_token" "$github_repo" "$github_branch" "${restore_workflows_mode:-2}" "${restore_credentials_mode:-1}" "${restore_folder_structure_preference:-auto}" "$dry_run_flag" "$credentials_folder_name" "$interactive_mode" "${restore_preserve_ids:-false}" "${restore_no_overwrite:-false}"; then
-                 log SUCCESS "Restore operation completed successfully."
+                 log SUCCESS "✅ Restore complete."
             else
                  log ERROR "Restore operation failed."
                  exit 1
