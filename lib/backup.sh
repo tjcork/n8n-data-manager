@@ -57,8 +57,8 @@ create_folder_structure_with_git() {
     
     # Step 2: Get folder organization mapping from n8n API
     log DEBUG "Step 2: Fetching folder structure mapping from n8n API..."
-    local folder_mapping_json
-    if ! folder_mapping_json=$(get_workflow_folder_mapping "$container_id" "$container_credentials_path"); then
+    local folder_mapping_json=""
+    if ! get_workflow_folder_mapping "$container_id" "$container_credentials_path" folder_mapping_json; then
         log ERROR "Failed to get folder structure mapping from n8n API"
         log WARN "Falling back to flat file structure"
         # Fallback: copy all files to target directory using sanitized workflow names

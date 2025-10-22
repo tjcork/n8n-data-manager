@@ -110,7 +110,6 @@ debug_dump_folder_cache() {
     if [[ -n "$context" ]]; then
         context_label=" ($context)"
     fi
-    log DEBUG "Folder cache sample${context_label}: tracking $total entrie(s)"
 
     if (( total == 0 )); then
         return 0
@@ -316,9 +315,6 @@ load_n8n_folders() {
     fi
     if [[ "$skipped_missing_project" -gt 0 ]]; then
         log WARN "Omitted $skipped_missing_project folder(s) because n8n did not report a project reference"
-    fi
-    if [[ "$verbose" == "true" ]]; then
-        debug_dump_folder_cache "post-load"
     fi
     return 0
 }

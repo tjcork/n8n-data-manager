@@ -241,9 +241,6 @@ select_container() {
 select_action() {
     log HEADER "Choose Action"
     
-    # Show current configuration summary
-    show_config_summary
-    
     echo "1) Backup n8n - Use current configuration"
     echo "2) Restore n8n - Use current configuration" 
     echo "3) Configure config file - Create/update interactively"

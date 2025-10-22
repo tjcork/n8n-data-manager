@@ -26,25 +26,33 @@ capture_existing_workflow_snapshot() {
     local keep_session_alive="${2:-false}"
     local existing_path="${3:-}"
     local is_dry_run="${4:-false}"
+    local result_ref="${5:-}"
+
+    local result="$existing_path"
+    local status=0
 
     if [[ "$is_dry_run" == "true" ]]; then
-        printf '%s' "$existing_path"
-        return 0
+        status=0
+    elif [[ -n "$existing_path" && -f "$existing_path" ]]; then
+        status=0
+    else
+        SNAPSHOT_EXISTING_WORKFLOWS_PATH=""
+        if snapshot_existing_workflows "$container_id" "" "$keep_session_alive"; then
+            result="$SNAPSHOT_EXISTING_WORKFLOWS_PATH"
+            status=0
+        else
+            result=""
+            status=1
+        fi
     fi
 
-    if [[ -n "$existing_path" && -f "$existing_path" ]]; then
-        printf '%s' "$existing_path"
-        return 0
+    if [[ -n "$result_ref" ]]; then
+        printf -v "$result_ref" '%s' "$result"
+    else
+        printf '%s' "$result"
     fi
 
-    SNAPSHOT_EXISTING_WORKFLOWS_PATH=""
-    if snapshot_existing_workflows "$container_id" "" "$keep_session_alive"; then
-        printf '%s' "$SNAPSHOT_EXISTING_WORKFLOWS_PATH"
-        return 0
-    fi
-
-    printf ''
-    return 1
+    return "$status"
 }
 
 find_workflow_directory() {

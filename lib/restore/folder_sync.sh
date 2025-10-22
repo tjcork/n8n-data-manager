@@ -81,15 +81,12 @@ create_folder_path() {
     
     # Check if already exists
     local existing_id
-    debug_dump_folder_cache "pre-lookup $(printf '%s/%s' "$project_id" "$folder_path")"
     existing_id=$(get_folder_id "$project_id" "$folder_path")
     
     # Debug: Show cache lookup details
     local lookup_key
     lookup_key=$(_build_folder_cache_key "$project_id" "$folder_path")
-    log DEBUG "Cache lookup: project_id='$project_id', folder_path='$folder_path', key='$lookup_key', result='${existing_id:-EMPTY}'"
-    log DEBUG "Cache state: ${#N8N_FOLDERS[@]} folders in cache"
-    
+        
     if [[ -n "$existing_id" ]]; then
         log DEBUG "Folder '$folder_path' already exists (ID: $existing_id), reusing"
         CREATE_FOLDER_LAST_ID="$existing_id"

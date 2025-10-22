@@ -165,6 +165,7 @@ build_folder_chain_json() {
 get_workflow_folder_mapping() {
     local container_id="$1"
     local container_credentials_path="${2:-}"
+    local result_ref="${3:-}"
 
     if [[ -z "${n8n_base_url:-}" ]]; then
         log ERROR "n8n API URL not configured. Please set N8N_BASE_URL"
@@ -481,7 +482,11 @@ get_workflow_folder_mapping() {
         return 1
     fi
 
-    echo "$mapping_json"
+    if [[ -n "$result_ref" ]]; then
+        printf -v "$result_ref" '%s' "$mapping_json"
+    else
+        printf '%s' "$mapping_json"
+    fi
     return 0
 }
 
@@ -606,6 +611,7 @@ N8N_SESSION_COOKIE_FILE=""
 N8N_SESSION_COOKIE_INITIALIZED="false"
 N8N_SESSION_COOKIE_READY="false"
 N8N_SESSION_REUSE_ENABLED="true"
+# Records the current authentication path: "api_key", "session", or empty when undecided.
 N8N_API_AUTH_MODE=""
 
 ensure_n8n_session_credentials() {
@@ -995,22 +1001,28 @@ prepare_n8n_api_auth() {
         return 0
     fi
 
-    if [[ "$N8N_API_AUTH_MODE" == "session" ]]; then
-        if [[ "$N8N_SESSION_COOKIE_READY" == "true" && -f "$N8N_SESSION_COOKIE_FILE" ]]; then
-            if [[ "$verbose" == "true" ]]; then
-                log DEBUG "Reusing existing n8n session credentials."
-            fi
-            return 0
-        fi
-        N8N_API_AUTH_MODE=""
-    fi
-
     if [[ -z "$n8n_base_url" ]]; then
         log ERROR "n8n base URL is required to interact with the API."
         return 1
     fi
 
     n8n_base_url="${n8n_base_url%/}"
+
+    if [[ "$N8N_SESSION_COOKIE_READY" == "true" && -f "$N8N_SESSION_COOKIE_FILE" ]]; then
+        if [[ "$verbose" == "true" ]]; then
+            if [[ "$N8N_API_AUTH_MODE" == "session" ]]; then
+                log DEBUG "Reusing existing n8n session."
+            else
+                log DEBUG "Reusing cached n8n session"
+            fi
+        fi
+        N8N_API_AUTH_MODE="session"
+        return 0
+    fi
+
+    if [[ "$N8N_API_AUTH_MODE" == "session" ]]; then
+        N8N_API_AUTH_MODE=""
+    fi
 
     if [[ -n "${n8n_api_key:-}" ]]; then
         N8N_API_AUTH_MODE="api_key"

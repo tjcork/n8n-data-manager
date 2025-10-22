@@ -211,7 +211,11 @@ main() {
             *) echo "[ERROR] Invalid option: $1"; show_help; exit 1 ;;
         esac
     done
-
+    log HEADER "n8n Backup/Restore Manager v$VERSION"
+    log INFO "🚀 Flexible backup storage: local files or Git repository"
+    
+    check_host_dependencies
+    
     # Load config file (must happen after parsing args)
     load_config
 
@@ -236,11 +240,6 @@ main() {
         restore_no_overwrite=false
         restore_no_overwrite_source="${restore_no_overwrite_source:-default}"
     fi
-
-    log HEADER "n8n Backup/Restore Manager v$VERSION"
-    log INFO "🚀 Flexible backup storage: local files or Git repository"
-    
-    check_host_dependencies
 
     if [[ -z "$assume_defaults" ]]; then
         assume_defaults=false
@@ -470,6 +469,9 @@ main() {
     else
         log DEBUG "Running in interactive mode."
         
+        # Show current configuration summary
+        show_config_summary
+
         # Interactive action selection
         if [ -z "$action" ]; then 
             select_action

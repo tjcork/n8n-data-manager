@@ -495,7 +495,7 @@ stage_directory_workflows_to_container() {
         fi
         
         # Step 2: Validate ID format (if not already matched by name)
-        if [[ -z "$sanitization_note" ]] && ! is_valid_workflow_id "$original_id"; then
+        if [[ -z "$sanitization_note" ]] && ! is_valid_workflow_id "$original_id" && [[ -z "$matched_existing_id" ]]; then
             if [[ -n "$original_id" ]]; then
                 sanitization_note="invalid_id_format"
                 log DEBUG "Manifest supplied invalid ID \"$(sanitize_log_value "$original_id")\" for \"$(sanitize_log_value "$workflow_name")\" — clearing before import"

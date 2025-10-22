@@ -371,7 +371,9 @@ restore() {
 
     local pre_import_workflow_count=0
     if [[ "$workflows_mode" != "0" ]] && [ "$is_dry_run" != "true" ]; then
-        existing_workflow_snapshot="$(capture_existing_workflow_snapshot "$container_id" "$keep_api_session_alive" "$existing_workflow_snapshot" "$is_dry_run")"
+        if ! capture_existing_workflow_snapshot "$container_id" "$keep_api_session_alive" "$existing_workflow_snapshot" "$is_dry_run" existing_workflow_snapshot; then
+            existing_workflow_snapshot=""
+        fi
         if [[ -n "$existing_workflow_snapshot" && -f "$existing_workflow_snapshot" ]]; then
             local counted_value
             if counted_value=$(jq -r "$WORKFLOW_COUNT_FILTER" "$existing_workflow_snapshot" 2>/dev/null); then
@@ -531,7 +533,9 @@ restore() {
                     copy_status="failed"
                 else
                     if [[ "$is_dry_run" != "true" ]]; then
-                        existing_workflow_snapshot="$(capture_existing_workflow_snapshot "$container_id" "$keep_api_session_alive" "$existing_workflow_snapshot" "$is_dry_run")"
+                        if ! capture_existing_workflow_snapshot "$container_id" "$keep_api_session_alive" "$existing_workflow_snapshot" "$is_dry_run" existing_workflow_snapshot; then
+                            existing_workflow_snapshot=""
+                        fi
                         if [[ -n "$existing_workflow_snapshot" ]]; then
                             log DEBUG "Captured existing workflow snapshot from ${existing_workflow_snapshot_source:-unknown} source for duplicate detection."
                         fi
@@ -539,8 +543,8 @@ restore() {
 
                     if [[ -z "$existing_workflow_mapping" && "$is_dry_run" != "true" ]]; then
                         if [[ -n "$n8n_base_url" ]]; then
-                            local mapping_json
-                            if mapping_json=$(get_workflow_folder_mapping "$container_id"); then
+                            local mapping_json=""
+                            if get_workflow_folder_mapping "$container_id" "" mapping_json; then
                                 existing_workflow_mapping=$(mktemp -t n8n-workflow-map-XXXXXXXX.json)
                                 printf '%s' "$mapping_json" > "$existing_workflow_mapping"
                                 log DEBUG "Captured workflow folder mapping for duplicate detection."
@@ -577,16 +581,18 @@ restore() {
 
         if [[ "$copy_status" == "success" ]]; then
             if [[ "$is_dry_run" != "true" ]]; then
-                existing_workflow_snapshot="$(capture_existing_workflow_snapshot "$container_id" "$keep_api_session_alive" "$existing_workflow_snapshot" "$is_dry_run")"
+                if ! capture_existing_workflow_snapshot "$container_id" "$keep_api_session_alive" "$existing_workflow_snapshot" "$is_dry_run" existing_workflow_snapshot; then
+                    existing_workflow_snapshot=""
+                fi
                 if [[ -n "$existing_workflow_snapshot" ]]; then
                     log DEBUG "Captured pre-import workflows snapshot for post-import ID detection."
                 fi
-            fi
 
-            # Preserve staged manifest for in-place updates during reconciliation
-            if [[ -n "$staged_manifest_file" && -f "$staged_manifest_file" ]]; then
-                persist_manifest_debug_copy "$staged_manifest_file" "${RESTORE_MANIFEST_STAGE_DEBUG_PATH:-}" "staged manifest"
-                # Keep staged_manifest_file for in-place reconciliation (no copy needed)
+                # Preserve staged manifest for in-place updates during reconciliation
+                if [[ -n "$staged_manifest_file" && -f "$staged_manifest_file" ]]; then
+                    persist_manifest_debug_copy "$staged_manifest_file" "${RESTORE_MANIFEST_STAGE_DEBUG_PATH:-}" "staged manifest"
+                    # Keep staged_manifest_file for in-place reconciliation (no copy needed)
+                fi
             fi
         fi
     fi
@@ -860,7 +866,7 @@ restore() {
     
     # Final status message
     if [[ $had_workflow_activity == true ]] || [[ $workflows_repositioned -gt 0 ]] || [[ "$credentials_mode" != "0" ]]; then
-        log SUCCESS "Restore successful!"
+        :  # no-op: success message handled on return
     else
         log INFO "Restore completed with no changes (all content already up to date)."
     fi
@@ -876,6 +882,8 @@ restore() {
         rm -f "$N8N_SESSION_COOKIE_FILE" 2>/dev/null || true
         log DEBUG "Cleaned up session cookie file"
         N8N_SESSION_COOKIE_FILE=""
+        N8N_SESSION_COOKIE_INITIALIZED="false"
+        N8N_SESSION_COOKIE_READY="false"
     fi
     
     return 0
