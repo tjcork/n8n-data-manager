@@ -66,7 +66,7 @@ summarize_folder_assignments() {
     log INFO "Folder assignment summary: $success/$total successful, $failed failed"
     
     # Show failed assignments if any
-    if [[ "$failed" -gt 0 && "$verbose" == "true" ]]; then
+    if [[ "$failed" -gt 0 && "${verbose:-false}" == "true" ]]; then
         log WARN "Failed assignments (showing up to 10 entries):"
 
         local shown=0
@@ -127,10 +127,14 @@ summarize_manifest_assignment_status() {
 
         total=$((total + 1))
 
-        local is_reconciled=$(printf '%s' "$entry_line" | jq -r '.idReconciled // false' 2>/dev/null)
-        local strategy=$(printf '%s' "$entry_line" | jq -r '.idResolutionStrategy // ""' 2>/dev/null)
-        local warning_text=$(printf '%s' "$entry_line" | jq -r '.idReconciliationWarning // ""' 2>/dev/null)
-        local entry_name=$(printf '%s' "$entry_line" | jq -r '.name // "Workflow"' 2>/dev/null)
+    local is_reconciled
+    is_reconciled=$(printf '%s' "$entry_line" | jq -r '.idReconciled // false' 2>/dev/null)
+    local strategy
+    strategy=$(printf '%s' "$entry_line" | jq -r '.idResolutionStrategy // ""' 2>/dev/null)
+    local warning_text
+    warning_text=$(printf '%s' "$entry_line" | jq -r '.idReconciliationWarning // ""' 2>/dev/null)
+    local entry_name
+    entry_name=$(printf '%s' "$entry_line" | jq -r '.name // "Workflow"' 2>/dev/null)
 
         if [[ "$is_reconciled" == "true" ]]; then
             resolved=$((resolved + 1))

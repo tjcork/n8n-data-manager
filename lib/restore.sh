@@ -1,17 +1,25 @@
 #!/usr/bin/env bash
 # =========================================================
-# lib/restore.sh - Restore operations for n8n-manager
+# lib/restore.sh - Restore operations for n8n-push
 # =========================================================
 # All restore-related functions: restore process, rollback
 
 # Source required modules
+# shellcheck disable=SC1091 # modules resolved relative to this file at runtime
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+# shellcheck disable=SC1091
 source "$(dirname "${BASH_SOURCE[0]}")/n8n-api.sh"
+# shellcheck disable=SC1091
 source "$(dirname "${BASH_SOURCE[0]}")/restore/utils.sh"
+# shellcheck disable=SC1091
 source "$(dirname "${BASH_SOURCE[0]}")/restore/staging.sh"
-source "$(dirname "${BASH_SOURCE[0]}")/restore/folder_state.sh"
-source "$(dirname "${BASH_SOURCE[0]}")/restore/folder_sync.sh"
-source "$(dirname "${BASH_SOURCE[0]}")/restore/folder_assignment.sh"
+# shellcheck disable=SC1091
+source "$(dirname "${BASH_SOURCE[0]}")/restore/folder-state.sh"
+# shellcheck disable=SC1091
+source "$(dirname "${BASH_SOURCE[0]}")/restore/folder-sync.sh"
+# shellcheck disable=SC1091
+source "$(dirname "${BASH_SOURCE[0]}")/restore/folder-assignment.sh"
+# shellcheck disable=SC1091
 source "$(dirname "${BASH_SOURCE[0]}")/restore/validate.sh"
 
 restore() {
@@ -79,7 +87,7 @@ restore() {
     local credentials_subpath="$credentials_git_relative_dir/credentials.json"
 
     local project_storage_relative
-    project_storage_relative="$(compose_repo_storage_path "$project_slug")"
+    project_storage_relative="$(compose_repo_storage_path "${project_slug:-}")"
     project_storage_relative="${project_storage_relative#/}"
     project_storage_relative="${project_storage_relative%/}"
 
@@ -92,7 +100,7 @@ restore() {
         restore_scope="credentials"
     fi
 
-    log HEADER "Performing Restore (Workflows: $(format_storage_value $workflows_mode), Credentials: $(format_storage_value $credentials_mode))"
+    log HEADER "Performing Restore (Workflows: $(format_storage_value "$workflows_mode"), Credentials: $(format_storage_value "$credentials_mode"))"
     if $is_dry_run; then log WARN "DRY RUN MODE ENABLED - NO CHANGES WILL BE MADE"; fi
     
     # Show restore plan for clarity
@@ -381,7 +389,7 @@ restore() {
                     pre_import_workflow_count="$counted_value"
                 fi
             fi
-            if [[ "$verbose" == "true" ]]; then
+            if [[ "${verbose:-false}" == "true" ]]; then
                 log DEBUG "Pre-import workflow snapshot captured via ${existing_workflow_snapshot_source:-unknown} source"
             fi
         else
@@ -411,7 +419,8 @@ restore() {
             # Check if file appears to be encrypted (any credential with string data)
             if jq -e '[.[] | select(has("data") and (.data | type == "string"))] | length > 0' "$repo_credentials" >/dev/null 2>&1; then
                 log INFO "Encrypted credentials detected. Preparing decryption flow..."
-                local decrypt_lib="$(dirname "${BASH_SOURCE[0]}")/decrypt.sh"
+                local decrypt_lib
+                decrypt_lib="$(dirname "${BASH_SOURCE[0]}")/decrypt.sh"
                 if [[ ! -f "$decrypt_lib" ]]; then
                     log ERROR "Decrypt helper not found at $decrypt_lib"
                     if [[ -n "$download_dir" ]]; then
@@ -419,7 +428,7 @@ restore() {
                     fi
                     return 1
                 fi
-                # shellcheck source=lib/decrypt.sh
+                # shellcheck disable=SC1090,SC1091
                 source "$decrypt_lib"
                 check_dependencies
 
@@ -557,7 +566,7 @@ restore() {
                     fi
 
                     staged_manifest_file=$(mktemp -t n8n-staged-workflows-XXXXXXXX.json)
-                    if ! stage_directory_workflows_to_container "$stage_source_dir" "$container_id" "$container_import_workflows" "$staged_manifest_file" "$existing_workflow_snapshot" "$preserve_ids" "$no_overwrite" "$existing_workflow_mapping" "$n8n_path"; then
+                    if ! stage_directory_workflows_to_container "$stage_source_dir" "$container_id" "$container_import_workflows" "$staged_manifest_file" "$existing_workflow_snapshot" "$preserve_ids" "$no_overwrite" "$existing_workflow_mapping" "${n8n_path:-}"; then
                         rm -f "$staged_manifest_file"
                         log ERROR "Failed to copy workflow files into container."
                         copy_status="failed"
@@ -759,7 +768,7 @@ restore() {
                 log WARN "Workflow directory unavailable for folder restoration; skipping folder assignment."
             fi
         else
-            if ! apply_folder_structure_from_directory "$folder_source_dir" "$container_id" "$is_dry_run" "" "$staged_manifest_file" "$n8n_path" true; then
+            if ! apply_folder_structure_from_directory "$folder_source_dir" "$container_id" "$is_dry_run" "" "$staged_manifest_file" "${n8n_path:-}" true; then
                 log WARN "Folder structure restoration encountered issues; workflows may require manual reorganization."
             fi
         fi
@@ -804,7 +813,6 @@ restore() {
     
     # Collect workflow metrics from exported environment variables (no queries needed)
     local post_import_workflow_count=${RESTORE_POST_IMPORT_COUNT:-0}
-    local pre_import_count=${pre_import_workflow_count:-0}
     local created_count=${RESTORE_WORKFLOWS_CREATED:-0}
     local updated_count=${RESTORE_WORKFLOWS_UPDATED:-0}
     local staged_count=${RESTORE_WORKFLOWS_TOTAL:-0}
@@ -881,9 +889,11 @@ restore() {
     if [[ -n "${N8N_SESSION_COOKIE_FILE:-}" && -f "${N8N_SESSION_COOKIE_FILE}" ]]; then
         rm -f "$N8N_SESSION_COOKIE_FILE" 2>/dev/null || true
         log DEBUG "Cleaned up session cookie file"
-        N8N_SESSION_COOKIE_FILE=""
-        N8N_SESSION_COOKIE_INITIALIZED="false"
-        N8N_SESSION_COOKIE_READY="false"
+    N8N_SESSION_COOKIE_FILE=""
+    # shellcheck disable=SC2034 # Reset cookie lifecycle state for n8n-api helpers
+    N8N_SESSION_COOKIE_INITIALIZED="false"
+    # shellcheck disable=SC2034 # Reset cookie lifecycle state for n8n-api helpers
+    N8N_SESSION_COOKIE_READY="false"
     fi
     
     return 0

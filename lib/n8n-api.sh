@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =========================================================
-# lib/n8n-api.sh - n8n REST API functions for n8n-manager
+# lib/n8n-api.sh - n8n REST API functions for n8n-push
 # =========================================================
 # All functions for interacting with n8n's REST API to get
 # Comprehensive API validation - tests all available authentication methods
@@ -198,10 +198,18 @@ get_workflow_folder_mapping() {
     if [[ "$verbose" == "true" ]]; then
         local projects_preview
         local workflows_preview
+        local projects_suffix=""
+        local workflows_suffix=""
         projects_preview="$(printf '%s' "$projects_response" | tr '\n' ' ' | head -c 200)"
         workflows_preview="$(printf '%s' "$workflows_response" | tr '\n' ' ' | head -c 200)"
-        log DEBUG "Projects response preview: ${projects_preview}$( [ $(printf '%s' "$projects_response" | wc -c) -gt 200 ] && echo '…')"
-        log DEBUG "Workflows response preview: ${workflows_preview}$( [ $(printf '%s' "$workflows_response" | wc -c) -gt 200 ] && echo '…')"
+        if (( ${#projects_response} > 200 )); then
+            projects_suffix="…"
+        fi
+        if (( ${#workflows_response} > 200 )); then
+            workflows_suffix="…"
+        fi
+        log DEBUG "Projects response preview: ${projects_preview}${projects_suffix}"
+        log DEBUG "Workflows response preview: ${workflows_preview}${workflows_suffix}"
     fi
 
     if [[ "$verbose" == "true" ]]; then
@@ -298,8 +306,11 @@ get_workflow_folder_mapping() {
         default_project_id="$personal_project_id"
     fi
 
+    # shellcheck disable=SC2034  # associative maps consumed via name references
     declare -A folder_name_by_id=()
+    # shellcheck disable=SC2034
     declare -A folder_slug_by_id=()
+    # shellcheck disable=SC2034
     declare -A folder_parent_by_id=()
 
     local folder_rows
@@ -337,8 +348,11 @@ get_workflow_folder_mapping() {
             local parent_id
             parent_id="$(normalize_identifier "$raw_parent")"
 
+            # shellcheck disable=SC2034  # populated for downstream lookups via nameref
             folder_name_by_id["$fid"]="$fname"
+            # shellcheck disable=SC2034
             folder_slug_by_id["$fid"]="$fslug"
+            # shellcheck disable=SC2034
             folder_parent_by_id["$fid"]="$parent_id"
         done <<<"$folder_rows"
     fi
@@ -507,30 +521,40 @@ validate_n8n_api_access() {
     base_url="${base_url%/}"
 
     if [[ -n "$api_key" ]]; then
-        return test_n8n_api_connection "$base_url" "$api_key"
+        test_n8n_api_connection "$base_url" "$api_key"
+        return $?
     fi
 
-    if [[ -z "$email" || -z "$password" ]]; then
-        if [[ -n "$credential_name" ]]; then
-            if ! ensure_n8n_session_credentials "$container_id" "$credential_name" "$container_credentials_path"; then
-                return 1
-            fi
+    local attempted_credential="false"
+    if [[ -n "$credential_name" ]]; then
+        attempted_credential="true"
+        if ensure_n8n_session_credentials "$container_id" "$credential_name" "$container_credentials_path"; then
             email="$n8n_email"
             password="$n8n_password"
+        else
+            if [[ -n "$email" && -n "$password" ]]; then
+                log WARN "Falling back to provided n8n email/password after failing to load session credential '$credential_name'."
+            else
+                return 1
+            fi
         fi
     fi
 
     if [[ -z "$email" || -z "$password" ]]; then
-        log ERROR "Session authentication requires email/password but none are available. Configure N8N_LOGIN_CREDENTIAL_NAME or provide credentials."
+        if [[ "$attempted_credential" == "true" ]]; then
+            log ERROR "No usable credentials available after attempting to load '$credential_name'. Configure a valid session credential or supply --n8n-email and --n8n-password."
+        else
+            log ERROR "Session authentication requires email/password but none are available. Configure --n8n-cred or supply --n8n-email and --n8n-password."
+        fi
         return 1
     fi
 
     if test_n8n_session_auth "$base_url" "$email" "$password" false; then
-        cleanup_n8n_session
+        cleanup_n8n_session "auto"
         return 0
     fi
 
-    cleanup_n8n_session
+    cleanup_n8n_session "auto"
     return 1
 }
 
@@ -552,7 +576,8 @@ fetch_n8n_projects() {
     fi
 
     http_status=$(echo "$response" | tail -n1)
-    local response_body=$(echo "$response" | head -n -1)
+    local response_body
+    response_body=$(echo "$response" | head -n -1)
 
     if [[ "$http_status" != "200" ]]; then
         log ERROR "Projects API returned HTTP $http_status when using API key"
@@ -562,7 +587,7 @@ fetch_n8n_projects() {
 
     response_body="$(sanitize_n8n_json_response "$response_body")"
 
-    log DEBUG "Projects API (API key) success - received $(echo "$response_body" | wc -c) bytes"
+    log DEBUG "Projects API (API key) success - received ${#response_body} bytes"
     echo "$response_body"
     return 0
 }
@@ -587,7 +612,8 @@ fetch_workflows_with_folders() {
     fi
 
     http_status=$(echo "$response" | tail -n1)
-    local response_body=$(echo "$response" | head -n -1)
+    local response_body
+    response_body=$(echo "$response" | head -n -1)
 
     if [[ "$http_status" != "200" ]]; then
         log ERROR "Workflows API returned HTTP $http_status when using API key"
@@ -597,7 +623,7 @@ fetch_workflows_with_folders() {
 
     response_body="$(sanitize_n8n_json_response "$response_body")"
 
-    log DEBUG "Workflows API (API key) success - received $(echo "$response_body" | wc -c) bytes"
+    log DEBUG "Workflows API (API key) success - received ${#response_body} bytes"
     echo "$response_body"
     return 0
 }
@@ -751,35 +777,87 @@ authenticate_n8n_session() {
         return 0
     fi
 
-    : >"$N8N_SESSION_COOKIE_FILE"
     N8N_SESSION_COOKIE_READY="false"
-    
+
     local attempt=1
-    local auth_response
-    local http_status
-    
+    local base_origin="$base_url"
+
     while [[ $attempt -le $max_attempts ]]; do
-        
+        : >"$N8N_SESSION_COOKIE_FILE"
+
         # If this is a retry, prompt for new credentials
         if [[ $attempt -gt 1 ]]; then
             log WARN "Login attempt $((attempt-1)) failed. Please try again."
-            printf "n8n email or LDAP login ID: "
+            printf "n8n email: "
             read -r email
             printf "n8n password: "
             read -r -s password
-            echo  # Add newline after hidden input
+            echo
         fi
-        
-        # Attempt to login and get session cookie with proper browser headers
-        if ! auth_response=$(curl -s -w "\n%{http_code}" -c "$N8N_SESSION_COOKIE_FILE" \
-            -X POST \
-            -H "Content-Type: application/json" \
+
+        local curl_cookie_file
+        curl_cookie_file="$(native_path_for_host_tools "$N8N_SESSION_COOKIE_FILE")"
+
+        local csrf_response
+        local csrf_status
+        local csrf_body
+        local csrf_token=""
+
+        if ! csrf_response=$(curl -s -w "\n%{http_code}" -c "$curl_cookie_file" -b "$curl_cookie_file" \
             -H "Accept: application/json, text/plain, */*" \
-            -H "Accept-Language: en" \
-            -H "Sec-Fetch-Dest: empty" \
-            -H "Sec-Fetch-Mode: cors" \
-            -H "Sec-Fetch-Site: same-origin" \
-            -d "{\"emailOrLdapLoginId\":\"$email\",\"password\":\"$password\"}" \
+            -H "X-Requested-With: XMLHttpRequest" \
+            "$base_url/rest/login"); then
+            log ERROR "Failed to reach n8n login endpoint (attempt $attempt/$max_attempts)"
+            if [[ $attempt -eq $max_attempts ]]; then
+                log ERROR "Max attempts reached. Please check network connectivity and n8n server status."
+                return 1
+            fi
+            ((attempt++))
+            sleep 1
+            continue
+        fi
+
+        csrf_status=$(echo "$csrf_response" | tail -n1)
+        csrf_body=$(echo "$csrf_response" | head -n -1)
+
+        if [[ "$csrf_status" == "200" ]]; then
+            csrf_token=$(printf '%s' "$csrf_body" | jq -r '.data.csrfToken // empty' 2>/dev/null || true)
+            if [[ -z "$csrf_token" ]]; then
+                if jq -e '.data.email? // empty' <<<"$csrf_body" >/dev/null 2>&1; then
+                    if [[ -s "$N8N_SESSION_COOKIE_FILE" ]]; then
+                        log SUCCESS "Successfully authenticated with n8n session!" >&2
+                        log DEBUG "Session cookie stored at $N8N_SESSION_COOKIE_FILE"
+                        N8N_SESSION_COOKIE_READY="true"
+                        return 0
+                    fi
+                fi
+            fi
+        fi
+
+        local login_payload
+        if [[ -n "$csrf_token" ]]; then
+            login_payload=$(jq -n --arg email "$email" --arg password "$password" --arg csrf "$csrf_token" '{email:$email,emailOrLdapLoginId:$email,password:$password,rememberMe:true,csrfToken:$csrf}')
+        else
+            login_payload=$(jq -n --arg email "$email" --arg password "$password" '{email:$email,emailOrLdapLoginId:$email,password:$password,rememberMe:true}')
+        fi
+
+        local -a login_headers=(
+            "-H" "Content-Type: application/json"
+            "-H" "Accept: application/json, text/plain, */*"
+            "-H" "Accept-Language: en"
+            "-H" "X-Requested-With: XMLHttpRequest"
+            "-H" "Origin: $base_origin"
+            "-H" "Referer: ${base_origin}/login"
+        )
+        if [[ -n "$csrf_token" ]]; then
+            login_headers+=("-H" "X-N8N-CSRF-Token: $csrf_token")
+        fi
+
+        local auth_response
+        if ! auth_response=$(curl -s -w "\n%{http_code}" -c "$curl_cookie_file" -b "$curl_cookie_file" \
+            -X POST \
+            "${login_headers[@]}" \
+            -d "$login_payload" \
             "$base_url/rest/login"); then
             log ERROR "Failed to connect to n8n login endpoint (attempt $attempt/$max_attempts)"
             if [[ $attempt -eq $max_attempts ]]; then
@@ -787,17 +865,26 @@ authenticate_n8n_session() {
                 return 1
             fi
             ((attempt++))
+            sleep 1
             continue
         fi
-        
+
+        local http_status
         http_status=$(echo "$auth_response" | tail -n1)
-        local response_body=$(echo "$auth_response" | head -n -1)
-        
-        if [[ "$http_status" == "200" ]]; then
-            log SUCCESS "Successfully authenticated with n8n session!" >&2
-            log DEBUG "Session cookie stored at $N8N_SESSION_COOKIE_FILE"
-            N8N_SESSION_COOKIE_READY="true"
-            return 0
+        local response_body
+        response_body=$(echo "$auth_response" | head -n -1)
+
+        if [[ "$http_status" == "200" || "$http_status" == "204" ]]; then
+            if [[ ! -s "$N8N_SESSION_COOKIE_FILE" ]]; then
+                log ERROR "Login response succeeded but session cookie file is empty"
+            elif ! grep -q 'n8n-auth' "$N8N_SESSION_COOKIE_FILE" 2>/dev/null; then
+                log ERROR "Login response did not provide an n8n session cookie"
+            else
+                log SUCCESS "Successfully authenticated with n8n session!" >&2
+                log DEBUG "Session cookie stored at $N8N_SESSION_COOKIE_FILE"
+                N8N_SESSION_COOKIE_READY="true"
+                return 0
+            fi
         elif [[ "$http_status" == "401" ]]; then
             log ERROR "Invalid credentials (HTTP 401) - attempt $attempt/$max_attempts"
             if [[ $attempt -eq $max_attempts ]]; then
@@ -815,21 +902,20 @@ authenticate_n8n_session() {
             return 1
         else
             log ERROR "Login failed with HTTP $http_status (attempt $attempt/$max_attempts)"
+            if [[ -n "$response_body" ]]; then
+                log DEBUG "Login response body: $response_body"
+            fi
             if [[ $attempt -eq $max_attempts ]]; then
                 log ERROR "Max attempts reached. Server may be experiencing issues."
                 : >"$N8N_SESSION_COOKIE_FILE"
                 return 1
             fi
         fi
-        
+
         ((attempt++))
-        
-        # Add a small delay between attempts
-        if [[ $attempt -le $max_attempts ]]; then
-            sleep 1
-        fi
+        sleep 1
     done
-    
+
     return 1
 }
 
@@ -842,7 +928,10 @@ fetch_n8n_projects_session() {
     
     local response
     local http_status
-    if ! response=$(curl -s -w "\n%{http_code}" -b "$N8N_SESSION_COOKIE_FILE" \
+    local curl_cookie_file
+    curl_cookie_file="$(native_path_for_host_tools "$N8N_SESSION_COOKIE_FILE")"
+
+    if ! response=$(curl -s -w "\n%{http_code}" -b "$curl_cookie_file" \
         -H "Accept: application/json, text/plain, */*" \
         -H "Accept-Language: en" \
         -H "Sec-Fetch-Dest: empty" \
@@ -854,7 +943,8 @@ fetch_n8n_projects_session() {
     fi
     
     http_status=$(echo "$response" | tail -n1)
-    local response_body=$(echo "$response" | head -n -1)
+    local response_body
+    response_body=$(echo "$response" | head -n -1)
     
     if [[ "$http_status" != "200" ]]; then
         log ERROR "Failed to fetch projects via session (HTTP $http_status)"
@@ -864,7 +954,7 @@ fetch_n8n_projects_session() {
     
     response_body="$(sanitize_n8n_json_response "$response_body")"
 
-    log DEBUG "Projects API Success - received $(echo "$response_body" | wc -c) bytes"
+    log DEBUG "Projects API Success - received ${#response_body} bytes"
     echo "$response_body"
     return 0
 }
@@ -894,7 +984,10 @@ fetch_workflows_with_folders_session() {
     
     local response
     local http_status
-    if ! response=$(curl -s -w "\n%{http_code}" -b "$N8N_SESSION_COOKIE_FILE" \
+    local curl_cookie_file
+    curl_cookie_file="$(native_path_for_host_tools "$N8N_SESSION_COOKIE_FILE")"
+
+    if ! response=$(curl -s -w "\n%{http_code}" -b "$curl_cookie_file" \
         -H "Accept: application/json, text/plain, */*" \
         -H "Accept-Language: en" \
         -H "Sec-Fetch-Dest: empty" \
@@ -906,7 +999,8 @@ fetch_workflows_with_folders_session() {
     fi
     
     http_status=$(echo "$response" | tail -n1)
-    local response_body=$(echo "$response" | head -n -1)
+    local response_body
+    response_body=$(echo "$response" | head -n -1)
     
     if [[ "$http_status" != "200" ]]; then
         log ERROR "Failed to fetch workflows with folders via session (HTTP $http_status)"
@@ -917,7 +1011,7 @@ fetch_workflows_with_folders_session() {
     
     response_body="$(sanitize_n8n_json_response "$response_body")"
 
-    log DEBUG "Workflows API Success - received $(echo "$response_body" | wc -c) bytes"
+    log DEBUG "Workflows API Success - received ${#response_body} bytes"
     echo "$response_body"
     return 0
 }
@@ -941,14 +1035,18 @@ test_n8n_session_auth() {
     # Test with a simple API call
     local response
     local http_status
-    if ! response=$(curl -s -w "\n%{http_code}" -b "$N8N_SESSION_COOKIE_FILE" "$base_url/rest/workflows?limit=1" 2>/dev/null); then
+    local curl_cookie_file
+    curl_cookie_file="$(native_path_for_host_tools "$N8N_SESSION_COOKIE_FILE")"
+
+    if ! response=$(curl -s -w "\n%{http_code}" -b "$curl_cookie_file" "$base_url/rest/workflows?limit=1" 2>/dev/null); then
         log ERROR "Failed to test session authentication"
         rm -f "$N8N_SESSION_COOKIE_FILE"
         return 1
     fi
     
     http_status=$(echo "$response" | tail -n1)
-    local response_body=$(echo "$response" | head -n -1)
+    local response_body
+    response_body=$(echo "$response" | head -n -1)
     
     if [[ "$http_status" == "200" ]]; then
         if $verbose; then
@@ -959,6 +1057,13 @@ test_n8n_session_auth() {
         fi
         return 0
     else
+        if [[ -s "$N8N_SESSION_COOKIE_FILE" ]]; then
+            log WARN "Session cookie ready at $N8N_SESSION_COOKIE_FILE"
+            log WARN "Session cookie preview: $(head -n 2 "$N8N_SESSION_COOKIE_FILE" | tr '\r' ' ')"
+        else
+            log WARN "Session cookie file empty or missing: $N8N_SESSION_COOKIE_FILE"
+        fi
+        log WARN "Session test response (trimmed): $(printf '%s' "$response_body" | head -c 200)"
         log ERROR "Session authentication test failed with HTTP $http_status"
         rm -f "$N8N_SESSION_COOKIE_FILE"
         return 1
@@ -1075,7 +1180,9 @@ n8n_api_request() {
     if [[ "$N8N_API_AUTH_MODE" == "api_key" ]]; then
         curl_args+=("-H" "X-N8N-API-KEY: $n8n_api_key")
     else
-        curl_args+=("-b" "$N8N_SESSION_COOKIE_FILE")
+        local curl_cookie_file
+        curl_cookie_file="$(native_path_for_host_tools "$N8N_SESSION_COOKIE_FILE")"
+        curl_args+=("-b" "$curl_cookie_file")
     fi
 
     if [[ -n "$payload" ]]; then

@@ -1,25 +1,65 @@
-## [](https://github.com/Automations-Project/n8n-data-manager/compare/v3.0.16...v) (2025-06-19)
+# Changelog
 
-### Features
+All notable changes to n8n push will be documented in this file.
 
-* add automated readme badge generation script and update badge section ([dcc987a](https://github.com/Automations-Project/n8n-data-manager/commit/dcc987a17f91e0d69be66f0c1ad91b3bb575f428))
-* add GitHub Actions workflow for auto-updating README badges ([a6944bb](https://github.com/Automations-Project/n8n-data-manager/commit/a6944bb619d8480377eb8346d094825636e8c5fc))
-## [3.0.15](https://github.com/Automations-Project/n8n-data-manager/compare/02f689ce9f6dc97eae0263b0ee74e6a3d8a932ea...v3.0.15) (2025-06-19)
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-### Features
+## [Unreleased]
 
-* add CI/CD workflows with shellcheck, integration tests, and release automation ([eb2d451](https://github.com/Automations-Project/n8n-data-manager/commit/eb2d451ecb9031bf3c0433125de9614eb989f19e))
-* add GitHub Actions workflow for release management and badge updates ([a42bd0e](https://github.com/Automations-Project/n8n-data-manager/commit/a42bd0efb3ed71de2fd69cded2e3b2cf1e1a3813))
-* add script to automatically update README badges with dynamic repository info ([ad9543a](https://github.com/Automations-Project/n8n-data-manager/commit/ad9543a6cc586450bac51f1bed9295759f9f077c))
-* add script to automatically update README badges with dynamic version and repo info ([92861d5](https://github.com/Automations-Project/n8n-data-manager/commit/92861d5ba8f7399cfac38943f47e06275e5b3134))
-* add script to dynamically update README badges with version and repo info ([59e3a10](https://github.com/Automations-Project/n8n-data-manager/commit/59e3a10014e74adbb817771663e4bacbd566321f))
-* add version bump script with major/minor/patch support ([a8b55a6](https://github.com/Automations-Project/n8n-data-manager/commit/a8b55a65e8de332743a57b5cb599a7584467c755))
-* improve backup/restore handling for empty n8n instances and duplicate items ([31e32e3](https://github.com/Automations-Project/n8n-data-manager/commit/31e32e34c758d185b64135cbbe867be074b17bbb))
+## [0.1.0] - 2025-10-23
 
-### Bug Fixes
+### Project Launch
+- **n8n push** - Initial public release
+- Complete rebranding from n8n-data-manager
+- New repository: tcoretech/n8n-push
+- Beta release (0.1.x) to gather feedback before 1.0.0 stable release
 
-* improve backup handling for clean n8n installations with empty data files ([0b4a7d3](https://github.com/Automations-Project/n8n-data-manager/commit/0b4a7d35e6cdd3ca4da73a4c5524472f948803c1))
+### Added
+- Comprehensive new README with accurate feature documentation
+- Complete folder structure synchronization system
+- Advanced manifest-based restore pipeline
+- Intelligent workflow ID conflict resolution
+- n8n API integration for projects, folders, and workflow assignments
+- Session-based and API key authentication support
+- Per-workflow Git commits with meaningful tags ([new], [updated], [deleted])
+- Pre-restore snapshot with automatic rollback capability
+- Dry run mode for testing operations safely
+- Interactive configuration wizard
+- Modular restore pipeline:
+  - `lib/restore/staging.sh` - Manifest generation and ID sanitization
+  - `lib/restore/folder-state.sh` - n8n state caching
+  - `lib/restore/folder-sync.sh` - Recursive folder creation
+  - `lib/restore/folder-assignment.sh` - Workflow-to-folder mapping
+  - `lib/restore/validate.sh` - Post-import reconciliation
+- Support for nested project/folder hierarchies
+- GitHub path prefixing for organized repository structure
+- Comprehensive test suite (ShellCheck, syntax, functional, security, documentation)
+- MIT License
 
-### Reverts
+### Changed
+- Updated all CI/CD workflows for new repository
+- Modernized badge system with dynamic repository detection
+- Improved configuration precedence (CLI > local > user > defaults)
+- Enhanced error handling and logging throughout codebase
+- Streamlined architecture documentation
 
-* Revert "Add non-interactive mode and bump version to 3.0.6" ([02f689c](https://github.com/Automations-Project/n8n-data-manager/commit/02f689ce9f6dc97eae0263b0ee74e6a3d8a932ea))
+### Technical Enhancements
+- Complete rewrite of folder synchronization logic
+- Efficient in-memory state caching for n8n projects/folders
+- Smart workflow organization matching n8n UI hierarchy
+- Flexible storage modes (disabled, local, remote) for all components
+- Enhanced safety with validation checks at each step
+- Container compatibility (Alpine and Debian-based)
+
+---
+
+## Historical Attribution
+
+This project evolved from [n8n-data-manager](https://github.com/Automations-Project/n8n-data-manager) (versions 3.x and earlier) by the Automations Project. The original tool provided foundational backup and restore capabilities which have been significantly extended and rewritten in n8n push.
+
+**Original project last version**: 4.1.0  
+**Fork point**: June 2025  
+**Rebranded as n8n push**: October 2025
+
+For historical changelog entries from the original project, see `CHANGELOG.old.md`.

@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 # =========================================================
-# Installer for n8n-manager.sh
+# Installer for n8n push
 # =========================================================
 set -euo pipefail
 
 # --- Configuration ---
-SCRIPT_NAME="n8n-manager.sh"
-# IMPORTANT: Replace this URL with the actual raw URL of the script when hosted (e.g., GitHub Raw)
-SCRIPT_URL="https://raw.githubusercontent.com/Automations-Project/n8n-data-manager/refs/heads/main/n8n-manager.sh"
+SCRIPT_NAME="n8n-push.sh"
+SCRIPT_URL="https://raw.githubusercontent.com/tcoretech/n8n-push/main/n8n-push.sh"
 INSTALL_DIR="/usr/local/bin"
 INSTALL_PATH="${INSTALL_DIR}/${SCRIPT_NAME}"
 
@@ -58,7 +57,7 @@ check_dependencies() {
 
 # --- Main Installation Logic ---
 
-log_info "Starting n8n-manager installation..."
+log_info "Starting n8n push installation..."
 
 check_dependencies
 

@@ -1,10 +1,10 @@
-name: Continuous Integration
+name: n8n push CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, develop ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, develop ]
 
 jobs:
   shellcheck:
@@ -14,14 +14,6 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Cache apt packages
-      uses: actions/cache@v4
-      with:
-        path: /var/cache/apt/archives
-        key: ${{ runner.os }}-apt-shellcheck-${{ hashFiles('**/lockfiles') }}
-        restore-keys: |
-          ${{ runner.os }}-apt-shellcheck-
-
     - name: Install ShellCheck
       run: |
         sudo apt-get update
@@ -29,8 +21,8 @@ jobs:
 
     - name: Run ShellCheck
       run: |
-        chmod +x .github/scripts/test-shellcheck.sh
-        ./.github/scripts/test-shellcheck.sh
+        chmod +x tests/test-shellcheck.sh
+        ./tests/test-shellcheck.sh
 
     - name: Upload ShellCheck report
       if: always()
@@ -48,123 +40,58 @@ jobs:
 
     - name: Validate syntax
       run: |
-        chmod +x .github/scripts/test-syntax.sh
-        ./.github/scripts/test-syntax.sh
+        chmod +x tests/test-syntax.sh
+        ./tests/test-syntax.sh
 
-  functional-testing:
-    name: Functional Testing
+  backup-restore-test:
+    name: Backup & Restore Tests
     runs-on: ubuntu-latest
-    services:
-      docker:
-        image: docker:dind
-        options: --privileged
     steps:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Set up Docker
+    - name: Install dependencies
       run: |
-        dockerd &
-        sleep 10
-        docker --version
-        docker info
+        sudo apt-get update
+        sudo apt-get install -y jq
 
-    - name: Run functional tests
+    - name: Run backup/restore tests
       run: |
-        chmod +x .github/scripts/test-functional.sh
-        ./.github/scripts/test-functional.sh
+        chmod +x tests/test-backup.sh
+        ./tests/test-backup.sh
 
     - name: Cleanup test environment
       if: always()
       run: |
-        docker stop test-n8n || true
-        docker rm test-n8n || true
+        docker stop n8n-push-test 2>/dev/null || true
+        docker rm n8n-push-test 2>/dev/null || true
 
-  security-scanning:
-    name: Security Scanning
+  restore-workflow-tests:
+    name: Restore Workflow ID Tests
     runs-on: ubuntu-latest
     steps:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Install security tools
+    - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y grep
+        sudo apt-get install -y jq
 
-    - name: Run security scan
+    - name: Test double-run restore
       run: |
-        chmod +x .github/scripts/test-security.sh
-        ./.github/scripts/test-security.sh
+        chmod +x tests/test-restore-double-run.sh
+        ./tests/test-restore-double-run.sh
 
-    - name: Upload security report
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: security-report
-        path: security-report.md
-
-  documentation-validation:
-    name: Documentation Validation
-    runs-on: ubuntu-latest
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-
-    - name: Validate documentation
+    - name: Test new workflow ID restore
       run: |
-        chmod +x n8n-manager.sh # Ensure main script is executable
-        chmod +x .github/scripts/test-docs.sh
-        ./.github/scripts/test-docs.sh
-
-  integration-testing:
-    name: Integration Testing
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-
-    - name: Set up test environment
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y git curl
-
-    - name: Debug Workspace (Before Script)
-      run: |
-        echo "GITHUB_WORKSPACE is: $GITHUB_WORKSPACE"
-        echo "Listing $GITHUB_WORKSPACE:"
-        ls -la $GITHUB_WORKSPACE
-        echo "Touching $GITHUB_WORKSPACE/integration-report.md"
-        touch $GITHUB_WORKSPACE/integration-report.md
-        echo "Listing $GITHUB_WORKSPACE after touch:"
-        ls -la $GITHUB_WORKSPACE
-
-    - name: Run integration tests
-      run: |
-        chmod +x install.sh # Ensure root install.sh is executable BEFORE test script copies it
-        chmod +x .github/scripts/test-integration.sh
-        ./.github/scripts/test-integration.sh
-
-    - name: Debug Workspace (After Script)
-      if: always() # Run this even if the script fails
-      run: |
-        echo "Listing $GITHUB_WORKSPACE after script execution:"
-        ls -la $GITHUB_WORKSPACE
-        echo "Contents of $GITHUB_WORKSPACE/integration-report.md (if it exists):"
-        cat $GITHUB_WORKSPACE/integration-report.md || echo "integration-report.md not found by cat command"
-
-    - name: Upload integration report
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: integration-report
-        path: integration-report.md
+        chmod +x tests/test-restore-new-workflow-id.sh
+        ./tests/test-restore-new-workflow-id.sh
 
   test-summary:
     name: Test Summary
     runs-on: ubuntu-latest
-    needs: [shellcheck, syntax-validation, functional-testing, security-scanning, documentation-validation, integration-testing]
+    needs: [shellcheck, syntax-validation, backup-restore-test, restore-workflow-tests]
     if: always()
     steps:
     - name: Generate test summary
@@ -174,19 +101,15 @@ jobs:
         echo "## Results Overview" >> test-summary.md
         echo "- ShellCheck: ${{ needs.shellcheck.result }}" >> test-summary.md
         echo "- Syntax Validation: ${{ needs.syntax-validation.result }}" >> test-summary.md
-        echo "- Functional Testing: ${{ needs.functional-testing.result }}" >> test-summary.md
-        echo "- Security Scanning: ${{ needs.security-scanning.result }}" >> test-summary.md
-        echo "- Documentation Validation: ${{ needs.documentation-validation.result }}" >> test-summary.md
-        echo "- Integration Testing: ${{ needs.integration-testing.result }}" >> test-summary.md
+        echo "- Backup/Restore Test: ${{ needs.backup-restore-test.result }}" >> test-summary.md
+        echo "- Restore Workflow Tests: ${{ needs.restore-workflow-tests.result }}" >> test-summary.md
         echo "" >> test-summary.md
         echo "## Overall Status" >> test-summary.md
         
         if [[ "${{ needs.shellcheck.result }}" == "success" && \
               "${{ needs.syntax-validation.result }}" == "success" && \
-              "${{ needs.functional-testing.result }}" == "success" && \
-              "${{ needs.security-scanning.result }}" == "success" && \
-              "${{ needs.documentation-validation.result }}" == "success" && \
-              "${{ needs.integration-testing.result }}" == "success" ]]; then
+              "${{ needs.backup-restore-test.result }}" == "success" && \
+              "${{ needs.restore-workflow-tests.result }}" == "success" ]]; then
           echo "✅ ALL TESTS PASSED" >> test-summary.md
         else
           echo "❌ SOME TESTS FAILED" >> test-summary.md

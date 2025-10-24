@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =========================================================
-# n8n-manager.sh - Interactive backup/restore for n8n
+# n8n-push.sh - Interactive backup/restore for n8n
 # =========================================================
 # Flexible Backup System:
 # - Workflows: local files or Git repository (user choice)
@@ -21,10 +21,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # --- Configuration ---
 # Configuration file paths (local first, then user directory)
 LOCAL_CONFIG_FILE="$SCRIPT_DIR/.config"
-USER_CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/n8n-manager/config"
+USER_CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/n8n-push/config"
 
-# --- Global Configuration Variables ---
-VERSION="4.1.0"
+# --- Global variables ---
 DEBUG_TRACE=${DEBUG_TRACE:-false}
 
 # Selected values from interactive mode
@@ -41,6 +40,10 @@ SELECTED_RESTORE_TYPE="all"
 # 2. Config file values (load_config)  
 # 3. Command line arguments (parse_args)
 # 4. Interactive prompts (interactive_mode)
+
+# Project Information
+PROJECT_NAME="n8n push - Organise and Version Workflows"
+VERSION="0.1.0"
 
 # Core operation settings
 action=""
@@ -199,6 +202,20 @@ main() {
             --n8n-url) n8n_base_url="$2"; shift 2 ;;
             --n8n-api-key) n8n_api_key="$2"; shift 2 ;;
             --n8n-cred) n8n_session_credential="$2"; shift 2 ;;
+            --n8n-email)
+                if [[ -z "$2" || "$2" == -* ]]; then
+                    log ERROR "Invalid value for --n8n-email. Provide an email address."
+                    exit 1
+                fi
+                n8n_email="$2"
+                shift 2 ;;
+            --n8n-password)
+                if [[ -z "$2" || "$2" == -* ]]; then
+                    log ERROR "Invalid value for --n8n-password. Provide the account password."
+                    exit 1
+                fi
+                n8n_password="$2"
+                shift 2 ;;
             --preserve)
                 restore_preserve_ids=true
                 restore_preserve_ids_source="cli"
@@ -211,7 +228,7 @@ main() {
             *) echo "[ERROR] Invalid option: $1"; show_help; exit 1 ;;
         esac
     done
-    log HEADER "n8n Backup/Restore Manager v$VERSION"
+    log HEADER "n8n push v$VERSION"
     log INFO "🚀 Flexible backup storage: local files or Git repository"
     
     check_host_dependencies
@@ -422,12 +439,13 @@ main() {
             fi
             
             if [[ -z "$n8n_api_key" ]]; then
-                if [[ -z "$n8n_email" || -z "$n8n_password" ]]; then
-                    if [[ -z "$n8n_session_credential" ]]; then
-                        log ERROR "Session credential name required when API key is not provided."
-                        log INFO "Please configure --n8n-cred or set N8N_LOGIN_CREDENTIAL_NAME in config."
-                        exit 1
-                    fi
+                if [[ -n "$n8n_session_credential" ]]; then
+                    log DEBUG "Using n8n session credential '$n8n_session_credential' for authentication." 
+                elif [[ -n "$n8n_email" && -n "$n8n_password" ]]; then
+                    log INFO "Using direct n8n email/password for session authentication; consider --n8n-cred for managed credentials."
+                else
+                    log ERROR "Session authentication requires --n8n-cred, or both --n8n-email and --n8n-password when no API key is provided."
+                    exit 1
                 fi
             fi
 
@@ -809,4 +827,3 @@ main() {
 trap 'log ERROR "An unexpected error occurred (Line: $LINENO). Aborting."; exit 1' ERR
 trap 'cleanup_n8n_session force 2>/dev/null || true; exit' EXIT TERM INT
 main "$@"
-exit 0

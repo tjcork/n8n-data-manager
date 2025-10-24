@@ -172,7 +172,7 @@ decrypt_credentials_file() {
     # Create temporary directory
     local tmpdir
     tmpdir=$(mktemp -d 2>/dev/null || mktemp -d -t n8n-decrypt-XXXXXX)
-    trap 'rm -rf "'$tmpdir'"; trap - RETURN' RETURN
+    trap 'rm -rf '"$tmpdir"'; trap - RETURN' RETURN
     
     # Convert JSON array to line-delimited entries
     if ! jq -c 'if type=="array" then .[] else . end' "$input_file" > "$tmpdir/entries.txt"; then

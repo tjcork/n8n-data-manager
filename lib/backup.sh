@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =========================================================
-# lib/backup.sh - Backup operations for n8n-manager
+# lib/backup.sh - Backup operations for n8n-push
 # =========================================================
 # All backup-related functions: archiving, rotation, backup process
 
@@ -31,7 +31,8 @@ create_folder_structure_with_git() {
     
     # Step 1: Export individual workflow files from Docker container
     log DEBUG "Step 1: Exporting individual workflows from n8n container..."
-    local temp_export_dir="$(mktemp -d -t n8n-workflows-XXXXXXXXXX)"
+    local temp_export_dir
+    temp_export_dir="$(mktemp -d -t n8n-workflows-XXXXXXXXXX)"
 
     if ! dockExec "$container_id" "rm -rf /tmp/workflow_exports && mkdir -p /tmp/workflow_exports" false; then
         log ERROR "Failed to prepare workflow export directory inside container"
@@ -118,7 +119,7 @@ print_folder_structure_preview() {
     fi
 
     while IFS= read -r dir; do
-        local relative="${dir#$base_prefix}"
+    local relative="${dir#"$base_prefix"}"
         if [[ "$relative" == "$dir" ]]; then
             relative=$(basename "$dir")
         fi
@@ -526,7 +527,7 @@ organize_workflows_by_folders() {
 
         local relative_git_path=""
         if [[ "$target_file" == "$git_prefix"* ]]; then
-            relative_git_path="${target_file#$git_prefix}"
+            relative_git_path="${target_file#"$git_prefix"}"
         else
             log WARN "Workflow file resides outside Git directory: $target_file"
             commit_fail=true
@@ -580,7 +581,7 @@ organize_workflows_by_folders() {
 
             local relative_git_path=""
             if [[ "$existing_file" == "$git_prefix"* ]]; then
-                relative_git_path="${existing_file#$git_prefix}"
+                relative_git_path="${existing_file#"$git_prefix"}"
             else
                 log WARN "Workflow deletion outside Git directory: $existing_file"
                 commit_fail=true
@@ -645,7 +646,8 @@ archive_credentials() {
     fi
 
     local archive_dir="$backup_dir/archive"
-    local timestamp=$(date +"%Y%m%d_%H%M%S")
+    local timestamp
+    timestamp=$(date +"%Y%m%d_%H%M%S")
     local archive_file="$archive_dir/credentials_${timestamp}.json"
 
     if $is_dry_run; then
@@ -717,7 +719,8 @@ archive_workflows() {
     fi
 
     local archive_dir="$backup_dir/archive"
-    local timestamp=$(date +"%Y%m%d_%H%M%S")
+    local timestamp
+    timestamp=$(date +"%Y%m%d_%H%M%S")
     local archive_file="$archive_dir/workflows_${timestamp}.json"
 
     if $is_dry_run; then
@@ -832,11 +835,15 @@ generate_workflow_commit_message() {
     pushd "$target_dir" > /dev/null || return 1
     
     # Get added files (new workflows)
-    new_files=$(git status --porcelain 2>/dev/null | grep "^A " | wc -l)
-    # Get modified files (updated workflows)  
-    updated_files=$(git status --porcelain 2>/dev/null | grep "^M " | wc -l)
-    # Get deleted files (removed workflows)
-    deleted_files=$(git status --porcelain 2>/dev/null | grep "^D " | wc -l)
+        local status_output
+        status_output=$(git status --porcelain 2>/dev/null || true)
+
+        # Get added files (new workflows)
+        new_files=$(printf '%s\n' "$status_output" | awk '/^A /{count++} END {print count+0}')
+        # Get modified files (updated workflows)
+        updated_files=$(printf '%s\n' "$status_output" | awk '/^M /{count++} END {print count+0}')
+        # Get deleted files (removed workflows)
+        deleted_files=$(printf '%s\n' "$status_output" | awk '/^D /{count++} END {print count+0}')
     
     popd > /dev/null || return 1
     
@@ -1507,7 +1514,8 @@ backup() {
         if $is_dry_run; then
             log DRYRUN "Would create .gitignore file"
         else
-            local template_dir="$(dirname "${BASH_SOURCE[0]}")/../templates"
+            local template_dir
+            template_dir="$(dirname "${BASH_SOURCE[0]}")/../templates"
             local gitignore_base_template="$template_dir/gitignore.base"
             local gitignore_credentials_template="$template_dir/gitignore.credentials-secure"
 

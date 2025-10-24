@@ -44,7 +44,7 @@ generate_workflow_manifest() {
         workflow_name=$(printf '%s' "$workflow_json" | jq -r '.name // ""' 2>/dev/null)
         
         # Compute relative path from source_dir
-        local relative_path="${workflow_file#${source_dir}/}"
+    local relative_path="${workflow_file#"${source_dir}/"}"
         
         # Create manifest entry (simple NDJSON)
         local manifest_entry
@@ -99,7 +99,7 @@ reconcile_manifest_ids() {
     # Build lookup: workflow by name (for newly created workflows without stable IDs)
     declare -A workflow_by_name=()
     
-    while IFS=$'\t' read -r wf_id wf_name wf_instance; do
+    while IFS=$'\t' read -r wf_id wf_name _; do
         [[ -z "$wf_id" ]] && continue
         
         local name_key
@@ -196,6 +196,7 @@ snapshot_existing_workflows() {
     local container_credentials_path="${2:-}"
     local keep_session_alive="${3:-false}"
     local snapshot_path=""
+    # shellcheck disable=SC2034 # Expose snapshot path to other restore modules
     SNAPSHOT_EXISTING_WORKFLOWS_PATH=""
     local session_initialized=false
 
@@ -262,6 +263,7 @@ snapshot_existing_workflows() {
     if [[ "$session_initialized" == "true" && "$keep_session_alive" != "true" ]]; then
         finalize_n8n_api_auth
     elif [[ "$session_initialized" == "true" && "$keep_session_alive" == "true" ]]; then
+        # shellcheck disable=SC2034 # Ensure global snapshot state reflects active session reuse
         SNAPSHOT_EXISTING_WORKFLOWS_PATH=""
     fi
     
@@ -360,13 +362,13 @@ stage_directory_workflows_to_container() {
             ] |
             @tsv
         ' "$workflow_mapping_path" 2>/dev/null | tr -d '\r')
-        if [[ "$verbose" == "true" ]]; then
+        if [[ "${verbose:-false}" == "true" ]]; then
             log DEBUG "Workflow-folder paths available for ${#workflow_folder_assignments[@]} workflow(s)"
         fi
     fi
     
     if [[ -n "$existing_snapshot_path" && -f "$existing_snapshot_path" ]]; then
-    log DEBUG "Building existing workflow index from snapshot"
+        log DEBUG "Building existing workflow index from snapshot"
         
         while IFS=$'\t' read -r wf_id wf_name wf_folder_path; do
             [[ -z "$wf_id" ]] && continue
@@ -407,7 +409,7 @@ stage_directory_workflows_to_container() {
             | @tsv
         ' 2>/dev/null | tr -d '\r')
         
-    log DEBUG "Existing workflow index prepared for ${#existing_workflows_by_id[@]} workflow(s)"
+        log DEBUG "Existing workflow index prepared for ${#existing_workflows_by_id[@]} workflow(s)"
     fi
     
     # Clear/create output manifest
@@ -438,7 +440,7 @@ stage_directory_workflows_to_container() {
         workflow_name=$(printf '%s' "$workflow_name" | tr -d '\r\n')
         
         # Compute target folder path from directory structure
-        local relative_path="${workflow_file#${source_dir}/}"
+    local relative_path="${workflow_file#"${source_dir}/"}"
         local folder_path
         folder_path=$(dirname "$relative_path")
         [[ "$folder_path" == "." ]] && folder_path=""

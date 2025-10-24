@@ -1,18 +1,17 @@
-name: Release Management
+name: n8n push Release
 
-# Required permissions for the workflow token
 permissions:
-  contents: write  # For commits and pushes
-  pull-requests: write  # For creating releases
+  contents: write
+  pull-requests: write
 
 on:
   workflow_dispatch:
     inputs:
       version_bump_type:
-        description: 'The type of version bump (major, minor, or patch)'
+        description: 'Version bump type'
         required: true
         default: 'patch'
-        type: 'choice'
+        type: choice
         options:
           - patch
           - minor
@@ -20,142 +19,118 @@ on:
 
 jobs:
   calculate-version:
-    name: Calculate Next Version
+    name: Calculate Version
     runs-on: ubuntu-latest
     outputs:
       new_version: ${{ steps.bump_version.outputs.new_version }}
-      version_commit_sha: ${{ steps.commit_version.outputs.commit_sha }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0 # Required for commit history analysis if used
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
 
-      - name: Set up Git user
-        run: |
-          git config user.name "GitHub Actions Bot"
-          git config user.email "actions@github.com"
+    - name: Set up Git
+      run: |
+        git config user.name "GitHub Actions Bot"
+        git config user.email "actions@github.com"
 
-      - name: Bump version
-        id: bump_version
-        run: |
-          chmod +x .github/scripts/bump-version.sh
-          ./.github/scripts/bump-version.sh
-        env:
-          VERSION_BUMP_TYPE: ${{ github.event.inputs.version_bump_type }}
-        # In a real scenario, you might pass VERSION_BUMP_TYPE based on commit analysis
-        # env:
-        #   VERSION_BUMP_TYPE: 'patch' # or 'minor', 'major'
+    - name: Bump version
+      id: bump_version
+      run: |
+        chmod +x .github/scripts/bump-version.sh
+        ./.github/scripts/bump-version.sh
+      env:
+        VERSION_BUMP_TYPE: ${{ github.event.inputs.version_bump_type }}
 
-      - name: Commit version bump
-        id: commit_version
-        run: |
-          git add n8n-manager.sh
-          git commit -m "chore(release): bump version to ${{ steps.bump_version.outputs.new_version }}"
-          git push
-          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
+    - name: Commit version
+      run: |
+        git add n8n-push.sh
+        git commit -m "chore(release): bump version to ${{ steps.bump_version.outputs.new_version }}"
+        git push
 
   generate-changelog:
     name: Generate Changelog
     runs-on: ubuntu-latest
     needs: calculate-version
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          # Fetch all history for changelog generation
-          fetch-depth: 0
-          # Checkout the branch, not the specific commit, to avoid detached HEAD
-          ref: ${{ github.ref_name }}
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        ref: ${{ github.ref_name }}
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18' # Or your preferred LTS version
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
 
-      - name: Generate changelog
-        run: |
-          chmod +x .github/scripts/generate-changelog.sh
-          ./.github/scripts/generate-changelog.sh
+    - name: Generate changelog
+      run: |
+        chmod +x .github/scripts/generate-changelog.sh
+        ./.github/scripts/generate-changelog.sh
 
-      - name: Set up Git user
-        run: |
-          git config user.name "GitHub Actions Bot"
-          git config user.email "actions@github.com"
+    - name: Set up Git
+      run: |
+        git config user.name "GitHub Actions Bot"
+        git config user.email "actions@github.com"
 
-      - name: Commit changelog
-        run: |
-          git add CHANGELOG.md
-          # Check if there are changes to commit to avoid error if changelog is empty or unchanged
-          if ! git diff --staged --quiet; then
-            git commit -m "docs(changelog): update CHANGELOG.md for v${{ needs.calculate-version.outputs.new_version }}"
-            git push origin HEAD:${{ github.ref_name }} # Push to the correct branch
-          else
-            echo "No changes to CHANGELOG.md to commit."
-          fi
-
+    - name: Commit changelog
+      run: |
+        git add CHANGELOG.md
+        if ! git diff --staged --quiet; then
+          git commit -m "docs(changelog): update for v${{ needs.calculate-version.outputs.new_version }}"
+          git push origin HEAD:${{ github.ref_name }}
+        fi
 
   update-badges:
-    name: Update README Badges
+    name: Update Badges
     runs-on: ubuntu-latest
-    needs: [calculate-version, generate-changelog] # Depends on new version and changelog commit
+    needs: [calculate-version, generate-changelog]
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          # Checkout the latest commit on the branch (should include version bump and changelog)
-          ref: ${{ github.ref_name }} 
-          fetch-depth: 0 # For git history if script needs it
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.ref_name }}
+        fetch-depth: 0
 
-      - name: Set up Git user
-        run: |
-          git config user.name "GitHub Actions Bot"
-          git config user.email "actions@github.com"
+    - name: Set up Git
+      run: |
+        git config user.name "GitHub Actions Bot"
+        git config user.email "actions@github.com"
 
-      - name: Update README badges
-        run: |
-          chmod +x .github/scripts/update-readme-badges.sh
-          ./.github/scripts/update-readme-badges.sh
+    - name: Update badges
+      run: |
+        chmod +x .github/scripts/repo-badges.sh
+        ./.github/scripts/repo-badges.sh
 
-      - name: List files before commit
-        run: ls -la
-
-      - name: Commit README.md update
-        run: |
-          git add readme.md
-          # Check if there are changes to commit
-          if ! git diff --staged --quiet; then
-            git commit -m "docs(readme): update badges for v${{ needs.calculate-version.outputs.new_version }}"
-            git push
-          else
-            echo "No changes to README.md badges to commit."
-          fi
-
+    - name: Commit badges
+      run: |
+        git add readme.md
+        if ! git diff --staged --quiet; then
+          git commit -m "docs(readme): update badges for v${{ needs.calculate-version.outputs.new_version }}"
+          git push
+        fi
 
   create-release:
-    name: Create GitHub Release
+    name: Create Release
     runs-on: ubuntu-latest
     needs: [calculate-version, generate-changelog, update-badges]
-    # Ensure this job runs only on the main branch and not on tags pushed by this workflow
     if: github.ref == 'refs/heads/main'
     permissions:
-      contents: write # To create tags and releases
+      contents: write
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          # Checkout the latest commit on the branch (should include version bump, changelog, and badge updates)
-          ref: ${{ github.ref_name }}
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.ref_name }}
 
-      - name: Create GitHub Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: v${{ needs.calculate-version.outputs.new_version }}
-          release_name: Release v${{ needs.calculate-version.outputs.new_version }}
-          body_path: CHANGELOG.md # Assumes changelog is generated and committed
-          draft: false
-          prerelease: false
+    - name: Create release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: v${{ needs.calculate-version.outputs.new_version }}
+        name: Release v${{ needs.calculate-version.outputs.new_version }}
+        body_path: CHANGELOG.md
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

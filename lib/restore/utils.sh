@@ -1,7 +1,8 @@
+#!/usr/bin/env bash
 
 # shellcheck disable=SC2034
 
-readonly WORKFLOW_COUNT_FILTER=$(cat <<'JQ'
+WORKFLOW_COUNT_FILTER=$(cat <<'JQ'
 def to_array:
     if type == "array" then .
     elif type == "object" then
@@ -20,6 +21,7 @@ to_array
 | length
 JQ
 )
+readonly WORKFLOW_COUNT_FILTER
 
 capture_existing_workflow_snapshot() {
     local container_id="$1"

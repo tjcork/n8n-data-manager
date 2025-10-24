@@ -13,7 +13,7 @@ get_workflow_folder_path() {
     workflow_dir=$(dirname "$workflow_file")
     
     # Make relative to repo root
-    local relative_path="${workflow_dir#${repo_root}/}"
+    local relative_path="${workflow_dir#"${repo_root}/"}"
     
     # Handle case where file is at repo root
     if [[ "$relative_path" == "$workflow_dir" ]] || [[ "$relative_path" == "." ]]; then
@@ -84,9 +84,6 @@ create_folder_path() {
     existing_id=$(get_folder_id "$project_id" "$folder_path")
     
     # Debug: Show cache lookup details
-    local lookup_key
-    lookup_key=$(_build_folder_cache_key "$project_id" "$folder_path")
-        
     if [[ -n "$existing_id" ]]; then
         log DEBUG "Folder '$folder_path' already exists (ID: $existing_id), reusing"
         CREATE_FOLDER_LAST_ID="$existing_id"
@@ -149,6 +146,7 @@ create_folder_path() {
             fi
             log DEBUG "Cache now tracks ${#N8N_FOLDERS[@]} folder path(s)"
             if [[ -n "$parent_id" ]]; then
+                # shellcheck disable=SC2034 # Maintain parent relationships for state module consumers
                 N8N_FOLDER_PARENTS["$folder_id"]="$parent_id"
             fi
         else
@@ -188,7 +186,7 @@ assign_workflow_to_folder() {
     
     # Skip if already assigned correctly
     if [[ "$current_folder_id" == "$folder_id" && "$current_project_id" == "$project_id" ]]; then
-        if [[ "$verbose" == "true" ]]; then
+        if [[ "${verbose:-false}" == "true" ]]; then
             log DEBUG "Workflow $workflow_id already assigned correctly"
         fi
         if [[ -z "$current_version_id" && "$is_dry_run" != "true" ]]; then
@@ -338,7 +336,7 @@ sync_directory_structure() {
                     "$project_id" "" "root" "success" "at repository root"
             fi
             
-            if [[ "$verbose" == "true" ]]; then
+            if [[ "${verbose:-false}" == "true" ]]; then
                 log DEBUG "Workflow '$workflow_name' at root (no folder assignment needed)"
             fi
             assigned=$((assigned + 1))
@@ -392,7 +390,7 @@ sync_directory_structure() {
     
     # Summary
     log INFO "Folder sync complete: processed=$processed, assigned=$assigned, skipped=$skipped, failed=$failed"
-    if [[ "$verbose" == "true" ]]; then
+    if [[ "${verbose:-false}" == "true" ]]; then
         log DEBUG "Folder metrics — created: $RESTORE_FOLDERS_CREATED, moved: $RESTORE_FOLDERS_MOVED, workflows reassigned: $RESTORE_WORKFLOWS_REASSIGNED"
     fi
 
@@ -415,6 +413,7 @@ sync_directory_structure() {
 # Returns: 0 on success, 1 on failure
 apply_folder_structure_from_directory() {
     local source_dir="$1"
+    # shellcheck disable=SC2034 # Reserved for future container operations when applying folder structure
     local container_id="$2"
     local is_dry_run="$3"
     # local container_credentials_path="$4"  # unused
@@ -447,7 +446,7 @@ apply_folder_structure_from_directory() {
         # Do not treat synthetic dry-run data as initialized state for future real operations
         RESTORE_N8N_STATE_INITIALIZED="false"
     elif [[ "${RESTORE_N8N_STATE_INITIALIZED:-false}" == "true" ]]; then
-        if [[ "$verbose" == "true" ]]; then
+        if [[ "${verbose:-false}" == "true" ]]; then
             log DEBUG "Reusing cached n8n state (projects: ${#N8N_PROJECTS[@]}, folders: ${#N8N_FOLDERS[@]}, workflows: ${#N8N_WORKFLOWS[@]})"
         else
             log DEBUG "Reusing cached n8n state"

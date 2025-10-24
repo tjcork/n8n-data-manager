@@ -7,6 +7,7 @@ declare -g -A N8N_FOLDERS=()               # ["project_id/folder/path"]="folder_
 declare -g -A N8N_FOLDER_PARENTS=()        # ["folder_id"]="parent_folder_id"
 declare -g -A N8N_WORKFLOWS=()             # ["workflow_id"]="folder_id|project_id|version_id"
 declare -g N8N_DEFAULT_PROJECT_ID=""
+# shellcheck disable=SC2034 # Exported for restore pipeline state checks
 declare -g RESTORE_N8N_STATE_INITIALIZED="false"
 
 invalidate_n8n_state_cache() {
@@ -69,9 +70,12 @@ _build_folder_cache_key() {
 }
 
 set_folder_cache_entry() {
-    local project_id="$(_sanitize_cache_text "${1:-}")"
-    local folder_path="$(_normalize_folder_path "${2:-}")"
-    local folder_id="$(_sanitize_cache_text "${3:-}")"
+    local project_id
+    project_id=$(_sanitize_cache_text "${1:-}")
+    local folder_path
+    folder_path=$(_normalize_folder_path "${2:-}")
+    local folder_id
+    folder_id=$(_sanitize_cache_text "${3:-}")
 
     [[ -z "$folder_id" ]] && return 0
 
@@ -79,7 +83,7 @@ set_folder_cache_entry() {
     cache_key=$(_build_folder_cache_key "$project_id" "$folder_path")
     N8N_FOLDERS["$cache_key"]="$folder_id"
 
-    if [[ "$verbose" == "true" ]]; then
+    if [[ "${verbose:-false}" == "true" ]]; then
         local log_message
         if [[ -z "$folder_path" ]]; then
             printf -v log_message 'Cached folder mapping: project=%s (root) → %s' "${project_id:-<none>}" "$folder_id"
@@ -91,10 +95,14 @@ set_folder_cache_entry() {
 }
 
 set_workflow_assignment_state() {
-    local workflow_id="$(_sanitize_cache_text "${1:-}")"
-    local folder_id="$(_sanitize_cache_text "${2:-}")"
-    local project_id="$(_sanitize_cache_text "${3:-}")"
-    local version_id="$(_sanitize_cache_text "${4:-}")"
+    local workflow_id
+    workflow_id=$(_sanitize_cache_text "${1:-}")
+    local folder_id
+    folder_id=$(_sanitize_cache_text "${2:-}")
+    local project_id
+    project_id=$(_sanitize_cache_text "${3:-}")
+    local version_id
+    version_id=$(_sanitize_cache_text "${4:-}")
 
     [[ -z "$workflow_id" ]] && return 0
 
@@ -103,7 +111,7 @@ set_workflow_assignment_state() {
 
 debug_dump_folder_cache() {
     local context="${1:-}"
-    [[ "$verbose" != "true" ]] && return 0
+    [[ "${verbose:-false}" != "true" ]] && return 0
 
     local total=${#N8N_FOLDERS[@]}
     local context_label=""
@@ -112,12 +120,14 @@ debug_dump_folder_cache() {
     fi
 
     if (( total == 0 )); then
+        log DEBUG "Folder cache empty${context_label}"
         return 0
     fi
 
+    log DEBUG "Folder cache entries${context_label}:"
     local shown=0
     for __folder_cache_key in "${!N8N_FOLDERS[@]}"; do
-    log DEBUG "    ${__folder_cache_key:-<project-root>} → ${N8N_FOLDERS[$__folder_cache_key]}"
+        log DEBUG "    ${__folder_cache_key:-<project-root>} → ${N8N_FOLDERS[$__folder_cache_key]}"
         shown=$((shown + 1))
         if (( shown >= 10 )); then
             break
@@ -391,6 +401,7 @@ load_n8n_state() {
     fi
     
     log SUCCESS "n8n workspace state ready"
+    # shellcheck disable=SC2034 # Exported for downstream restore steps
     RESTORE_N8N_STATE_INITIALIZED="true"
     return 0
 }

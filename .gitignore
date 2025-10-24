@@ -1,15 +1,10 @@
 # Local development environment
 local-dev/
-.windsurfrules
-.windsurf/workflows
-*windsurf/*
-.windsurf/workflows/n8n-manager-shell-script-project-knowledge.md
-.github/workflows/job-logs.txt
-.github/test/workflows
 test.logs
 
 # Local configuration file (project-specific)
 .config
+.env
 
 !readme.md
 *.md

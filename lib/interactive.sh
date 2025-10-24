@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # =========================================================
-# lib/interactive.sh - Interactive UI functions for n8n-manager
+# lib/interactive.sh - Interactive UI functions for n8n-push
 # =========================================================
 # All interactive user interface functions: selection menus,
 # configuration prompts, and user interaction handling
 
 # Source common utilities
+# shellcheck disable=SC1091  # common utilities resolved relative to this module
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 show_config_summary() {
@@ -118,7 +119,7 @@ show_help() {
 Usage: $(basename "$0") [OPTIONS]
 
 Automated backup and restore tool for n8n Docker containers using GitHub.
-Reads configuration from local 'config' file, then ~/.config/n8n-manager/config if it exists.
+Reads configuration from local 'config' file, then ~/.config/n8n-push/config if it exists.
 
 Options:
   --action <action>       Action to perform: 'backup', 'restore', or 'configure'.
@@ -139,6 +140,8 @@ Options:
   --n8n-url <url>         n8n instance URL (e.g., 'http://localhost:5678').
   --n8n-api-key <key>     n8n API key for folder structure access.
   --n8n-cred <name>       n8n credential name providing Basic Auth for session login when API key is absent.
+    --n8n-email <email>     Direct login email for session authentication (fallback when no credential is available).
+    --n8n-password <pass>   Direct login password for session authentication (fallback when no credential is available).
   --preserve              Force reuse of workflow IDs when restoring structured exports (default: false; otherwise IDs are reused only when safe).
   --no-overwrite          Force new workflow IDs on import (clears IDs even if --preserve is set).
   --dry-run               Simulate the action without making any changes.
@@ -150,7 +153,7 @@ Options:
 
 Configuration Files (checked in order):
   1. ./.config (local, project-specific)
-  2. ~/.config/n8n-manager/config (user-specific)
+  2. ~/.config/n8n-push/config (user-specific)
   3. Custom path via --config option
 
 Run with action 'configure' to deploy or update the configuration file interactively.
@@ -186,11 +189,9 @@ select_container() {
         IFS=$'\t' read -r id name image <<< "$container_info"
         local short_id=${id:0:12}
         all_ids+=("$id")
-        local display_name="$name"
-        local is_default=false
+    local display_name="$name"
 
         if [ -n "$default_container" ] && { [ "$id" = "$default_container" ] || [ "$name" = "$default_container" ]; }; then
-            is_default=true
             default_option_num=$i
             display_name="${display_name} ${YELLOW}(default)${NC}"
         fi
@@ -218,18 +219,20 @@ select_container() {
     prompt_text+=": "
 
     while true; do
-        printf "$prompt_text"
+    printf '%s' "$prompt_text"
         read -r selection
         selection=${selection:-$default_option_num}
 
         if [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -ge 1 ] && [ "$selection" -le ${#containers[@]} ]; then
             local selected_full_id="${all_ids[$((selection-1))]}"
             log SUCCESS "Selected container: $selected_full_id"
+            # shellcheck disable=SC2034  # exported for caller consumption
             SELECTED_CONTAINER_ID="$selected_full_id"
             return
         elif [ -z "$selection" ] && [ "$default_option_num" -ne -1 ]; then
              local selected_full_id="${all_ids[$((default_option_num-1))]}"
              log SUCCESS "Selected container (default): $selected_full_id"
+             # shellcheck disable=SC2034  # exported for caller consumption
              SELECTED_CONTAINER_ID="$selected_full_id"
              return
         else
@@ -251,7 +254,8 @@ select_action() {
     while true; do
         printf "\nSelect an option (1-5): "
         read -r choice
-        case "$choice" in
+    # shellcheck disable=SC2034  # exported selection consumed by caller
+    case "$choice" in
             1) SELECTED_ACTION="backup"; return ;; 
             2) SELECTED_ACTION="restore"; return ;;
             3) SELECTED_ACTION="configure"; return ;;
@@ -314,10 +318,13 @@ select_restore_type() {
     RESTORE_CREDENTIALS_MODE="$credentials_choice"
 
     if [[ "$RESTORE_WORKFLOWS_MODE" != "0" && "$RESTORE_CREDENTIALS_MODE" != "0" ]]; then
+        # shellcheck disable=SC2034  # surfaced to caller scripts
         SELECTED_RESTORE_TYPE="all"
     elif [[ "$RESTORE_WORKFLOWS_MODE" != "0" ]]; then
+        # shellcheck disable=SC2034  # surfaced to caller scripts
         SELECTED_RESTORE_TYPE="workflows"
     else
+        # shellcheck disable=SC2034  # surfaced to caller scripts
         SELECTED_RESTORE_TYPE="credentials"
     fi
 
@@ -332,7 +339,7 @@ select_restore_type() {
         RESTORE_APPLY_FOLDER_STRUCTURE="skip"
     fi
 
-    log INFO "Selected restore configuration: Workflows=($RESTORE_WORKFLOWS_MODE) $(format_storage_value $RESTORE_WORKFLOWS_MODE), Credentials=($RESTORE_CREDENTIALS_MODE) $(format_storage_value $RESTORE_CREDENTIALS_MODE)"
+    log INFO "Selected restore configuration: Workflows=($RESTORE_WORKFLOWS_MODE) $(format_storage_value "$RESTORE_WORKFLOWS_MODE"), Credentials=($RESTORE_CREDENTIALS_MODE) $(format_storage_value "$RESTORE_CREDENTIALS_MODE")"
 }
 
 select_credential_source() {
@@ -381,6 +388,9 @@ show_restore_plan() {
     local credentials_mode="${5:-${RESTORE_CREDENTIALS_MODE:-1}}"
 
     log HEADER "📋 Restore Plan"
+    if [[ -n "${restore_scope:-}" ]]; then
+        log INFO "Scope: ${restore_scope}"
+    fi
     if [[ -n "$github_repo" ]]; then
         log INFO "Repository: $github_repo (branch: $branch)"
     fi
@@ -411,7 +421,7 @@ get_github_config() {
     # Re-ask for token if not set or in reconfigure mode
     while [[ -z "$local_token" ]] || [[ "$reconfigure_mode" == "true" ]]; do
         printf "Enter GitHub Personal Access Token (PAT): "
-        read -s local_token
+    read -r -s local_token
         echo
         if [ -z "$local_token" ]; then 
             log ERROR "GitHub token is required."
@@ -518,7 +528,7 @@ prompt_local_backup_settings() {
         has_local_storage=true
     fi
 
-    if [[ "$has_local_storage" == true ]] && ([[ "$local_backup_path_source" == "default" ]] || [[ "$force_reprompt" == "true" ]]); then
+    if [[ "$has_local_storage" == true ]] && { [[ "$local_backup_path_source" == "default" ]] || [[ "$force_reprompt" == "true" ]]; }; then
         printf "Local backup directory [%s]: " "$local_backup_path"
         local backup_input
         read -r backup_input
@@ -531,7 +541,7 @@ prompt_local_backup_settings() {
         fi
     fi
 
-    if [[ "$has_local_storage" == true ]] && ([[ "$local_rotation_limit_source" == "default" ]] || [[ "$force_reprompt" == "true" ]]); then
+    if [[ "$has_local_storage" == true ]] && { [[ "$local_rotation_limit_source" == "default" ]] || [[ "$force_reprompt" == "true" ]]; }; then
         while true; do
             printf "Local backup rotation limit [%s]: " "$local_rotation_limit"
             local rotation_input
@@ -552,7 +562,7 @@ prompt_credentials_encryption() {
     if [[ "$credentials" == "0" ]]; then
         return
     fi
-    if [[ "$assume_defaults" == "true" && "$force_reprompt" != "true" ]]; then
+    if [[ "${assume_defaults:-false}" == "true" && "$force_reprompt" != "true" ]]; then
         return
     fi
     if [[ "$credentials_encrypted_source" != "default" && "$force_reprompt" != "true" ]]; then
@@ -745,7 +755,7 @@ write_config_file() {
     fi
 
     local -a lines
-    lines+=("# Generated by n8n-manager configuration wizard on $(date -u +%Y-%m-%dT%H:%M:%SZ)")
+    lines+=("# Generated by n8n-push configuration wizard on $(date -u +%Y-%m-%dT%H:%M:%SZ)")
     lines+=("# Location: $destination_path")
     lines+=("")
 
@@ -919,7 +929,7 @@ select_config_destination() {
 }
 
 run_configuration_wizard() {
-    log HEADER "n8n-manager configuration wizard"
+    log HEADER "n8n-push configuration wizard"
     select_config_destination
     log INFO "This will create or update your configuration at $CONFIG_WIZARD_TARGET"
 
@@ -1076,7 +1086,7 @@ prompt_github_path_prefix() {
             elif [[ "${n8n_path_source:-default}" != "default" && "${n8n_path_source:-unset}" != "unset" ]]; then
                 path_prefix="/"
             else
-                path_prefix="$project_slug"
+                path_prefix="${project_slug:-}"
             fi
         else
             path_prefix="$effective_prefix"

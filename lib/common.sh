@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
 # =========================================================
-# lib/common.sh - Common utilities for n8n-manager
+# lib/common.sh - Common utilities for n8n-push
 # =========================================================
 # Core utilities: logging, configuration, dependencies, Git helpers
-# Used by all other modules in the n8n-manager system
+# Used by all other modules in the n8n-push system
 
 set -Eeuo pipefail
 IFS=$'\n\t'
 
 # --- Global variables ---
-VERSION="4.0.0"
+: "${PROJECT_NAME:=n8n push}"
+export PROJECT_NAME
+: "${VERSION:=1.0.0}"
+export VERSION
 DEBUG_TRACE=${DEBUG_TRACE:-false} # Set to true for trace debugging
 
-git_commit_name=""
-git_commit_email=""
+git_commit_name="${git_commit_name:-}"
+git_commit_email="${git_commit_email:-}"
 
 # Default location for storing credentials inside Git repositories
 : "${credentials_folder_name:=.credentials}"
@@ -169,7 +172,9 @@ log() {
     
     # Format message
     local formatted="${color}${prefix} ${message}${NC}"
-    local plain="$(date +'%Y-%m-%d %H:%M:%S') ${prefix} ${message}"
+    local timestamp
+    timestamp="$(date +'%Y-%m-%d %H:%M:%S')"
+    local plain="${timestamp} ${prefix} ${message}"
     
     # Output
     if [ "$to_stderr" = "true" ]; then
@@ -323,7 +328,7 @@ strip_project_prefix_from_path() {
             return
         fi
         if [[ "$trimmed" == "$project_slug"/* ]]; then
-            printf '%s\n' "${trimmed#${project_slug}/}"
+            printf '%s\n' "${trimmed#"${project_slug}/"}"
             return
         fi
     fi
@@ -468,7 +473,7 @@ strip_github_path_prefix() {
     fi
 
     if [[ "$normalized" == "$prefix"/* ]]; then
-        local remainder="${normalized#${prefix}/}"
+        local remainder="${normalized#"${prefix}/"}"
         printf '%s\n' "$remainder"
         return
     fi
@@ -518,6 +523,80 @@ resolve_github_storage_root() {
     printf '%s/%s\n' "$normalized_base" "$prefix"
 }
 
+native_path_for_host_tools() {
+    local original_path="${1:-}"
+
+    if [[ -z "$original_path" ]]; then
+        printf '%s' ""
+        return 0
+    fi
+
+    case "${OSTYPE:-}" in
+        msys*|cygwin*|mingw*)
+            if command -v cygpath >/dev/null 2>&1; then
+                cygpath -m "$original_path"
+                return 0
+            fi
+            ;;
+    esac
+
+    printf '%s' "$original_path"
+    return 0
+}
+
+posix_path_for_host_shell() {
+    local original_path="${1:-}"
+
+    if [[ -z "$original_path" ]]; then
+        printf '%s' ""
+        return 0
+    fi
+
+    case "${OSTYPE:-}" in
+        msys*|cygwin*|mingw*)
+            if command -v cygpath >/dev/null 2>&1; then
+                cygpath -u "$original_path"
+                return 0
+            fi
+            ;;
+    esac
+
+    printf '%s' "$original_path"
+    return 0
+}
+
+initialize_host_temp_root() {
+    local configured_tmp="${TMPDIR:-}"
+    local default_tmp="/tmp"
+
+    if [[ -z "$configured_tmp" ]]; then
+        configured_tmp="$default_tmp"
+    fi
+
+    local native_tmp
+    native_tmp="$(native_path_for_host_tools "$configured_tmp")"
+    if [[ -z "$native_tmp" ]]; then
+        native_tmp="$configured_tmp"
+    fi
+
+    if [[ ! -d "$native_tmp" ]]; then
+        mkdir -p "$native_tmp" 2>/dev/null || true
+    fi
+
+    HOST_TEMP_ROOT_NATIVE="$native_tmp"
+    HOST_TEMP_ROOT_POSIX="$(posix_path_for_host_shell "$native_tmp")"
+
+    if [[ -z "$HOST_TEMP_ROOT_POSIX" ]]; then
+        HOST_TEMP_ROOT_POSIX="$configured_tmp"
+    fi
+
+    export HOST_TEMP_ROOT_NATIVE
+    export HOST_TEMP_ROOT_POSIX
+    export TMPDIR="$native_tmp"
+}
+
+initialize_host_temp_root
+
 # --- Helper Functions (using new log function) ---
 
 command_exists() {
@@ -551,365 +630,375 @@ check_host_dependencies() {
 load_config() {
     local file_to_load=""
     local config_found=false
-    
-    # Priority: explicit config → local config → user config
-    if [[ -n "$config_file" ]]; then
-        file_to_load="$config_file"
-    elif [[ -f "$LOCAL_CONFIG_FILE" ]]; then
-        file_to_load="$LOCAL_CONFIG_FILE"
-    elif [[ -f "$USER_CONFIG_FILE" ]]; then
-        file_to_load="$USER_CONFIG_FILE"
-    fi
-    
-    # Expand tilde if present
-    if [[ -n "$file_to_load" ]]; then
-        file_to_load="${file_to_load/#\~/$HOME}"
+    local skip_config=false
+
+    if [[ "$(normalize_boolean_option "${assume_defaults:-false}")" == "true" && -z "${config_file:-}" ]]; then
+        skip_config=true
+        log DEBUG "Assume defaults requested; skipping configuration file loading."
     fi
 
-    # Load configuration file if it exists
-    if [[ -f "$file_to_load" ]]; then
-        config_found=true
-        log INFO "Loading configuration from: $file_to_load"
-        
-        # Source the config file safely (normalize CRLF and filter out comments and empty lines)
-        if ! source <(tr -d '\r' < "$file_to_load" | grep -vE '^\s*(#|$)' 2>/dev/null || true); then
-            log ERROR "Failed to load configuration from: $file_to_load"
-            return 1
+    if ! $skip_config; then
+        # Priority: explicit config → local config → user config
+        if [[ -n "$config_file" ]]; then
+            file_to_load="$config_file"
+        elif [[ -f "$LOCAL_CONFIG_FILE" ]]; then
+            file_to_load="$LOCAL_CONFIG_FILE"
+        elif [[ -f "$USER_CONFIG_FILE" ]]; then
+            file_to_load="$USER_CONFIG_FILE"
         fi
-        
-        # === GITHUB SETTINGS ===
-        # Apply config values to global variables (use config file values if runtime vars not set)
-        if [[ -z "$github_token" && -n "${GITHUB_TOKEN:-}" ]]; then
-            github_token="$GITHUB_TOKEN"
+
+        # Expand tilde if present
+        if [[ -n "$file_to_load" ]]; then
+            file_to_load="${file_to_load/#\~/$HOME}"
         fi
-        
-        if [[ -z "$github_repo" && -n "${GITHUB_REPO:-}" ]]; then
-            github_repo="$GITHUB_REPO"
-        fi
-        
-        if [[ -z "$github_branch" && -n "${GITHUB_BRANCH:-}" ]]; then
-            github_branch="$GITHUB_BRANCH"
+
+        if [[ -n "$file_to_load" && -f "$file_to_load" ]]; then
+            config_found=true
+            log INFO "Loading configuration from: $file_to_load"
+
+            # Source the config file safely (normalize CRLF and filter out comments and empty lines)
+            # shellcheck disable=SC1090  # dynamic config path sanitized above
+            if ! source <(tr -d '\r' < "$file_to_load" | grep -vE '^\s*(#|$)' 2>/dev/null || true); then
+                log ERROR "Failed to load configuration from: $file_to_load"
+                return 1
+            fi
+        elif [[ -n "$config_file" ]]; then
+            log WARN "Configuration file specified but not found: '$config_file'"
         else
-            github_branch="${github_branch:-main}"  # Set default if not configured anywhere
+            log DEBUG "No configuration file found. Checked: '$LOCAL_CONFIG_FILE' and '$USER_CONFIG_FILE'"
         fi
-        
-        # === CONTAINER SETTINGS ===
-        if [[ -z "$container" && -n "${DEFAULT_CONTAINER:-}" ]]; then
-            container="$DEFAULT_CONTAINER"
-        fi
-        
-        # Keep reference to default container from config
-        if [[ -n "${DEFAULT_CONTAINER:-}" ]]; then
-            default_container="$DEFAULT_CONTAINER"
-        fi
-        
-        # === STORAGE SETTINGS ===
-        # Handle workflows storage with flexible input (numeric or descriptive)
-        if [[ -z "$workflows" && -n "${WORKFLOWS:-}" ]]; then
-            local workflows_config="$WORKFLOWS"
-            # Clean up the value - remove quotes and whitespace
-            workflows_config=$(echo "$workflows_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
-            
-            if [[ "$workflows_config" == "0" || "$workflows_config" == "disabled" ]]; then
-                workflows=0
-                workflows_source="config"
-            elif [[ "$workflows_config" == "1" || "$workflows_config" == "local" ]]; then
-                workflows=1
-                workflows_source="config"
-            elif [[ "$workflows_config" == "2" || "$workflows_config" == "remote" ]]; then
-                workflows=2
-                workflows_source="config"
-            else
-                log WARN "Invalid WORKFLOWS value in config: '$workflows_config'. Must be 0/disabled, 1/local, or 2/remote. Using default: 1 (local)"
-                workflows=1
-                workflows_source="default"
-            fi
-        fi
-        
-        # Handle credentials storage with flexible input (numeric or descriptive)
-        if [[ -z "$credentials" && -n "${CREDENTIALS:-}" ]]; then
-            local credentials_config="$CREDENTIALS"
-            # Clean up the value - remove quotes and whitespace
-            credentials_config=$(echo "$credentials_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
-            
-            if [[ "$credentials_config" == "0" || "$credentials_config" == "disabled" ]]; then
-                credentials=0
-                credentials_source="config"
-            elif [[ "$credentials_config" == "1" || "$credentials_config" == "local" ]]; then
-                credentials=1
-                credentials_source="config"
-            elif [[ "$credentials_config" == "2" || "$credentials_config" == "remote" ]]; then
-                credentials=2
-                credentials_source="config"
-            else
-                log WARN "Invalid CREDENTIALS value in config: '$credentials_config'. Must be 0/disabled, 1/local, or 2/remote. Using default: 1 (local)"
-                credentials=1
-                credentials_source="default"
-            fi
-        fi
-
-        # Handle environment storage with flexible input (numeric or descriptive)
-        if [[ -z "$environment" && -n "${ENVIRONMENT:-}" ]]; then
-            local environment_config="$ENVIRONMENT"
-            environment_config=$(echo "$environment_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
-
-            if [[ "$environment_config" == "0" || "$environment_config" == "disabled" ]]; then
-                environment=0
-                environment_source="config"
-            elif [[ "$environment_config" == "1" || "$environment_config" == "local" ]]; then
-                environment=1
-                environment_source="config"
-            elif [[ "$environment_config" == "2" || "$environment_config" == "remote" ]]; then
-                environment=2
-                environment_source="config"
-            else
-                log WARN "Invalid ENVIRONMENT value in config: '$environment_config'. Must be 0/disabled, 1/local, or 2/remote. Using default: 0 (disabled)"
-                environment=0
-                environment_source="default"
-            fi
-        fi
-        
-        # === BOOLEAN SETTINGS ===
-        # Handle dated_backups boolean config
-        if [[ -z "$dated_backups" && -n "${DATED_BACKUPS:-}" ]]; then
-            local dated_backups_config="$DATED_BACKUPS"
-            # Clean up the value - remove quotes and whitespace
-            dated_backups_config=$(echo "$dated_backups_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
-            if [[ "$dated_backups_config" == "true" || "$dated_backups_config" == "1" || "$dated_backups_config" == "yes" || "$dated_backups_config" == "on" ]]; then
-                dated_backups=true
-                dated_backups_source="config"
-            elif [[ "$dated_backups_config" == "false" || "$dated_backups_config" == "0" || "$dated_backups_config" == "no" || "$dated_backups_config" == "off" ]]; then
-                dated_backups=false
-                dated_backups_source="config"
-            else
-                log WARN "Invalid DATED_BACKUPS value in config: '$dated_backups_config'. Must be true/false. Using default: false"
-                dated_backups=false
-                dated_backups_source="default"
-            fi
-        fi
-        
-        # Handle folder_structure boolean config
-        if [[ -z "$folder_structure" && -n "${FOLDER_STRUCTURE:-}" ]]; then
-            local folder_structure_config="$FOLDER_STRUCTURE"
-            # Clean up the value - remove quotes and whitespace
-            folder_structure_config=$(echo "$folder_structure_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
-            if [[ "$folder_structure_config" == "true" || "$folder_structure_config" == "1" || "$folder_structure_config" == "yes" || "$folder_structure_config" == "on" ]]; then
-                folder_structure=true
-                folder_structure_source="config"
-            elif [[ "$folder_structure_config" == "false" || "$folder_structure_config" == "0" || "$folder_structure_config" == "no" || "$folder_structure_config" == "off" ]]; then
-                folder_structure=false
-                folder_structure_source="config"
-            else
-                log WARN "Invalid FOLDER_STRUCTURE value in config: '$folder_structure_config'. Must be true/false. Using default: false"
-                folder_structure=false
-                folder_structure_source="default"
-            fi
-        fi
-        
-        # Handle verbose boolean config
-        if [[ -z "$verbose" && -n "${VERBOSE:-}" ]]; then
-            local verbose_config="$VERBOSE"
-            # Clean up the value - remove quotes and whitespace
-            verbose_config=$(echo "$verbose_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
-            if [[ "$verbose_config" == "true" || "$verbose_config" == "1" || "$verbose_config" == "yes" || "$verbose_config" == "on" ]]; then
-                verbose=true
-            elif [[ "$verbose_config" == "false" || "$verbose_config" == "0" || "$verbose_config" == "no" || "$verbose_config" == "off" ]]; then
-                verbose=false
-            else
-                log WARN "Invalid VERBOSE value in config: '$verbose_config'. Must be true/false. Using default: false"
-                verbose=false
-            fi
-        fi
-
-        # Handle restore preserve ID toggle
-        if [[ -z "$restore_preserve_ids" && -n "${RESTORE_PRESERVE_ID:-}" ]]; then
-            local preserve_cfg="$RESTORE_PRESERVE_ID"
-            preserve_cfg=$(echo "$preserve_cfg" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
-            if [[ "$preserve_cfg" == "true" || "$preserve_cfg" == "1" || "$preserve_cfg" == "yes" || "$preserve_cfg" == "on" ]]; then
-                restore_preserve_ids=true
-                restore_preserve_ids_source="config"
-            elif [[ "$preserve_cfg" == "false" || "$preserve_cfg" == "0" || "$preserve_cfg" == "no" || "$preserve_cfg" == "off" ]]; then
-                restore_preserve_ids=false
-                restore_preserve_ids_source="config"
-            else
-                log WARN "Invalid RESTORE_PRESERVE_ID value in config: '$preserve_cfg'. Must be true/false. Using default: false"
-                restore_preserve_ids=false
-                restore_preserve_ids_source="default"
-            fi
-        fi
-
-        if [[ -z "$restore_no_overwrite" && -n "${RESTORE_NO_OVERWRITE:-}" ]]; then
-            local no_overwrite_cfg="$RESTORE_NO_OVERWRITE"
-            no_overwrite_cfg=$(echo "$no_overwrite_cfg" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
-            if [[ "$no_overwrite_cfg" == "true" || "$no_overwrite_cfg" == "1" || "$no_overwrite_cfg" == "yes" || "$no_overwrite_cfg" == "on" ]]; then
-                restore_no_overwrite=true
-                restore_no_overwrite_source="config"
-            elif [[ "$no_overwrite_cfg" == "false" || "$no_overwrite_cfg" == "0" || "$no_overwrite_cfg" == "no" || "$no_overwrite_cfg" == "off" ]]; then
-                restore_no_overwrite=false
-                restore_no_overwrite_source="config"
-            else
-                log WARN "Invalid RESTORE_NO_OVERWRITE value in config: '$no_overwrite_cfg'. Must be true/false. Using default: false"
-                restore_no_overwrite=false
-                restore_no_overwrite_source="default"
-            fi
-        fi
-        
-        # Handle dry_run boolean config
-        if [[ -z "$dry_run" && -n "${DRY_RUN:-}" ]]; then
-            local dry_run_config="$DRY_RUN"
-            # Clean up the value - remove quotes and whitespace
-            dry_run_config=$(echo "$dry_run_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
-            if [[ "$dry_run_config" == "true" || "$dry_run_config" == "1" || "$dry_run_config" == "yes" || "$dry_run_config" == "on" ]]; then
-                dry_run=true
-                dry_run_source="config"
-            elif [[ "$dry_run_config" == "false" || "$dry_run_config" == "0" || "$dry_run_config" == "no" || "$dry_run_config" == "off" ]]; then
-                dry_run=false
-                dry_run_source="config"
-            else
-                log WARN "Invalid DRY_RUN value in config: '$dry_run_config'. Must be true/false. Using default: false"
-                dry_run=false
-                dry_run_source="default"
-            fi
-        fi
-
-        # Handle credentials_encrypted boolean config (loaded from DECRYPT_CREDENTIALS with inverted logic)
-        if [[ -z "$credentials_encrypted" && -n "${DECRYPT_CREDENTIALS:-}" ]]; then
-            local decrypt_credentials_config="$DECRYPT_CREDENTIALS"
-            decrypt_credentials_config=$(echo "$decrypt_credentials_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
-            if [[ "$decrypt_credentials_config" == "true" || "$decrypt_credentials_config" == "1" || "$decrypt_credentials_config" == "yes" || "$decrypt_credentials_config" == "on" ]]; then
-                credentials_encrypted=false
-                credentials_encrypted_source="config"
-            elif [[ "$decrypt_credentials_config" == "false" || "$decrypt_credentials_config" == "0" || "$decrypt_credentials_config" == "no" || "$decrypt_credentials_config" == "off" ]]; then
-                credentials_encrypted=true
-                credentials_encrypted_source="config"
-            else
-                log WARN "Invalid DECRYPT_CREDENTIALS value in config: '$decrypt_credentials_config'. Must be true/false. Using default: false (encrypted)"
-                credentials_encrypted=true
-                credentials_encrypted_source="default"
-            fi
-        fi
-
-        if [[ -z "$assume_defaults" && -n "${ASSUME_DEFAULTS:-}" ]]; then
-            local assume_defaults_config="$ASSUME_DEFAULTS"
-            assume_defaults_config=$(echo "$assume_defaults_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
-            if [[ "$assume_defaults_config" == "true" || "$assume_defaults_config" == "1" || "$assume_defaults_config" == "yes" || "$assume_defaults_config" == "on" ]]; then
-                assume_defaults=true
-                assume_defaults_source="config"
-            elif [[ "$assume_defaults_config" == "false" || "$assume_defaults_config" == "0" || "$assume_defaults_config" == "no" || "$assume_defaults_config" == "off" ]]; then
-                assume_defaults=false
-                assume_defaults_source="config"
-            else
-                log WARN "Invalid ASSUME_DEFAULTS value in config: '$assume_defaults_config'. Must be true/false. Using default: false"
-                assume_defaults=false
-                assume_defaults_source="default"
-            fi
-        fi
-
-        # Handle alternate credentials folder name for Git backups/restores
-        if [[ -n "${CREDENTIALS_FOLDER_NAME:-}" ]]; then
-            local credentials_folder_config="$CREDENTIALS_FOLDER_NAME"
-            credentials_folder_config=$(echo "$credentials_folder_config" | tr -d '"\047' | xargs)
-            credentials_folder_config="${credentials_folder_config%%/}"
-            if [[ -z "$credentials_folder_config" ]]; then
-                log WARN "CREDENTIALS_FOLDER_NAME in config is empty after normalization. Using default: .credentials"
-                credentials_folder_name=".credentials"
-            else
-                credentials_folder_name="$credentials_folder_config"
-                log DEBUG "Using configured credentials folder: $credentials_folder_name"
-            fi
-        fi
-        
-        # === PATH SETTINGS ===
-        if [[ -z "$local_backup_path" && -n "${LOCAL_BACKUP_PATH:-}" ]]; then
-            local_backup_path="$LOCAL_BACKUP_PATH"
-            local_backup_path_source="config"
-        fi
-        
-        if [[ -z "$local_rotation_limit" && -n "${LOCAL_ROTATION_LIMIT:-}" ]]; then
-            local_rotation_limit="$LOCAL_ROTATION_LIMIT"
-            local_rotation_limit_source="config"
-        fi
-
-        if [[ -z "$github_path" && -n "${GITHUB_PATH:-}" ]]; then
-            local raw_github_path="$GITHUB_PATH"
-            local normalized_github_path
-            normalized_github_path="$(normalize_github_path_prefix "$raw_github_path")"
-            if [[ -z "$normalized_github_path" ]]; then
-                if [[ -n "$raw_github_path" ]]; then
-                    log WARN "Configured GITHUB_PATH '$raw_github_path' contained no usable characters after normalization; ignoring."
-                fi
-                github_path=""
-            else
-                if [[ "$normalized_github_path" != "${raw_github_path#/}" && "$verbose" == "true" ]]; then
-                    log DEBUG "Normalized GITHUB_PATH from '$raw_github_path' to '$normalized_github_path'"
-                fi
-                github_path="$normalized_github_path"
-                github_path_source="config"
-            fi
-        fi
-
-        if [[ "${n8n_path_source:-unset}" == "unset" || "${n8n_path_source:-unset}" == "default" ]]; then
-            if [[ -n "${N8N_PATH:-}" ]]; then
-                set_n8n_path "$N8N_PATH" "config"
-            fi
-        fi
-
-        if [[ -n "${N8N_PROJECT:-}" ]]; then
-            if [[ -z "$project_name_source" || "$project_name_source" == "unset" || "$project_name_source" == "default" ]]; then
-                set_project_from_path "$N8N_PROJECT"
-                project_name_source="config"
-            fi
-        fi
-        
-        # === N8N API SETTINGS ===
-        if [[ -z "$n8n_base_url" && -n "${N8N_BASE_URL:-}" ]]; then
-            n8n_base_url="$N8N_BASE_URL"
-        fi
-        
-        if [[ -z "$n8n_api_key" && -n "${N8N_API_KEY:-}" ]]; then
-            n8n_api_key="$N8N_API_KEY"
-        fi
-
-        if [[ -z "$n8n_session_credential" ]]; then
-            if [[ -n "${N8N_LOGIN_CREDENTIAL_NAME:-}" ]]; then
-                n8n_session_credential="$N8N_LOGIN_CREDENTIAL_NAME"
-            elif [[ -n "${N8N_LOGIN_CREDENTIAL_NAME_NAME:-}" ]]; then
-                n8n_session_credential="$N8N_LOGIN_CREDENTIAL_NAME_NAME"
-            fi
-        fi
-
-        if [[ -z "$git_commit_name" && -n "${GIT_COMMIT_NAME:-}" ]]; then
-            git_commit_name="$GIT_COMMIT_NAME"
-        fi
-
-        if [[ -z "$git_commit_email" && -n "${GIT_COMMIT_EMAIL:-}" ]]; then
-            git_commit_email="$GIT_COMMIT_EMAIL"
-        fi
-
-        # Backward compatibility: allow direct email/password configuration if still provided
-        if [[ -z "$n8n_email" && -n "${N8N_EMAIL:-}" ]]; then
-            n8n_email="$N8N_EMAIL"
-        fi
-
-        if [[ -z "$n8n_password" && -n "${N8N_PASSWORD:-}" ]]; then
-            n8n_password="$N8N_PASSWORD"
-        fi
-        
-        # === OTHER SETTINGS ===
-        if [[ -z "$restore_type" && -n "${RESTORE_TYPE:-}" ]]; then
-            restore_type="$RESTORE_TYPE"
-        fi
-        
-        if [[ -z "$log_file" && -n "${LOG_FILE:-}" ]]; then
-            log_file="$LOG_FILE"
-        fi
-        
-    elif [[ -n "$config_file" ]]; then
-        log WARN "Configuration file specified but not found: '$config_file'"
-    else
-        log DEBUG "No configuration file found. Checked: '$LOCAL_CONFIG_FILE' and '$USER_CONFIG_FILE'"
     fi
-    
+
+    # === GITHUB SETTINGS ===
+    # Apply config values to global variables (use config file values if runtime vars not set)
+    if [[ -z "$github_token" && -n "${GITHUB_TOKEN:-}" ]]; then
+        github_token="$GITHUB_TOKEN"
+    fi
+
+    if [[ -z "$github_repo" && -n "${GITHUB_REPO:-}" ]]; then
+        github_repo="$GITHUB_REPO"
+    fi
+
+    if [[ -z "$github_branch" && -n "${GITHUB_BRANCH:-}" ]]; then
+        github_branch="$GITHUB_BRANCH"
+    else
+        github_branch="${github_branch:-main}"  # Set default if not configured anywhere
+    fi
+
+    # === CONTAINER SETTINGS ===
+    if [[ -z "$container" && -n "${DEFAULT_CONTAINER:-}" ]]; then
+        container="$DEFAULT_CONTAINER"
+    fi
+
+    # Keep reference to default container from config
+    if [[ -n "${DEFAULT_CONTAINER:-}" ]]; then
+        # shellcheck disable=SC2034  # exposed for other modules via sourcing
+        default_container="$DEFAULT_CONTAINER"
+    fi
+
+    # === STORAGE SETTINGS ===
+    # Handle workflows storage with flexible input (numeric or descriptive)
+    if [[ -z "$workflows" && -n "${WORKFLOWS:-}" ]]; then
+        local workflows_config="$WORKFLOWS"
+        # Clean up the value - remove quotes and whitespace
+        workflows_config=$(echo "$workflows_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
+
+        if [[ "$workflows_config" == "0" || "$workflows_config" == "disabled" ]]; then
+            workflows=0
+            workflows_source="config"
+        elif [[ "$workflows_config" == "1" || "$workflows_config" == "local" ]]; then
+            workflows=1
+            workflows_source="config"
+        elif [[ "$workflows_config" == "2" || "$workflows_config" == "remote" ]]; then
+            workflows=2
+            workflows_source="config"
+        else
+            log WARN "Invalid WORKFLOWS value in config: '$workflows_config'. Must be 0/disabled, 1/local, or 2/remote. Using default: 1 (local)"
+            workflows=1
+            workflows_source="default"
+        fi
+    fi
+
+    # Handle credentials storage with flexible input (numeric or descriptive)
+    if [[ -z "$credentials" && -n "${CREDENTIALS:-}" ]]; then
+        local credentials_config="$CREDENTIALS"
+        # Clean up the value - remove quotes and whitespace
+        credentials_config=$(echo "$credentials_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
+
+        if [[ "$credentials_config" == "0" || "$credentials_config" == "disabled" ]]; then
+            credentials=0
+            credentials_source="config"
+        elif [[ "$credentials_config" == "1" || "$credentials_config" == "local" ]]; then
+            credentials=1
+            credentials_source="config"
+        elif [[ "$credentials_config" == "2" || "$credentials_config" == "remote" ]]; then
+            credentials=2
+            credentials_source="config"
+        else
+            log WARN "Invalid CREDENTIALS value in config: '$credentials_config'. Must be 0/disabled, 1/local, or 2/remote. Using default: 1 (local)"
+            credentials=1
+            credentials_source="default"
+        fi
+    fi
+
+    # Handle environment storage with flexible input (numeric or descriptive)
+    if [[ -z "$environment" && -n "${ENVIRONMENT:-}" ]]; then
+        local environment_config="$ENVIRONMENT"
+        environment_config=$(echo "$environment_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
+
+        if [[ "$environment_config" == "0" || "$environment_config" == "disabled" ]]; then
+            environment=0
+            environment_source="config"
+        elif [[ "$environment_config" == "1" || "$environment_config" == "local" ]]; then
+            environment=1
+            environment_source="config"
+        elif [[ "$environment_config" == "2" || "$environment_config" == "remote" ]]; then
+            environment=2
+            environment_source="config"
+        else
+            log WARN "Invalid ENVIRONMENT value in config: '$environment_config'. Must be 0/disabled, 1/local, or 2/remote. Using default: 0 (disabled)"
+            environment=0
+            environment_source="default"
+        fi
+    fi
+
+    # === BOOLEAN SETTINGS ===
+    # Handle dated_backups boolean config
+    if [[ -z "$dated_backups" && -n "${DATED_BACKUPS:-}" ]]; then
+        local dated_backups_config="$DATED_BACKUPS"
+        # Clean up the value - remove quotes and whitespace
+        dated_backups_config=$(echo "$dated_backups_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
+        if [[ "$dated_backups_config" == "true" || "$dated_backups_config" == "1" || "$dated_backups_config" == "yes" || "$dated_backups_config" == "on" ]]; then
+            dated_backups=true
+            dated_backups_source="config"
+        elif [[ "$dated_backups_config" == "false" || "$dated_backups_config" == "0" || "$dated_backups_config" == "no" || "$dated_backups_config" == "off" ]]; then
+            dated_backups=false
+            dated_backups_source="config"
+        else
+            log WARN "Invalid DATED_BACKUPS value in config: '$dated_backups_config'. Must be true/false. Using default: false"
+            dated_backups=false
+            dated_backups_source="default"
+        fi
+    fi
+
+    # Handle folder_structure boolean config
+    if [[ -z "$folder_structure" && -n "${FOLDER_STRUCTURE:-}" ]]; then
+        local folder_structure_config="$FOLDER_STRUCTURE"
+        # Clean up the value - remove quotes and whitespace
+        folder_structure_config=$(echo "$folder_structure_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
+        if [[ "$folder_structure_config" == "true" || "$folder_structure_config" == "1" || "$folder_structure_config" == "yes" || "$folder_structure_config" == "on" ]]; then
+            folder_structure=true
+            folder_structure_source="config"
+        elif [[ "$folder_structure_config" == "false" || "$folder_structure_config" == "0" || "$folder_structure_config" == "no" || "$folder_structure_config" == "off" ]]; then
+            folder_structure=false
+            folder_structure_source="config"
+        else
+            log WARN "Invalid FOLDER_STRUCTURE value in config: '$folder_structure_config'. Must be true/false. Using default: false"
+            folder_structure=false
+            folder_structure_source="default"
+        fi
+    fi
+
+    # Handle verbose boolean config
+    if [[ -z "$verbose" && -n "${VERBOSE:-}" ]]; then
+        local verbose_config="$VERBOSE"
+        # Clean up the value - remove quotes and whitespace
+        verbose_config=$(echo "$verbose_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
+        if [[ "$verbose_config" == "true" || "$verbose_config" == "1" || "$verbose_config" == "yes" || "$verbose_config" == "on" ]]; then
+            verbose=true
+        elif [[ "$verbose_config" == "false" || "$verbose_config" == "0" || "$verbose_config" == "no" || "$verbose_config" == "off" ]]; then
+            verbose=false
+        else
+            log WARN "Invalid VERBOSE value in config: '$verbose_config'. Must be true/false. Using default: false"
+            verbose=false
+        fi
+    fi
+
+    # Handle restore preserve ID toggle
+    if [[ -z "$restore_preserve_ids" && -n "${RESTORE_PRESERVE_ID:-}" ]]; then
+        local preserve_cfg="$RESTORE_PRESERVE_ID"
+        preserve_cfg=$(echo "$preserve_cfg" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
+        if [[ "$preserve_cfg" == "true" || "$preserve_cfg" == "1" || "$preserve_cfg" == "yes" || "$preserve_cfg" == "on" ]]; then
+            restore_preserve_ids=true
+            restore_preserve_ids_source="config"
+        elif [[ "$preserve_cfg" == "false" || "$preserve_cfg" == "0" || "$preserve_cfg" == "no" || "$preserve_cfg" == "off" ]]; then
+            restore_preserve_ids=false
+            restore_preserve_ids_source="config"
+        else
+            log WARN "Invalid RESTORE_PRESERVE_ID value in config: '$preserve_cfg'. Must be true/false. Using default: false"
+            restore_preserve_ids=false
+            # shellcheck disable=SC2034  # tracked elsewhere for reporting
+            restore_preserve_ids_source="default"
+        fi
+    fi
+
+    if [[ -z "$restore_no_overwrite" && -n "${RESTORE_NO_OVERWRITE:-}" ]]; then
+        local no_overwrite_cfg="$RESTORE_NO_OVERWRITE"
+        no_overwrite_cfg=$(echo "$no_overwrite_cfg" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
+        if [[ "$no_overwrite_cfg" == "true" || "$no_overwrite_cfg" == "1" || "$no_overwrite_cfg" == "yes" || "$no_overwrite_cfg" == "on" ]]; then
+            restore_no_overwrite=true
+            restore_no_overwrite_source="config"
+        elif [[ "$no_overwrite_cfg" == "false" || "$no_overwrite_cfg" == "0" || "$no_overwrite_cfg" == "no" || "$no_overwrite_cfg" == "off" ]]; then
+            restore_no_overwrite=false
+            restore_no_overwrite_source="config"
+        else
+            log WARN "Invalid RESTORE_NO_OVERWRITE value in config: '$no_overwrite_cfg'. Must be true/false. Using default: false"
+            restore_no_overwrite=false
+            # shellcheck disable=SC2034  # tracked elsewhere for reporting
+            restore_no_overwrite_source="default"
+        fi
+    fi
+
+    # Handle dry_run boolean config
+    if [[ -z "$dry_run" && -n "${DRY_RUN:-}" ]]; then
+        local dry_run_config="$DRY_RUN"
+        # Clean up the value - remove quotes and whitespace
+        dry_run_config=$(echo "$dry_run_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
+        if [[ "$dry_run_config" == "true" || "$dry_run_config" == "1" || "$dry_run_config" == "yes" || "$dry_run_config" == "on" ]]; then
+            dry_run=true
+            dry_run_source="config"
+        elif [[ "$dry_run_config" == "false" || "$dry_run_config" == "0" || "$dry_run_config" == "no" || "$dry_run_config" == "off" ]]; then
+            dry_run=false
+            dry_run_source="config"
+        else
+            log WARN "Invalid DRY_RUN value in config: '$dry_run_config'. Must be true/false. Using default: false"
+            dry_run=false
+            dry_run_source="default"
+        fi
+    fi
+
+    # Handle credentials_encrypted boolean config (loaded from DECRYPT_CREDENTIALS with inverted logic)
+    if [[ -z "$credentials_encrypted" && -n "${DECRYPT_CREDENTIALS:-}" ]]; then
+        local decrypt_credentials_config="$DECRYPT_CREDENTIALS"
+        decrypt_credentials_config=$(echo "$decrypt_credentials_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
+        if [[ "$decrypt_credentials_config" == "true" || "$decrypt_credentials_config" == "1" || "$decrypt_credentials_config" == "yes" || "$decrypt_credentials_config" == "on" ]]; then
+            credentials_encrypted=false
+            credentials_encrypted_source="config"
+        elif [[ "$decrypt_credentials_config" == "false" || "$decrypt_credentials_config" == "0" || "$decrypt_credentials_config" == "no" || "$decrypt_credentials_config" == "off" ]]; then
+            credentials_encrypted=true
+            credentials_encrypted_source="config"
+        else
+            log WARN "Invalid DECRYPT_CREDENTIALS value in config: '$decrypt_credentials_config'. Must be true/false. Using default: false (encrypted)"
+            credentials_encrypted=true
+            credentials_encrypted_source="default"
+        fi
+    fi
+
+    if [[ -z "$assume_defaults" && -n "${ASSUME_DEFAULTS:-}" ]]; then
+        local assume_defaults_config="$ASSUME_DEFAULTS"
+        assume_defaults_config=$(echo "$assume_defaults_config" | tr -d '"\047' | tr '[:upper:]' '[:lower:]' | xargs)
+        if [[ "$assume_defaults_config" == "true" || "$assume_defaults_config" == "1" || "$assume_defaults_config" == "yes" || "$assume_defaults_config" == "on" ]]; then
+            assume_defaults=true
+            assume_defaults_source="config"
+        elif [[ "$assume_defaults_config" == "false" || "$assume_defaults_config" == "0" || "$assume_defaults_config" == "no" || "$assume_defaults_config" == "off" ]]; then
+            assume_defaults=false
+            assume_defaults_source="config"
+        else
+            log WARN "Invalid ASSUME_DEFAULTS value in config: '$assume_defaults_config'. Must be true/false. Using default: false"
+            assume_defaults=false
+            assume_defaults_source="default"
+        fi
+    fi
+
+    # Handle alternate credentials folder name for Git backups/restores
+    if [[ -n "${CREDENTIALS_FOLDER_NAME:-}" ]]; then
+        local credentials_folder_config="$CREDENTIALS_FOLDER_NAME"
+        credentials_folder_config=$(echo "$credentials_folder_config" | tr -d '"\047' | xargs)
+        credentials_folder_config="${credentials_folder_config%%/}"
+        if [[ -z "$credentials_folder_config" ]]; then
+            log WARN "CREDENTIALS_FOLDER_NAME in config is empty after normalization. Using default: .credentials"
+            credentials_folder_name=".credentials"
+        else
+            credentials_folder_name="$credentials_folder_config"
+            log DEBUG "Using configured credentials folder: $credentials_folder_name"
+        fi
+    fi
+
+    # === PATH SETTINGS ===
+    if [[ -z "$local_backup_path" && -n "${LOCAL_BACKUP_PATH:-}" ]]; then
+        local_backup_path="$LOCAL_BACKUP_PATH"
+        local_backup_path_source="config"
+    fi
+
+    if [[ -z "$local_rotation_limit" && -n "${LOCAL_ROTATION_LIMIT:-}" ]]; then
+        local_rotation_limit="$LOCAL_ROTATION_LIMIT"
+        local_rotation_limit_source="config"
+    fi
+
+    if [[ "$github_path_source" != "cli" && "$github_path_source" != "interactive" && -z "$github_path" && -n "${GITHUB_PATH:-}" ]]; then
+        local raw_github_path="$GITHUB_PATH"
+        local normalized_github_path
+        normalized_github_path="$(normalize_github_path_prefix "$raw_github_path")"
+        if [[ -z "$normalized_github_path" ]]; then
+            if [[ -n "$raw_github_path" ]]; then
+                log WARN "Configured GITHUB_PATH '$raw_github_path' contained no usable characters after normalization; ignoring."
+            fi
+            github_path=""
+        else
+            if [[ "$normalized_github_path" != "${raw_github_path#/}" && "$verbose" == "true" ]]; then
+                log DEBUG "Normalized GITHUB_PATH from '$raw_github_path' to '$normalized_github_path'"
+            fi
+            github_path="$normalized_github_path"
+            github_path_source="config"
+        fi
+    fi
+
+    if [[ "${n8n_path_source:-unset}" == "unset" || "${n8n_path_source:-unset}" == "default" ]]; then
+        if [[ -n "${N8N_PATH:-}" ]]; then
+            set_n8n_path "$N8N_PATH" "config"
+        fi
+    fi
+
+    if [[ -n "${N8N_PROJECT:-}" ]]; then
+        if [[ -z "$project_name_source" || "$project_name_source" == "unset" || "$project_name_source" == "default" ]]; then
+            set_project_from_path "$N8N_PROJECT"
+            project_name_source="config"
+        fi
+    fi
+
+    # === N8N API SETTINGS ===
+    if [[ -z "$n8n_base_url" && -n "${N8N_BASE_URL:-}" ]]; then
+        n8n_base_url="$N8N_BASE_URL"
+    fi
+
+    if [[ -z "$n8n_api_key" && -n "${N8N_API_KEY:-}" ]]; then
+        n8n_api_key="$N8N_API_KEY"
+    fi
+
+    if [[ -z "$n8n_session_credential" ]]; then
+        if [[ -n "${N8N_LOGIN_CREDENTIAL_NAME:-}" ]]; then
+            n8n_session_credential="$N8N_LOGIN_CREDENTIAL_NAME"
+        elif [[ -n "${N8N_LOGIN_CREDENTIAL_NAME_NAME:-}" ]]; then
+            n8n_session_credential="$N8N_LOGIN_CREDENTIAL_NAME_NAME"
+        fi
+    fi
+
+    if [[ -z "$git_commit_name" && -n "${GIT_COMMIT_NAME:-}" ]]; then
+        git_commit_name="$GIT_COMMIT_NAME"
+    fi
+
+    if [[ -z "$git_commit_email" && -n "${GIT_COMMIT_EMAIL:-}" ]]; then
+        git_commit_email="$GIT_COMMIT_EMAIL"
+    fi
+
+    # Backward compatibility: allow direct email/password configuration if still provided
+    if [[ -z "$n8n_email" && -n "${N8N_EMAIL:-}" ]]; then
+        n8n_email="$N8N_EMAIL"
+    fi
+
+    if [[ -z "$n8n_password" && -n "${N8N_PASSWORD:-}" ]]; then
+        n8n_password="$N8N_PASSWORD"
+    fi
+
+    # === OTHER SETTINGS ===
+    if [[ -z "$restore_type" && -n "${RESTORE_TYPE:-}" ]]; then
+        restore_type="$RESTORE_TYPE"
+    fi
+
+    if [[ -z "$log_file" && -n "${LOG_FILE:-}" ]]; then
+        log_file="$LOG_FILE"
+    fi
+
     # === SET DEFAULTS FOR UNSET VALUES ===
     # Only set defaults if no value was provided via command line or config
     
@@ -1047,7 +1136,7 @@ load_config() {
     # === DEBUG OUTPUT ===
     if [[ "$config_found" == "true" ]]; then
         log DEBUG "Configuration loaded successfully"
-        log DEBUG "Storage: workflows=($workflows) $(format_storage_value $workflows), credentials=($credentials) $(format_storage_value $credentials)"
+        log DEBUG "Storage: workflows=($workflows) $(format_storage_value "$workflows"), credentials=($credentials) $(format_storage_value "$credentials")"
         local effective_prefix
         effective_prefix="$(effective_repo_prefix)"
         if [[ -n "$effective_prefix" ]]; then
@@ -1089,7 +1178,6 @@ check_github_access() {
     fi
     
     local http_code="${response: -3}"
-    local body="${response%???}"
     
     case "$http_code" in
         200) 
@@ -1131,13 +1219,13 @@ dockExec() {
         fi
         
         if [ "$verbose" = "true" ] && [ -n "$filtered_output" ]; then
-            log DEBUG "Container output:\n$(echo "$filtered_output" | sed 's/^/  /')"
+            log DEBUG $'Container output:\n  '"${filtered_output//$'\n'/$'\n  '}"
         fi
         
         if [ $exit_code -ne 0 ]; then
             log ERROR "Command failed in container (Exit Code: $exit_code): $cmd"
             if [ "$verbose" != "true" ] && [ -n "$filtered_output" ]; then
-                log ERROR "Container output:\n$(echo "$filtered_output" | sed 's/^/  /')"
+                log ERROR $'Container output:\n  '"${filtered_output//$'\n'/$'\n  '}"
             fi
             return 1
         fi
@@ -1161,13 +1249,13 @@ dockExecAsRoot() {
         output=$(docker exec --user root "$container_id" sh -c "$cmd" 2>&1) || exit_code=$?
 
         if [ "$verbose" = "true" ] && [ -n "$output" ]; then
-            log DEBUG "Container output (root):\n$(echo "$output" | sed 's/^/  /')"
+            log DEBUG $'Container output (root):\n  '"${output//$'\n'/$'\n  '}"
         fi
 
         if [ $exit_code -ne 0 ]; then
             log ERROR "Command failed as root in container (Exit Code: $exit_code): $cmd"
             if [ "$verbose" != "true" ] && [ -n "$output" ]; then
-                log ERROR "Container output (root):\n$(echo "$output" | sed 's/^/  /')"
+                log ERROR $'Container output (root):\n  '"${output//$'\n'/$'\n  '}"
             fi
             return 1
         fi

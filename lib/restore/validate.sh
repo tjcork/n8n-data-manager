@@ -24,9 +24,12 @@ reconcile_imported_workflow_ids() {
     fi
 
     # Create indexes of workflows for fast lookup
-    local pre_workflows_by_id=$(mktemp -t n8n-pre-ids-XXXXXX.json)
-    local post_workflows_by_id=$(mktemp -t n8n-post-ids-XXXXXX.json)
-    local new_workflows_by_name=$(mktemp -t n8n-new-names-XXXXXX.json)
+    local pre_workflows_by_id
+    pre_workflows_by_id=$(mktemp -t n8n-pre-ids-XXXXXX.json)
+    local post_workflows_by_id
+    post_workflows_by_id=$(mktemp -t n8n-post-ids-XXXXXX.json)
+    local new_workflows_by_name
+    new_workflows_by_name=$(mktemp -t n8n-new-names-XXXXXX.json)
     
     # Build pre-import ID index
     if [[ -n "$pre_import_snapshot" && -f "$pre_import_snapshot" ]]; then
@@ -50,7 +53,8 @@ reconcile_imported_workflow_ids() {
     ' > "$new_workflows_by_name"
     
     # Process manifest line by line and update in place
-    local reconciled_tmp=$(mktemp -t n8n-reconciled-XXXXXX.ndjson)
+    local reconciled_tmp
+    reconciled_tmp=$(mktemp -t n8n-reconciled-XXXXXX.ndjson)
     local created=0 updated=0 unresolved=0
     local line_count=0
     
@@ -60,7 +64,7 @@ reconcile_imported_workflow_ids() {
         
         # Skip lines that aren't valid JSON
         if ! printf '%s' "$entry_line" | jq empty 2>/dev/null; then
-            if [[ "$verbose" == "true" ]]; then
+            if [[ "${verbose:-false}" == "true" ]]; then
                 log DEBUG "Skipping invalid JSON line in manifest"
             fi
             continue
@@ -69,12 +73,22 @@ reconcile_imported_workflow_ids() {
         line_count=$((line_count + 1))
         
         # Extract key fields from manifest entry
-        local manifest_id=$(printf '%s' "$entry_line" | jq -r '.id // ""')
-    local existing_id=$(printf '%s' "$entry_line" | jq -r '.existingWorkflowId // ""')
-    local original_id=$(printf '%s' "$entry_line" | jq -r '.originalWorkflowId // ""')
-    local assigned_id=$(printf '%s' "$entry_line" | jq -r '.assignedWorkflowId // ""')
-        local entry_name=$(printf '%s' "$entry_line" | jq -r '.name // "" | ascii_downcase')
-        local sanitize_note=$(printf '%s' "$entry_line" | jq -r '.sanitizedIdNote // ""')
+        local manifest_id
+        manifest_id=$(printf '%s' "$entry_line" | jq -r '.id // ""')
+        local existing_id
+        existing_id=$(printf '%s' "$entry_line" | jq -r '.existingWorkflowId // ""')
+        local original_id
+        original_id=$(printf '%s' "$entry_line" | jq -r '.originalWorkflowId // ""')
+        local assigned_id
+        assigned_id=$(printf '%s' "$entry_line" | jq -r '.assignedWorkflowId // ""')
+        local entry_name
+        entry_name=$(printf '%s' "$entry_line" | jq -r '.name // "" | ascii_downcase')
+        local sanitize_note
+        sanitize_note=$(printf '%s' "$entry_line" | jq -r '.sanitizedIdNote // ""')
+        local skip_original_id="false"
+        if [[ "$sanitize_note" == "id_conflict_in_batch" || "$sanitize_note" == "id_conflict_different_workflow" ]]; then
+            skip_original_id="true"
+        fi
         
         local resolved_id="" resolution_strategy="" resolution_note=""
         
@@ -95,7 +109,7 @@ reconcile_imported_workflow_ids() {
         fi
         
         # Strategy 3: original-workflow-id - Check if originalWorkflowId is in post-import
-        if [[ -z "$resolved_id" && -n "$original_id" ]]; then
+        if [[ -z "$resolved_id" && -n "$original_id" && "$skip_original_id" != "true" ]]; then
             if jq -e --arg id "$original_id" '.[$id] != null' "$post_workflows_by_id" &>/dev/null; then
                 resolved_id="$original_id"
                 resolution_strategy="original-workflow-id"
@@ -112,7 +126,8 @@ reconcile_imported_workflow_ids() {
         
         # Strategy 4: name-only - Check if there's exactly one new workflow with this name
         if [[ -z "$resolved_id" && -n "$entry_name" ]]; then
-            local name_matches=$(jq --arg name "$entry_name" '.[$name] // [] | length' "$new_workflows_by_name")
+            local name_matches
+            name_matches=$(jq --arg name "$entry_name" '.[$name] // [] | length' "$new_workflows_by_name")
             if [[ "$name_matches" == "1" ]]; then
                 resolved_id=$(jq -r --arg name "$entry_name" '.[$name][0].id // ""' "$new_workflows_by_name")
                 resolution_strategy="name-only"
@@ -138,7 +153,8 @@ reconcile_imported_workflow_ids() {
             fi
 
             # Successfully resolved - add reconciliation metadata
-            local updated_entry=$(printf '%s' "$entry_line" | jq -c \
+            local updated_entry
+            updated_entry=$(printf '%s' "$entry_line" | jq -c \
                 --arg id "$resolved_id" \
                 --arg strategy "$resolution_strategy" \
                 --arg outcome "$import_outcome" \
@@ -161,7 +177,8 @@ reconcile_imported_workflow_ids() {
             fi
         else
             # Could not resolve - mark as unresolved
-            local updated_entry=$(printf '%s' "$entry_line" | jq -c \
+            local updated_entry
+            updated_entry=$(printf '%s' "$entry_line" | jq -c \
                 --arg note "$resolution_note" \
                 '.idReconciled = false | 
                  .idResolutionStrategy = "unresolved" | 
@@ -178,7 +195,7 @@ reconcile_imported_workflow_ids() {
         mv "$reconciled_tmp" "$output_path"
     else
         log ERROR "Reconciliation produced empty manifest (processed $line_count lines)"
-        rm -f "$reconciled_tmp" "$pre_workflows_by_id" "$post_workflows_by_id" "$post_workflows_by_meta" "$new_workflows_by_name"
+        rm -f "$reconciled_tmp" "$pre_workflows_by_id" "$post_workflows_by_id" "$new_workflows_by_name"
         return 1
     fi
     
@@ -192,7 +209,6 @@ reconcile_imported_workflow_ids() {
     fi
     
     # Export metrics for summary
-    local total_workflows=$((created + updated))
     local post_count
     if ! post_count=$(jq -r "$WORKFLOW_COUNT_FILTER" "$post_import_snapshot" 2>/dev/null); then
         post_count=0
@@ -205,7 +221,7 @@ reconcile_imported_workflow_ids() {
     export RESTORE_POST_IMPORT_COUNT="$post_count"
     export RESTORE_WORKFLOWS_TOTAL="$line_count"
     
-    if [[ "$verbose" == "true" ]]; then
+    if [[ "${verbose:-false}" == "true" ]]; then
         log DEBUG "Reconciliation complete: $line_count workflows, $created created, $updated updated, $unresolved unresolved"
     fi
     
